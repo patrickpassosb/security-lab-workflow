@@ -1,0 +1,14 @@
+sandboxes/
+tools/
+wordlists/
+findings/
+targets/
+proxy/
+.DS_Store
+*.swp
+*.swo
+*~
+.venv/
+node_modules/
+__pycache__/
+*.pyc

@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+read -r -s -p "Caido PAT: " CAIDO_PAT_INPUT
+printf '\n'
+
+if [ -z "$CAIDO_PAT_INPUT" ]; then
+  echo "No PAT provided." >&2
+  exit 1
+fi
+
+caido-mode setup "$CAIDO_PAT_INPUT"
+unset CAIDO_PAT_INPUT
+caido-mode auth-status
+caido-mode health
+caido-mode projects

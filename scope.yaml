@@ -1,0 +1,96 @@
+# Scope file — CTF and authorized engagements
+# Read by: ctf-workflow, scope skills before any tool runs
+# Update this file per engagement. The agent MUST refuse to act on a target
+# that isn't in `in_scope` (or that is in `denied`).
+
+engagement:
+  name: "<CTF_NAME>"
+  date: "2026-07-04"
+  start_time_utc: "2026-07-04T13:00:00Z"   # 8 AM UTC-5
+  duration_hours: 12
+  format: individual
+  authorized_by: "<CTF_ORG> (CTF organizer)"
+  target_environment: "CTF platform (URL provided at event start)"
+
+# Hosts / domains the engagement explicitly authorizes.
+# Wildcards supported. IPs allowed.
+in_scope:
+  - pattern: "*.example.ctf"
+    note: "Primary CTF platform (confirm URL at event start)"
+  - pattern: "10.*"
+    note: "CTF internal network (likely)"
+  - pattern: "172.16.*"
+    note: "Docker bridge (vulhub-style)"
+  - pattern: "localhost"
+    note: "Local practice targets (vulhub)"
+
+# Explicitly denied. Tools must NEVER touch these.
+denied:
+  - pattern: "*.gov"
+    reason: "Government hosts — never in scope"
+  - pattern: "*.mil"
+    reason: "Military hosts — never in scope"
+  - pattern: "*.edu"
+    reason: "Educational institutions — never in scope"
+  - pattern: "target.example.ctf"
+    reason: "<CTF_ORG> production — only the CTF platform is in scope"
+  - pattern: "github.com"
+    reason: "Don't hammer GitHub from the agent (rate limits + unrelated)"
+
+# Rate limits to apply to all tools. Agents must not exceed these.
+rate_limits:
+  nuclei_rps: 25               # requests per second
+  ffuf_rate: "10-50ms jitter"  # per-request random delay
+  httpx_threads: 50
+  nmap_timing: "T3"            # polite default
+  global_max_parallel: 8       # don't run more than 8 tools in parallel
+
+# Authorized techniques. Anything not here requires explicit human approval.
+techniques_allowed:
+  - passive_recon
+  - active_recon
+  - web_app_testing
+  - api_testing
+  - jwt_oauth_attacks
+  - sqli
+  - xss
+  - ssrf
+  - ssti
+  - idor
+  - file_upload
+  - deserialization
+  - directory_fuzzing
+  - subdomain_enum
+  - nuclei_template_scans
+  - jwt_attacks
+  - parameter_pollution
+  - race_conditions
+  - auth_bypass
+
+techniques_require_approval:
+  - dos_ddos
+  - ddos_amplification
+  - physical_attacks
+  - social_engineering
+  - supply_chain_attacks
+  - zero_day_exploitation_on_prod
+
+# Evidence collection. Every tool run should be logged.
+evidence:
+  audit_log: "${HACKING_LAB}/findings/.agent-audit.jsonl"
+  findings_dir: "${HACKING_LAB}/findings/ctf/<challenge-name>/"
+  vault_writeups: "${VAULT_DIR}/Cybersecurity/CTFs/<CTF_NAME>/99 - Writeups/"
+  format: "one folder per challenge: {evidence, exploit, writeup.md}"
+
+# Reporting. The agent drafts, the human reviews.
+reporting:
+  draft_template: "PTES-style"  # executive summary, methodology, findings, evidence
+  submit_via: "CTF platform flag submission + writeup"
+  deadline: "end of CTF (12h from start)"
+
+# Notes for the human
+notes:
+  - "Update `in_scope` patterns as the CTF reveals more targets."
+  - "First bloods are time-sensitive. Don't be polite on the easy challenges."
+  - "Hard challenges (>90 min with no progress): move on, come back later."
+  - "Hydrate. Stand up every 30 min. Marathon = endurance."

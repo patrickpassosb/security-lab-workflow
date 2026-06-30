@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="${HACKING_LAB}/tools/jwt_tool"
+exec "$ROOT/.venv/bin/python" "$ROOT/jwt_tool.py" "$@"

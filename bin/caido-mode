@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="${CAIDO_MODE_DIR}"
+cd "$ROOT"
+exec npx tsx caido-client.ts "$@"
