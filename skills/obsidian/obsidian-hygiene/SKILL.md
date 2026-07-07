@@ -31,7 +31,7 @@ The Obsidian vault decays if not maintained. Stale notes, broken wikilinks, and 
 ### Method 1 — Bash (works even if Obsidian app isn't running)
 
 ```bash
-VAULT=${VAULT_DIR}
+VAULT="${VAULT_DIR:-$HOME/obsidian-vault}"
 
 # 1. Find stale notes (>90 days, no inbound links)
 echo "=== Stale notes ==="

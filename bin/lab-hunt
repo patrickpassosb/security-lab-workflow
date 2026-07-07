@@ -1,0 +1,238 @@
+#!/usr/bin/env python3
+"""lab-hunt — one-command CTF challenge starter.
+
+Combines everything into a single command:
+  1. Scope check
+  2. Create workspace (lab-new)
+  3. Query gbrain for similar challenges
+  4. Run automated first-pass pipeline (lab-firstpass)
+  5. Generate custom wordlist from JS/wayback (lab-wordlist)
+  6. Parse the report and write initial hypotheses to solve_log.md
+  7. Print: "Ready to hunt. Check challenges/<name>/recon/FIRSTPASS_REPORT.md"
+
+Usage:
+    lab-hunt <url> --name <challenge-name> --engagement <name>
+
+Example:
+    lab-hunt http://target.example.ctf --name sqli-1 --engagement ctf-example
+
+Run from inside a program folder (ctfs/ctf-example/ or bounties/bounty-example/).
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import re
+import subprocess
+import sys
+import time
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+LAB = Path(os.environ.get("HACKING_LAB", os.path.expanduser("~/security-lab")))
+
+
+def log(msg: str) -> None:
+    ts = datetime.now(timezone.utc).strftime("%H:%M:%S")
+    print(f"[{ts}] {msg}", flush=True)
+
+
+def run_cmd(cmd: list[str], timeout: int = 300) -> tuple[int, str, str]:
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        return result.returncode, result.stdout or "", result.stderr or ""
+    except subprocess.TimeoutExpired:
+        return 124, "", "TIMEOUT"
+    except FileNotFoundError:
+        return 127, "", f"Not found: {cmd[0]}"
+
+
+def main() -> int:
+    if len(sys.argv) < 2 or sys.argv[1] in ("-h", "--help"):
+        print(__doc__)
+        return 1
+
+    url = ""
+    name = ""
+    engagement = ""
+
+    idx = 1
+    while idx < len(sys.argv):
+        arg = sys.argv[idx]
+        if arg == "--name" and idx + 1 < len(sys.argv):
+            name = sys.argv[idx + 1]
+            idx += 2
+        elif arg.startswith("--name="):
+            name = arg.split("=", 1)[1]
+            idx += 1
+        elif arg == "--engagement" and idx + 1 < len(sys.argv):
+            engagement = sys.argv[idx + 1]
+            idx += 2
+        elif arg.startswith("--engagement="):
+            engagement = arg.split("=", 1)[1]
+            idx += 1
+        elif not arg.startswith("-"):
+            url = arg
+            idx += 1
+        else:
+            idx += 1
+
+    if not url:
+        print("ERROR: URL is required")
+        return 1
+    if not name:
+        print("ERROR: --name is required")
+        return 1
+
+    # Resolve engagement from workspace if not specified
+    if not engagement:
+        eng_file = Path.cwd() / "engagement.txt"
+        if eng_file.exists():
+            engagement = eng_file.read_text().strip()
+    if not engagement:
+        print("ERROR: --engagement is required (or run from a workspace with engagement.txt)")
+        return 1
+
+    start_time = time.time()
+    log(f"=== LAB-HUNT: {url} (challenge: {name}, engagement: {engagement}) ===")
+    log("")
+
+    # Step 1: Scope check
+    log("Step 1/6: Scope check")
+    code, stdout, stderr = run_cmd([str(LAB / "bin" / "lab-scope"), url, "--engagement", engagement])
+    print(f"  {stdout.strip()}")
+    if code == 2:
+        log("DENIED — aborting")
+        return 2
+    if code == 3:
+        log("WARNING: target not in scope — add to engagement scope file first")
+        return 3
+
+    # Step 2: Create workspace
+    log("Step 2/6: Create workspace")
+    code, stdout, stderr = run_cmd([str(LAB / "bin" / "lab-new"), "ctf", name, "--target", url, "--engagement", engagement])
+    print(stdout)
+    if code != 0:
+        log(f"ERROR: lab-new failed (exit {code})")
+        return code
+
+    # Determine workspace path
+    cwd = Path.cwd()
+    if (cwd / "AGENTS.md").exists():
+        workspace = cwd / "challenges" / name
+    else:
+        workspace = LAB / "findings" / "ctf" / name
+
+    if not workspace.exists():
+        log(f"ERROR: workspace not found at {workspace}")
+        return 1
+
+    # Step 3: Query gbrain for similar challenges
+    log("Step 3/6: Query gbrain for similar challenges")
+    gbrain_queries = [
+        url.split("/")[2] if "://" in url else url,  # hostname
+        "CTF web challenge",
+    ]
+    gbrain_results = []
+    for query in gbrain_queries:
+        code, stdout, stderr = run_cmd(["gbrain", "search", query], timeout=15)
+        if code == 0 and stdout:
+            # Extract top 3 results
+            lines = stdout.splitlines()[:5]
+            gbrain_results.extend(lines)
+            for line in lines:
+                print(f"  gbrain: {line[:100]}")
+
+    # Save gbrain results
+    gbrain_path = workspace / "recon" / "gbrain-context.txt"
+    gbrain_path.parent.mkdir(parents=True, exist_ok=True)
+    gbrain_path.write_text("\n".join(gbrain_results) + "\n", encoding="utf-8")
+
+    # Step 4: Run first-pass pipeline
+    log("Step 4/6: Run automated first-pass pipeline")
+    # Pass the workspace recon dir as output so artifacts land in the right place
+    firstpass_output = str(workspace / "recon")
+    code, stdout, stderr = run_cmd([str(LAB / "bin" / "lab-firstpass"), url, "--engagement", engagement, "--output", firstpass_output], timeout=300)
+    print(stdout)
+
+    # Step 5: Generate custom wordlist
+    log("Step 5/6: Generate custom wordlist from JS/wayback")
+    # Run from inside the workspace so lab-wordlist finds recon/endpoints.txt
+    wordlist_code, wordlist_stdout, wordlist_stderr = run_cmd(["bash", "-c", f"cd {workspace} && {LAB / 'bin' / 'lab-wordlist'} {url}"], timeout=60)
+    if wordlist_code == 0:
+        wordlist_path = workspace / "recon" / "custom-wordlist.txt"
+        print(f"  Custom wordlist: {wordlist_path}")
+    else:
+        print(f"  Wordlist generation skipped (exit {wordlist_code})")
+
+    # Step 6: Write initial hypotheses to solve_log.md
+    log("Step 6/6: Write initial hypotheses to solve_log.md")
+    solve_log = workspace / "solve_log.md"
+    report_path = workspace / "recon" / "FIRSTPASS_REPORT.md"
+
+    hypotheses = []
+    if report_path.exists():
+        report = report_path.read_text(encoding="utf-8")
+        # Extract interesting findings from the report
+        if "angularjs" in report.lower() or "angular" in report.lower():
+            hypotheses.append(("H1", "AngularJS app", "Test Angular template injection and API routes", "Check if Angular expressions are evaluated server-side"))
+        if "graphql" in report.lower() and "DETECTED" in report:
+            hypotheses.append(("H2", "GraphQL endpoint", "Test introspection, IDOR via queries, mutation auth bypass", "Run graphw00f + introspection query"))
+        if "jetty" in report.lower():
+            hypotheses.append(("H3", "Jetty server", "Check for known Jetty CVEs and HTTP smuggling", "Run smuggler against target"))
+        if "solr" in report.lower():
+            hypotheses.append(("H4", "Apache Solr", "Check for Solr RCE CVEs (Log4Shell, velocity template)", "Test CVE-2021-44228 and Solr velocity templates"))
+        # Check for endpoints
+        endpoints_file = workspace / "recon" / "endpoints.txt"
+        if endpoints_file.exists():
+            endpoint_count = len(endpoints_file.read_text().splitlines())
+            if endpoint_count > 0:
+                hypotheses.append(("H5", f"{endpoint_count} endpoints found in JS", "Test each endpoint for IDOR and auth bypass", "Review endpoints.txt and test each manually"))
+        # Check for secrets
+        secrets_file = workspace / "recon" / "secretfinder-secrets.txt"
+        if secrets_file.exists() and secrets_file.stat().st_size > 0:
+            hypotheses.append(("H6", "Potential secrets in JS", "Verify if any found secrets are live API keys or tokens", "Review secretfinder output and test keys"))
+
+    if not hypotheses:
+        hypotheses.append(("H1", "initial recon", "Manual review of first-pass report and test high-value features", "Read FIRSTPASS_REPORT.md"))
+
+    # Append hypotheses to solve_log.md
+    if solve_log.exists():
+        content = solve_log.read_text(encoding="utf-8")
+        # Find the hypotheses table and add entries
+        hypo_section = "\n\n## Auto-Generated Hypotheses (from lab-hunt)\n\n"
+        hypo_section += "| id | surface | hypothesis | next test | finding | status |\n"
+        hypo_section += "|---|---|---|---|---|---|\n"
+        for hid, surface, hypothesis, next_test in hypotheses:
+            hypo_section += f"| {hid} | {surface} | {hypothesis} | {next_test} | pending | ACTIVE |\n"
+        hypo_section += f"\n*Generated by lab-hunt at {datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')}*\n"
+
+        # Insert before Failed Paths section
+        if "## Failed Paths" in content:
+            content = content.replace("## Failed Paths", hypo_section + "\n## Failed Paths")
+        else:
+            content += hypo_section
+        solve_log.write_text(content, encoding="utf-8")
+
+    elapsed = time.time() - start_time
+    log("")
+    log(f"=== LAB-HUNT COMPLETE ({elapsed:.0f}s) ===")
+    log(f"Workspace: {workspace}")
+    log(f"Report: {report_path}")
+    log(f"Solve log: {solve_log}")
+    log(f"")
+    log(f"Ready to hunt. Read the report and test the hypotheses.")
+    log(f"")
+    log(f"Next steps:")
+    log(f"  cd {workspace}")
+    log(f"  cat recon/FIRSTPASS_REPORT.md")
+    log(f"  cat solve_log.md  # review hypotheses")
+    log(f"  # Start testing each hypothesis manually")
+
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

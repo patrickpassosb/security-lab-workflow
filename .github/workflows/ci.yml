@@ -1,0 +1,68 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  shellcheck:
+    name: shellcheck (bash scripts)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install shellcheck
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y shellcheck
+      - name: Find bash scripts in bin/
+        id: find
+        run: |
+          set -e
+          # Anything in bin/ that is a regular file and not a .bak or __pycache__.
+          # shellcheck handles shebang-based detection; we pass files with a bash shebang.
+          scripts=""
+          for f in bin/*; do
+            [ -f "$f" ] || continue
+            case "$(basename "$f")" in
+              *.bak.*) continue ;;
+              __pycache__) continue ;;
+            esac
+            # Only check files that look like shell (bash/sh shebang or no extension).
+            head -n1 "$f" 2>/dev/null | grep -Eq '^#!.*(bash|/sh)' || continue
+            scripts="$scripts $f"
+          done
+          echo "scripts=$scripts" >> "$GITHUB_OUTPUT"
+      - name: Run shellcheck
+        run: |
+          set -e
+          shellcheck install.sh ${{ steps.find.outputs.scripts }}
+
+  ruff:
+    name: ruff (python scripts)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install ruff
+        run: pip install ruff
+      - name: Ruff check
+        run: ruff check bin/ templates/ install.sh
+
+  gitleaks:
+    name: gitleaks (secrets scan)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -13,7 +13,7 @@ description: |
 
 ```bash
 HASH="$1"
-WORK=${HACKING_LAB}/findings/ctf/crack
+WORK=~/security-lab/findings/ctf/crack
 mkdir -p $WORK
 
 # hashid / hashcat --identify (best for CTF)
@@ -49,19 +49,19 @@ Common hash lengths:
 ```bash
 # Default wordlists (in order of speed-to-find)
 # 1. rockyou (most common, fastest for easy CTF flags)
-hashcat -m 0 -a 0 "$HASH" ${HACKING_LAB}/wordlists/SecLists/Passwords/Leaked-Databases/rockyou.txt.tar.gz 2>/dev/null
+hashcat -m 0 -a 0 "$HASH" ~/security-lab/wordlists/SecLists/Passwords/Leaked-Databases/rockyou.txt.tar.gz 2>/dev/null
 
 # If rockyou is the priority, download separately (NOT in SecLists):
-test -f ${HACKING_LAB}/wordlists/rockyou.txt || \
+test -f ~/security-lab/wordlists/rockyou.txt || \
   curl -L https://github.com/brannondorsey/naive-hashcat/releases/download/data/rockyou.txt \
-    -o ${HACKING_LAB}/wordlists/rockyou.txt
+    -o ~/security-lab/wordlists/rockyou.txt
 
 # 2. Common-words (if rockyou fails)
-hashcat -m 0 -a 0 "$HASH" ${HACKING_LAB}/wordlists/SecLists/Passwords/Common-Credentials/10-million-password-list-top-1000000.txt
+hashcat -m 0 -a 0 "$HASH" ~/security-lab/wordlists/SecLists/Passwords/Common-Credentials/10-million-password-list-top-1000000.txt
 
 # 3. With mutations (rules)
-hashcat -m 0 -a 0 "$HASH" ${HACKING_LAB}/wordlists/SecLists/Passwords/Common-Credentials/10-million-password-list-top-1000000.txt \
-  -r ${HACKING_LAB}/wordlists/SecLists/Rules/best64.rule
+hashcat -m 0 -a 0 "$HASH" ~/security-lab/wordlists/SecLists/Passwords/Common-Credentials/10-million-password-list-top-1000000.txt \
+  -r ~/security-lab/wordlists/SecLists/Rules/best64.rule
 
 # 4. Pure brute force (last resort, GPU)
 hashcat -m 0 -a 3 "$HASH" ?a?a?a?a?a?a?a?a  # 8 chars, all printable
@@ -89,7 +89,7 @@ jwt-tool "$JWT" -C -d /tmp/wordlist.txt  # crack the HMAC secret
 
 ```bash
 HASH="$1"
-CRACKED=$(hashcat -m 0 -a 0 "$HASH" ${HACKING_LAB}/wordlists/rockyou.txt --show 2>/dev/null | awk -F: '{print $2}')
+CRACKED=$(hashcat -m 0 -a 0 "$HASH" ~/security-lab/wordlists/rockyou.txt --show 2>/dev/null | awk -F: '{print $2}')
 if [ -n "$CRACKED" ]; then
   echo "Cracked: $HASH -> $CRACKED" | tee -a $WORK/results.txt
   echo "{\"hash\":\"$HASH\",\"plain\":\"$CRACKED\",\"type\":\"md5\"}" >> $WORK/results.json
@@ -107,6 +107,6 @@ fi
 ## Output to vault
 
 ```bash
-obsidian append file="Cybersecurity/CTFs/<CTF_NAME>/01 - Methodology.md" \
+obsidian append file="Cybersecurity/CTFs/<CTF name>/01 - Methodology.md" \
   content="- $(date +%Y-%m-%d) crack $HASH: $(test -f $WORK/results.json && jq -r '.plain' $WORK/results.json || echo 'not cracked')"
 ```

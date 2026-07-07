@@ -1,0 +1,285 @@
+#!/usr/bin/env python3
+"""lab-scope — engagement-aware scope checker for the hacking lab.
+
+Reads the global ~/security-lab/scope.yaml (denied list + defaults) and merges
+it with a per-engagement scope file from ~/security-lab/engagements/<name>.yaml.
+
+Usage:
+    lab-scope <target> [--engagement <name>]   # check a target
+    lab-scope --engagement <name>              # print engagement scope summary
+    lab-scope --list                             # list all engagements
+
+Exit codes:
+    0 = OK (target is in scope)
+    2 = DENIED (target matches a denied pattern)
+    3 = UNKNOWN (target not in scope; ask human)
+"""
+
+from __future__ import annotations
+
+import fnmatch
+import json
+import os
+import re
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+from urllib.parse import urlparse
+from typing import Any
+
+import yaml
+
+LAB = Path(os.environ.get("HACKING_LAB", os.path.expanduser("~/security-lab")))
+GLOBAL_SCOPE = LAB / "scope.yaml"
+ENGAGEMENTS_DIR = LAB / "engagements"
+AUDIT_LOG = LAB / "findings" / ".agent-audit.jsonl"
+
+
+def parse_simple_yaml(path: Path) -> dict[str, Any]:
+    """Parse a YAML scope file using PyYAML."""
+    with open(path, encoding="utf-8") as f:
+        data = yaml.safe_load(f)
+    if not isinstance(data, dict):
+        return {}
+    return data
+
+
+def extract_host(target: str) -> str:
+    if "://" in target:
+        parsed = urlparse(target)
+        return (parsed.hostname or "").lower().strip(".")
+    # Strip path and port: "localhost:8983/path" -> "localhost"
+    host = target.split("/", 1)[0].lower().strip(".")
+    if ":" in host:
+        host = host.split(":", 1)[0]
+    return host
+
+
+def match_pattern(host: str, target: str, pattern: str) -> bool:
+    pat = pattern.lower().strip(".")
+    if fnmatch.fnmatch(host, pat):
+        return True
+    if fnmatch.fnmatch(target.lower(), pat):
+        return True
+    return False
+
+
+def load_global_scope() -> dict[str, Any]:
+    if not GLOBAL_SCOPE.exists():
+        return {}
+    return parse_simple_yaml(GLOBAL_SCOPE)
+
+
+def load_engagement_scope(name: str) -> dict[str, Any] | None:
+    path = ENGAGEMENTS_DIR / f"{name}.yaml"
+    if not path.exists():
+        return None
+    return parse_simple_yaml(path)
+
+
+def merge_scopes(global_scope: dict, engagement_scope: dict) -> dict:
+    merged = {"in_scope": [], "denied": [], "rate_limits": {}, "techniques_allowed": []}
+
+    global_denied = global_scope.get("denied", [])
+    eng_denied = engagement_scope.get("denied", [])
+    if isinstance(global_denied, list):
+        merged["denied"].extend(global_denied)
+    if isinstance(eng_denied, list):
+        merged["denied"].extend(eng_denied)
+
+    eng_in_scope = engagement_scope.get("in_scope", [])
+    if isinstance(eng_in_scope, list):
+        merged["in_scope"] = eng_in_scope
+
+    default_rl = global_scope.get("default_rate_limits", {})
+    eng_rl = engagement_scope.get("rate_limits", {})
+    if isinstance(default_rl, dict):
+        merged["rate_limits"].update(default_rl)
+    if isinstance(eng_rl, dict):
+        merged["rate_limits"].update(eng_rl)
+
+    merged["techniques_allowed"] = engagement_scope.get("techniques_allowed", [])
+    merged["techniques_require_approval"] = engagement_scope.get("techniques_require_approval", [])
+    merged["techniques_denied"] = engagement_scope.get("techniques_denied", [])
+
+    return merged
+
+
+def check_target(target: str, merged: dict) -> tuple[int, str]:
+    host = extract_host(target)
+    if not host:
+        return 3, f"Could not extract host from {target}"
+
+    for item in merged["denied"]:
+        pattern = item.get("pattern", "") if isinstance(item, dict) else str(item)
+        reason = item.get("reason", "") if isinstance(item, dict) else ""
+        if match_pattern(host, target, pattern):
+            return 2, f"DENIED: {host} matches denied pattern '{pattern}' ({reason})"
+
+    for item in merged["in_scope"]:
+        pattern = item.get("pattern", "") if isinstance(item, dict) else str(item)
+        note = item.get("note", "") if isinstance(item, dict) else ""
+        if match_pattern(host, target, pattern):
+            return 0, f"OK: {host} matches in-scope pattern '{pattern}' ({note})"
+
+    return 3, f"UNKNOWN: {host} is not in scope; ask human before proceeding"
+
+
+def list_engagements() -> int:
+    if not ENGAGEMENTS_DIR.exists():
+        print("No engagements directory found.")
+        return 1
+
+    files = sorted(ENGAGEMENTS_DIR.glob("*.yaml"))
+    if not files:
+        print("No engagements found.")
+        return 0
+
+    print(f"{'NAME':<30} {'TYPE':<10} {'STATUS'}")
+    print("-" * 55)
+    for f in files:
+        scope = load_engagement_scope(f.stem)
+        if scope is None:
+            continue
+        eng = scope.get("engagement", {})
+        if not isinstance(eng, dict):
+            eng = {}
+        name = eng.get("name", f.stem)
+        etype = eng.get("type", "?")
+        status = eng.get("status", "active")
+        print(f"{f.stem:<30} {etype:<10} {status}")
+    return 0
+
+
+def print_engagement_summary(name: str) -> int:
+    scope = load_engagement_scope(name)
+    if scope is None:
+        print(f"Engagement not found: {name}")
+        return 1
+
+    eng = scope.get("engagement", {})
+    if isinstance(eng, dict):
+        print(f"Name: {eng.get('name', name)}")
+        print(f"Type: {eng.get('type', '?')}")
+        print(f"Authorized by: {eng.get('authorized_by', '?')}")
+        print()
+
+    in_scope = scope.get("in_scope", [])
+    if isinstance(in_scope, list) and in_scope:
+        print("In-scope:")
+        for item in in_scope:
+            if isinstance(item, dict):
+                print(f"  {item.get('pattern', '?')}")
+            else:
+                print(f"  {item}")
+        print()
+
+    denied = scope.get("denied", [])
+    if isinstance(denied, list) and denied:
+        print("Denied (engagement-specific):")
+        for item in denied:
+            if isinstance(item, dict):
+                print(f"  {item.get('pattern', '?')} — {item.get('reason', '')}")
+            else:
+                print(f"  {item}")
+        print()
+
+    rl = scope.get("rate_limits", {})
+    if isinstance(rl, dict) and rl:
+        print("Rate limits:")
+        for k, v in rl.items():
+            print(f"  {k}: {v}")
+        print()
+
+    tech = scope.get("techniques_allowed", [])
+    if isinstance(tech, list) and tech:
+        print(f"Techniques allowed: {', '.join(str(t) for t in tech)}")
+
+    tech_approval = scope.get("techniques_require_approval", [])
+    if isinstance(tech_approval, list) and tech_approval:
+        print(f"Require approval: {', '.join(str(t) for t in tech_approval)}")
+
+    tech_denied = scope.get("techniques_denied", [])
+    if isinstance(tech_denied, list) and tech_denied:
+        print(f"Techniques denied: {', '.join(str(t) for t in tech_denied)}")
+
+    return 0
+
+
+def audit_log(target: str, result: str, engagement: str = "") -> None:
+    AUDIT_LOG.parent.mkdir(parents=True, exist_ok=True)
+    entry = {
+        "ts": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "action": "scope-check",
+        "target": target,
+        "engagement": engagement,
+        "result": result,
+    }
+    with open(AUDIT_LOG, "a", encoding="utf-8") as f:
+        f.write(json.dumps(entry) + "\n")
+
+
+def main() -> int:
+    args = sys.argv[1:]
+
+    if not args:
+        print(__doc__)
+        return 1
+
+    if args[0] == "--list":
+        return list_engagements()
+
+    engagement = ""
+    target = ""
+
+    i = 0
+    while i < len(args):
+        if args[i] == "--engagement" and i + 1 < len(args):
+            engagement = args[i + 1]
+            i += 2
+        elif args[i] == "--engagement":
+            print("--engagement needs a value")
+            return 1
+        elif args[i].startswith("--engagement="):
+            engagement = args[i].split("=", 1)[1]
+            i += 1
+        elif args[0] == "--engagement" and len(args) == 2:
+            return print_engagement_summary(args[1])
+        elif args[i].startswith("-") and args[i] != "--list":
+            print(f"Unknown option: {args[i]}")
+            return 1
+        else:
+            target = args[i]
+            i += 1
+
+    if not target and not engagement:
+        print(__doc__)
+        return 1
+
+    if not target and engagement:
+        return print_engagement_summary(engagement)
+
+    if target and not engagement:
+        print("Warning: no --engagement specified. Checking against global denied list only.")
+        global_scope = load_global_scope()
+        merged = merge_scopes(global_scope, {})
+        code, msg = check_target(target, merged)
+        print(msg)
+        audit_log(target, msg, "")
+        return code
+
+    eng_scope = load_engagement_scope(engagement)
+    if eng_scope is None:
+        print(f"ERROR: engagement '{engagement}' not found in {ENGAGEMENTS_DIR}")
+        return 1
+
+    global_scope = load_global_scope()
+    merged = merge_scopes(global_scope, eng_scope)
+    code, msg = check_target(target, merged)
+    print(msg)
+    audit_log(target, msg, engagement)
+    return code
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

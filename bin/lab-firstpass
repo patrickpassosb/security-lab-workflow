@@ -1,0 +1,521 @@
+#!/usr/bin/env python3
+"""lab-firstpass — automated first-pass recon pipeline for CTF challenges.
+
+Runs the full first-pass in one command:
+  1. HTTP headers, redirects, status codes, cookies
+  2. Tech fingerprint (nuclei tech-detect)
+  3. JS bundle download + endpoint extraction (LinkFinder)
+  4. JS secret scanning (SecretFinder, gitleaks)
+  5. Directory scan (ffuf, small wordlist, rate-limited)
+  6. CVE scan (nuclei CVE templates)
+  7. GraphQL detection (graphw00f)
+  8. OOB listener check (interactsh, if running)
+
+Outputs a structured JSON report + markdown summary.
+Saves all artifacts under the current workspace.
+
+Usage:
+    lab-firstpass <url> [--engagement <name>] [--output <dir>]
+
+The <url> is the target. Run this from inside a challenge workspace
+(e.g. ~/security-lab/ctfs/<ctf-name>/challenges/<challenge>/).
+
+If --engagement is not specified, reads engagement.txt from the workspace.
+If --output is not specified, writes to ./recon/ and ./web-attack/.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import re
+import subprocess
+import sys
+import time
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+LAB = Path(os.environ.get("HACKING_LAB", os.path.expanduser("~/security-lab")))
+AUDIT_LOG = LAB / ".audit.jsonl"
+
+# Tool paths
+TOOLS = {
+    "httpx": os.environ.get("HTTPX", "httpx"),
+    "nuclei": os.environ.get("NUCLEI", "nuclei"),
+    "ffuf": os.environ.get("FFUF", "ffuf"),
+    "linkfinder": "python3 -m linkfinder",
+    "secretfinder": os.environ.get("SECRETFINDER", "secretfinder"),
+    "graphw00f": os.environ.get("GRAPHW00F", "graphw00f"),
+    "gitleaks": os.environ.get("GITLEAKS", "gitleaks"),
+    "gf": os.environ.get("GF", "gf"),
+}
+
+WORDLIST_SMALL = LAB / "wordlists" / "SecLists" / "Discovery" / "Web-Content" / "raft-small-words.txt"
+NUCLEI_TECH = LAB / "wordlists" / "nuclei-templates" / "http" / "technologies"
+NUCLEI_CVES = LAB / "wordlists" / "nuclei-templates" / "http" / "cves"
+NUCLEI_VULNS = LAB / "wordlists" / "nuclei-templates" / "http" / "vulnerabilities"
+NUCLEI_EXPOSURES = LAB / "wordlists" / "nuclei-templates" / "http" / "exposures"
+
+
+def log(msg: str) -> None:
+    ts = datetime.now(timezone.utc).strftime("%H:%M:%S")
+    print(f"[{ts}] {msg}", flush=True)
+
+
+def run(cmd: list[str], timeout: int = 120, capture: bool = True) -> tuple[int, str, str]:
+    """Run a command, return (exit_code, stdout, stderr)."""
+    try:
+        result = subprocess.run(
+            cmd, capture_output=capture, text=True, timeout=timeout
+        )
+        return result.returncode, result.stdout or "", result.stderr or ""
+    except subprocess.TimeoutExpired:
+        return 124, "", "TIMEOUT"
+    except FileNotFoundError:
+        return 127, "", f"Tool not found: {cmd[0]}"
+
+
+def audit(action: str, target: str, engagement: str, detail: str = "") -> None:
+    entry = {
+        "ts": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "action": action,
+        "target": target,
+        "engagement": engagement,
+        "detail": detail,
+    }
+    try:
+        with open(AUDIT_LOG, "a", encoding="utf-8") as f:
+            f.write(json.dumps(entry) + "\n")
+    except Exception:
+        pass
+
+
+def step_httpx(url: str, outdir: Path) -> dict[str, Any]:
+    """Step 1: HTTP probe — headers, redirects, status, tech.
+    Probes both HTTP and HTTPS in parallel (CTF instances are often HTTPS-only
+    despite HTTP labels — this saves ~2 min per challenge).
+    """
+    log("Step 1/8: HTTP probe (httpx) — probing HTTP + HTTPS in parallel")
+    outpath = outdir / "httpx.json"
+
+    # Normalize URL and create HTTPS variant
+    https_url = url
+    if url.startswith("http://"):
+        https_url = "https://" + url[7:]
+    elif not url.startswith("https://") and not url.startswith("http://"):
+        https_url = "https://" + url
+
+    # Probe both in parallel
+    urls_to_probe = [url]
+    if https_url != url:
+        urls_to_probe.append(https_url)
+
+    code, stdout, stderr = run(
+        ["httpx", "-silent", "-json", "-title", "-tech-detect", "-status-code",
+         "-server", "-content-length", "-location", "-o", str(outpath),
+         "-u", ",".join(urls_to_probe)],
+        timeout=30,
+    )
+    result: dict[str, Any] = {"step": "httpx", "exit": code, "file": str(outpath)}
+    if outpath.exists():
+        try:
+            data = json.loads(outpath.read_text())
+            result["status"] = data.get("status_code")
+            result["title"] = data.get("title", "")
+            result["tech"] = data.get("tech", [])
+            result["location"] = data.get("location", "")
+            result["server"] = data.get("server", "")
+            log(f"  -> status={result['status']} title='{result['title']}' tech={result['tech']}")
+        except Exception:
+            result["error"] = "Failed to parse httpx output"
+    else:
+        result["error"] = stderr or "No output"
+        log(f"  -> ERROR: {result['error']}")
+    return result
+
+
+def step_nuclei_tech(url: str, outdir: Path) -> dict[str, Any]:
+    """Step 2: nuclei technology detection."""
+    log("Step 2/8: Tech fingerprint (nuclei)")
+    outpath = outdir / "nuclei-tech.json"
+    if not NUCLEI_TECH.exists():
+        return {"step": "nuclei_tech", "error": "nuclei templates not found", "skipped": True}
+    code, stdout, stderr = run(
+        ["nuclei", "-u", url, "-t", str(NUCLEI_TECH), "-j", "-silent", "-o", str(outpath)],
+        timeout=60,
+    )
+    findings = []
+    if outpath.exists():
+        for line in outpath.read_text().splitlines():
+            if line.strip():
+                try:
+                    d = json.loads(line)
+                    findings.append({"template": d.get("template-id", ""), "matched": d.get("matcher-name", "")})
+                except Exception:
+                    pass
+    log(f"  -> {len(findings)} tech detections")
+    return {"step": "nuclei_tech", "exit": code, "findings": findings, "file": str(outpath)}
+
+
+def step_download_js(url: str, outdir: Path) -> dict[str, Any]:
+    """Step 3: Download JS bundles and source maps from the page."""
+    log("Step 3/8: Download JS bundles + source maps")
+    jsdir = outdir / "js"
+    jsdir.mkdir(parents=True, exist_ok=True)
+    # Fetch the page HTML
+    code, stdout, stderr = run(["curl", "-s", "-L", "-k", url], timeout=15)
+    if code != 0 or not stdout:
+        return {"step": "download_js", "error": "Failed to fetch page", "exit": code}
+
+    # Extract JS URLs from HTML
+    js_urls = re.findall(r'(?:src|href)=["\']([^"\']*\.js[^"\']*)["\']', stdout)
+    js_urls = list(set(js_urls))[:20]  # cap at 20
+
+    downloaded = []
+    for js_url in js_urls:
+        if not js_url.startswith("http"):
+            # Relative URL — resolve against base
+            if js_url.startswith("//"):
+                js_url = "https:" + js_url
+            elif js_url.startswith("/"):
+                base = re.match(r'(https?://[^/]+)', url)
+                if base:
+                    js_url = base.group(1) + js_url
+                else:
+                    continue
+            else:
+                js_url = url.rstrip("/") + "/" + js_url
+
+        basename = js_url.split("/")[-1].split("?")[0]
+        if not basename.endswith(".js"):
+            basename += ".js"
+        outpath = jsdir / basename
+        c, _, _ = run(["curl", "-s", "-L", "-k", "-o", str(outpath), js_url], timeout=15)
+        if c == 0 and outpath.exists() and outpath.stat().st_size > 0:
+            downloaded.append({"url": js_url, "file": str(outpath), "size": outpath.stat().st_size})
+
+            # Check for sourceMappingURL in the JS file and download the .map
+            try:
+                js_content = outpath.read_text(encoding="utf-8", errors="ignore")
+                map_match = re.search(r'sourceMappingURL=(.+?\.map)', js_content)
+                if map_match:
+                    map_rel = map_match.group(1)
+                    # Resolve map URL relative to the JS URL
+                    if map_rel.startswith("http"):
+                        map_url = map_rel
+                    elif map_rel.startswith("/"):
+                        base = re.match(r'(https?://[^/]+)', js_url)
+                        map_url = base.group(1) + map_rel if base else map_rel
+                    else:
+                        map_url = js_url.rsplit("/", 1)[0] + "/" + map_rel
+
+                    map_basename = map_url.split("/")[-1].split("?")[0]
+                    map_path = jsdir / map_basename
+                    mc, _, _ = run(["curl", "-s", "-L", "-k", "-o", str(map_path), map_url], timeout=15)
+                    if mc == 0 and map_path.exists() and map_path.stat().st_size > 0:
+                        downloaded.append({"url": map_url, "file": str(map_path), "size": map_path.stat().st_size, "type": "source_map"})
+                        log(f"  -> Source map: {map_basename} ({map_path.stat().st_size} bytes)")
+            except Exception:
+                pass
+
+    log(f"  -> Downloaded {len(downloaded)} JS files + source maps")
+    return {"step": "download_js", "downloaded": downloaded, "dir": str(jsdir)}
+
+
+def step_linkfinder(jsdir: Path, outdir: Path) -> dict[str, Any]:
+    """Step 4a: Extract endpoints from JS bundles and source maps."""
+    log("Step 4/8: JS endpoint extraction (LinkFinder)")
+    all_endpoints: list[str] = []
+    if jsdir.exists():
+        # Scan both .js and .map files
+        for js_file in list(jsdir.glob("*.js")) + list(jsdir.glob("*.map")):
+            code, stdout, stderr = run(
+                ["python3", "-m", "linkfinder", "-i", str(js_file), "-o", "cli"],
+                timeout=30,
+            )
+            if stdout:
+                endpoints = [e.strip() for e in stdout.splitlines() if e.strip()]
+                all_endpoints.extend(endpoints)
+    # Dedupe
+    all_endpoints = sorted(set(all_endpoints))
+    outpath = outdir / "endpoints.txt"
+    outpath.write_text("\n".join(all_endpoints) + "\n", encoding="utf-8")
+    log(f"  -> {len(all_endpoints)} unique endpoints found")
+    return {"step": "linkfinder", "endpoints": all_endpoints[:50], "total": len(all_endpoints), "file": str(outpath)}
+
+
+def step_secretfinder(jsdir: Path, outdir: Path) -> dict[str, Any]:
+    """Step 4b: Find secrets in JS bundles."""
+    log("Step 5/8: JS secret scanning (SecretFinder + gitleaks)")
+    secrets: list[str] = []
+    if jsdir.exists():
+        for js_file in jsdir.glob("*.js"):
+            code, stdout, stderr = run(
+                ["secretfinder", "-i", str(js_file), "-o", "cli"],
+                timeout=30,
+            )
+            if stdout:
+                for line in stdout.splitlines():
+                    if line.strip() and "No" not in line[:5]:
+                        secrets.append(line.strip())
+
+    # Also run gitleaks on the JS dir
+    gitleaks_out = outdir / "gitleaks-js.json"
+    run(["gitleaks", "detect", "--source", str(jsdir), "--no-banner", "-r", str(gitleaks_out)],
+        timeout=30)
+
+    secrets = sorted(set(secrets))[:30]
+    log(f"  -> {len(secrets)} potential secrets found")
+    return {"step": "secretfinder", "secrets": secrets, "gitleaks_file": str(gitleaks_out)}
+
+
+def step_ffuf(url: str, outdir: Path) -> dict[str, Any]:
+    """Step 5: Quick directory scan (small wordlist, rate-limited)."""
+    log("Step 6/8: Directory scan (ffuf, small wordlist)")
+    if not WORDLIST_SMALL.exists():
+        return {"step": "ffuf", "error": "wordlist not found", "skipped": True}
+    outpath = outdir / "ffuf-dirs.json"
+    base_url = url.rstrip("/")
+    code, stdout, stderr = run(
+        ["ffuf", "-u", f"{base_url}/FUZZ", "-w", str(WORDLIST_SMALL),
+         "-mc", "200,301,302,401,403", "-t", "20", "-p", "0.05-0.2",
+         "-s", "-o", str(outpath), "-of", "json"],
+        timeout=120,
+    )
+    findings = []
+    if outpath.exists():
+        try:
+            data = json.loads(outpath.read_text())
+            results = data.get("results", [])
+            for r in results[:30]:
+                findings.append({"url": r.get("input", {}).get("FUZZ", ""), "status": r.get("status", 0)})
+        except Exception:
+            pass
+    log(f"  -> {len(findings)} directories found")
+    return {"step": "ffuf", "exit": code, "findings": findings[:20], "file": str(outpath)}
+
+
+def step_nuclei_cve(url: str, outdir: Path) -> dict[str, Any]:
+    """Step 6: nuclei CVE scan."""
+    log("Step 7/8: CVE scan (nuclei)")
+    outpath = outdir / "nuclei-cves.json"
+    templates = [str(NUCLEI_CVES), str(NUCLEI_VULNS), str(NUCLEI_EXPOSURES)]
+    templates = [t for t in templates if Path(t).exists()]
+    if not templates:
+        return {"step": "nuclei_cve", "error": "nuclei templates not found", "skipped": True}
+    cmd = ["nuclei", "-u", url, "-j", "-silent", "-o", str(outpath), "-severity", "critical,high,medium"]
+    for t in templates:
+        cmd.extend(["-t", t])
+    code, stdout, stderr = run(cmd, timeout=180)
+    findings = []
+    if outpath.exists():
+        for line in outpath.read_text().splitlines():
+            if line.strip():
+                try:
+                    d = json.loads(line)
+                    findings.append({
+                        "template": d.get("template-id", ""),
+                        "severity": d.get("info", {}).get("severity", ""),
+                        "name": d.get("info", {}).get("name", ""),
+                        "matched_at": d.get("matched-at", d.get("host", "")),
+                    })
+                except Exception:
+                    pass
+    log(f"  -> {len(findings)} CVE/vuln findings")
+    return {"step": "nuclei_cve", "exit": code, "findings": findings[:20], "file": str(outpath)}
+
+
+def step_graphql(url: str, outdir: Path) -> dict[str, Any]:
+    """Step 7: GraphQL detection."""
+    log("Step 8/8: GraphQL detection (graphw00f)")
+    code, stdout, stderr = run(
+        ["graphw00f", "-d", "-f", "-t", url],
+        timeout=20,
+    )
+    detected = "graphql" in stdout.lower() or "apollo" in stdout.lower() or "hasura" in stdout.lower()
+    if detected:
+        log(f"  -> GraphQL DETECTED")
+    else:
+        log(f"  -> No GraphQL detected")
+    return {"step": "graphql", "detected": detected, "output": stdout[:500]}
+
+
+def generate_report(url: str, results: list[dict], outdir: Path) -> Path:
+    """Generate markdown summary report."""
+    report_path = outdir / "FIRSTPASS_REPORT.md"
+    lines = [
+        f"# First-Pass Recon Report — {url}",
+        f"",
+        f"**Generated:** {datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')}",
+        f"**Target:** {url}",
+        f"",
+    ]
+
+    for r in results:
+        step = r.get("step", "unknown")
+        lines.append(f"## {step}")
+        if r.get("skipped"):
+            lines.append("*Skipped*\n")
+            continue
+        if r.get("error"):
+            lines.append(f"Error: {r['error']}\n")
+            continue
+
+        if step == "httpx":
+            lines.append(f"- Status: {r.get('status', '?')}")
+            lines.append(f"- Title: {r.get('title', '?')}")
+            lines.append(f"- Server: {r.get('server', '?')}")
+            lines.append(f"- Tech: {', '.join(r.get('tech', []))}")
+            lines.append(f"- Redirect: {r.get('location', 'none')}\n")
+        elif step == "nuclei_tech":
+            for f in r.get("findings", []):
+                lines.append(f"- {f['template']}: {f['matched']}")
+            lines.append("")
+        elif step == "download_js":
+            lines.append(f"Downloaded {len(r.get('downloaded', []))} JS bundles:")
+            for d in r.get("downloaded", []):
+                lines.append(f"- {d['file']} ({d['size']} bytes)")
+            lines.append("")
+        elif step == "linkfinder":
+            lines.append(f"Found {r.get('total', 0)} unique endpoints:")
+            for ep in r.get("endpoints", []):
+                lines.append(f"- {ep}")
+            lines.append("")
+        elif step == "secretfinder":
+            lines.append(f"Potential secrets:")
+            for s in r.get("secrets", []):
+                lines.append(f"- {s}")
+            lines.append("")
+        elif step == "ffuf":
+            lines.append(f"Directories found ({len(r.get('findings', []))}):")
+            for f in r.get("findings", []):
+                lines.append(f"- /{f['url']} (status {f['status']})")
+            lines.append("")
+        elif step == "nuclei_cve":
+            lines.append(f"CVE/vuln findings ({len(r.get('findings', []))}):")
+            for f in r.get("findings", []):
+                lines.append(f"- [{f['severity']}] {f['name']} — {f['matched_at']}")
+            lines.append("")
+        elif step == "graphql":
+            lines.append(f"GraphQL: {'DETECTED' if r.get('detected') else 'not detected'}")
+            lines.append("")
+
+    # Next steps
+    lines.append("## Recommended Next Steps")
+    lines.append("")
+    lines.append("1. Review endpoints from LinkFinder — test each for IDOR/auth bypass")
+    lines.append("2. Review secrets — check if any are live API keys or tokens")
+    lines.append("3. Review directories — check for admin panels, config files, backups")
+    lines.append("4. Review CVE findings — reproduce each with curl/exploit.py")
+    lines.append("5. If GraphQL detected — test introspection, IDOR via queries, mutation auth bypass")
+    lines.append("6. Record each lead as a hypothesis in solve_log.md")
+    lines.append("")
+
+    report_path.write_text("\n".join(lines), encoding="utf-8")
+    return report_path
+
+
+def main() -> int:
+    if len(sys.argv) < 2 or sys.argv[1] in ("-h", "--help"):
+        print(__doc__)
+        return 1
+
+    url = sys.argv[1]
+    engagement = ""
+    output_dir = ""
+
+    idx = 2
+    while idx < len(sys.argv):
+        if sys.argv[idx] == "--engagement" and idx + 1 < len(sys.argv):
+            engagement = sys.argv[idx + 1]
+            idx += 2
+        elif sys.argv[idx].startswith("--engagement="):
+            engagement = sys.argv[idx].split("=", 1)[1]
+            idx += 1
+        elif sys.argv[idx] == "--output" and idx + 1 < len(sys.argv):
+            output_dir = sys.argv[idx + 1]
+            idx += 2
+        elif sys.argv[idx].startswith("--output="):
+            output_dir = sys.argv[idx].split("=", 1)[1]
+            idx += 1
+        else:
+            idx += 1
+
+    # Resolve engagement from workspace if not specified
+    if not engagement:
+        eng_file = Path.cwd() / "engagement.txt"
+        if eng_file.exists():
+            engagement = eng_file.read_text().strip()
+
+    # Determine output dirs
+    cwd = Path.cwd()
+    if output_dir:
+        outdir = Path(output_dir)
+    else:
+        # Use recon/ if in a workspace, else current dir
+        if (cwd / "engagement.txt").exists() or (cwd / "solve_log.md").exists():
+            outdir = cwd / "recon"
+        else:
+            outdir = cwd / "firstpass-output"
+    outdir.mkdir(parents=True, exist_ok=True)
+    jsdir = outdir / "js"
+
+    # Scope check
+    if engagement:
+        log(f"Scope check: {url} (engagement: {engagement})")
+        scope = subprocess.run(
+            [str(LAB / "bin" / "lab-scope"), url, "--engagement", engagement],
+            capture_output=True, text=True,
+        )
+        print(f"  {scope.stdout.strip()}")
+        if scope.returncode == 2:
+            log("DENIED — aborting")
+            return 2
+        if scope.returncode == 3:
+            log("WARNING: target not in scope — proceeding anyway (add to engagement scope file)")
+
+    audit("lab-firstpass", url, engagement, "started")
+
+    start_time = time.time()
+    log(f"=== FIRST-PASS RECON: {url} ===")
+    log(f"Output: {outdir}")
+    log("")
+
+    results: list[dict] = []
+
+    # Run all steps
+    results.append(step_httpx(url, outdir))
+    results.append(step_nuclei_tech(url, outdir))
+    results.append(step_download_js(url, outdir))
+    results.append(step_linkfinder(jsdir, outdir))
+    results.append(step_secretfinder(jsdir, outdir))
+    results.append(step_ffuf(url, outdir))
+    results.append(step_nuclei_cve(url, outdir))
+    results.append(step_graphql(url, outdir))
+
+    # Generate report
+    log("")
+    log("Generating report...")
+    report_path = generate_report(url, results, outdir)
+
+    elapsed = time.time() - start_time
+    log(f"")
+    log(f"=== FIRST-PASS COMPLETE ({elapsed:.0f}s) ===")
+    log(f"Report: {report_path}")
+    log(f"Artifacts: {outdir}")
+
+    # Save JSON results
+    json_path = outdir / "firstpass-results.json"
+    json_path.write_text(json.dumps(results, indent=2), encoding="utf-8")
+    log(f"JSON: {json_path}")
+
+    audit("lab-firstpass", url, engagement, f"complete ({elapsed:.0f}s)")
+
+    # Print report path for the agent
+    print(f"\nREPORT={report_path}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

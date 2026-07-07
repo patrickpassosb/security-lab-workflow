@@ -28,8 +28,8 @@ python3 -c "import angr; print('angr', angr.__version__)" 2>&1
 
 ```bash
 BIN="$1"
-mkdir -p ${HACKING_LAB}/findings/ctf/$(basename $BIN)/binary
-WORK=${HACKING_LAB}/findings/ctf/$(basename $BIN)/binary
+mkdir -p ~/security-lab/findings/ctf/$(basename $BIN)/binary
+WORK=~/security-lab/findings/ctf/$(basename $BIN)/binary
 
 # File type + arch
 file "$BIN" | tee $WORK/triage.txt
@@ -163,6 +163,6 @@ Then route to `report-ctf` for the writeup.
 ## Output to vault
 
 ```bash
-obsidian append file="Cybersecurity/CTFs/<CTF_NAME>/01 - Methodology.md" \
+obsidian append file="Cybersecurity/CTFs/<CTF name>/01 - Methodology.md" \
   content="- $(date +%Y-%m-%d) binary-attack $BIN: vuln class $(jq -r '.vuln_class' $WORK/triage.json), flag: $(cat $WORK/flag.txt 2>/dev/null || echo 'in progress')"
 ```

@@ -35,8 +35,8 @@ Cybersecurity/CTFs/<CTF-name>/
 ### Method 1 — Bash (works even if Obsidian app isn't running)
 
 ```bash
-CTF_NAME="$1"  # e.g. "<CTF_NAME>"
-VAULT=${VAULT_DIR}
+CTF_NAME="$1"  # e.g. "Example CTF 2026"
+VAULT="${VAULT_DIR:-$HOME/obsidian-vault}"
 CTF_DIR="$VAULT/Cybersecurity/CTFs/$CTF_NAME"
 
 mkdir -p "$CTF_DIR/02 - Playbooks" "$CTF_DIR/99 - Writeups"
@@ -95,7 +95,7 @@ tags: [ctf, playbook, $vuln]
 
 ## Tools
 
-- \`nuclei -t ${HACKING_LAB}/wordlists/nuclei-templates/vulnerabilities/\`
+- \`nuclei -t ~/security-lab/wordlists/nuclei-templates/vulnerabilities/\`
 - <other tools>
 
 ## Bypass techniques

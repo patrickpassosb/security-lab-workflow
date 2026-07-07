@@ -44,7 +44,7 @@ A 3-5 bullet "prime" block:
 ```
 ## Session context (gbrain-prime)
 
-- **Recent focus:** <CTF_NAME> (CTF on Sat)
+- **Recent focus:** <your current CTF or engagement>
 - **Last practice:** 5 vulhub CVEs on Wed (Log4Shell, S2-045, Spring4Shell)
 - **Open questions:**
   - How to bypass the WAF detected on practice target X
@@ -61,7 +61,7 @@ Don't pretend there's context. Be honest.
 
 ## Configuration
 
-The gbrain source set is configured in `${HACKING_LAB}/AGENTS.md` and `${HOME}/.gstack/config.yaml`. To add a source:
+The gbrain source set is configured in `~/security-lab/AGENTS.md` and `${HOME}/.gstack/config.yaml`. To add a source:
 
 ```bash
 gbrain sources add <path> --name <name> --mode read-write|read-only|deny

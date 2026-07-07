@@ -1,4 +1,13 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-exec ${HOME}/Downloads/caido-cli "$@"
+CAIDO_CLI="${CAIDO_CLI:-}"
+if [ -z "$CAIDO_CLI" ]; then
+  CAIDO_CLI="$(command -v caido-cli 2>/dev/null || true)"
+fi
+if [ -z "$CAIDO_CLI" ] || [ ! -x "$CAIDO_CLI" ]; then
+  echo "[!] caido-cli not found. Set CAIDO_CLI env var to its path." >&2
+  exit 127
+fi
+
+exec "$CAIDO_CLI" "$@"

@@ -13,7 +13,7 @@ description: |
 
 ```bash
 FILE="$1"
-WORK=${HACKING_LAB}/findings/ctf/forensics/$(basename $FILE)
+WORK=~/security-lab/findings/ctf/forensics/$(basename $FILE)
 mkdir -p $WORK
 
 # What is it really?
@@ -46,11 +46,11 @@ steghide extract -sf "$FILE" -p "password"  # common passphrases
 steghide info "$FILE" 2>&1 | tee $WORK/steghide-info.txt
 
 # If passphrase unknown, try wordlist
-test -f ${HACKING_LAB}/wordlists/rockyou.txt && \
+test -f ~/security-lab/wordlists/rockyou.txt && \
   while read pass; do
     steghide extract -sf "$FILE" -p "$pass" -f -xf $WORK/extracted 2>/dev/null && \
       echo "FOUND: $pass" && break
-  done < ${HACKING_LAB}/wordlists/rockyou.txt
+  done < ~/security-lab/wordlists/rockyou.txt
 ```
 
 ### Any binary → binwalk (embedded files)
@@ -125,6 +125,6 @@ fi
 ## Output to vault
 
 ```bash
-obsidian append file="Cybersecurity/CTFs/<CTF_NAME>/01 - Methodology.md" \
+obsidian append file="Cybersecurity/CTFs/<CTF name>/01 - Methodology.md" \
   content="- $(date +%Y-%m-%d) stego-forensics $FILE: $(test -f $WORK/flag.txt && cat $WORK/flag.txt || echo 'no flag yet')"
 ```

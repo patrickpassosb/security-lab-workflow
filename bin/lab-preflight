@@ -1,0 +1,411 @@
+#!/usr/bin/env python3
+"""lab-preflight — enforcement gate that MUST run before any offensive tool.
+
+This is the #1 rule of the CTF workflow: no httpx, no nuclei, no curl, no
+ffuf, no sqlmap — nothing — until lab-preflight passes. It enforces:
+
+  1. CONTEXT GATE   — read Failed Paths / Do Not Repeat from prior sessions
+  2. BLACKBOARD GATE — check .blackboard.md for coordinator dispatches
+  3. PIVOT GATE     — check .pivot-alerts for CRIT alerts on this challenge
+  4. HINT THEORY GATE — verify ## Hint Theory exists in solve_log.md
+  5. PIVOT-WATCH AUTO-START — ensure lab-pivot-watch daemon is running
+
+Exit codes:
+  0 = all gates passed, agent may proceed to attack
+  1 = one or more gates failed, agent must fix before any tool
+
+Usage:
+  lab-preflight <challenge-name> [--ctf-home <path>] [--ack-failed-paths]
+  lab-preflight <challenge-name> --new --target <url>  # first session, no prior context
+
+The --ack-failed-paths flag means the agent has already read the Failed Paths
+section and acknowledges it. Without this flag, if Failed Paths exist, the
+gate prints them and exits 1 with instructions to re-run with --ack-failed-paths.
+
+The --new flag means this is a first session with no existing solve_log.md.
+The gate creates a skeleton solve_log.md and requires Hint Theory before passing.
+
+Design principles:
+  - First session (no prior context): only Hint Theory required (~30s). Fast.
+  - Returning session (prior context exists): must read Failed Paths. This is
+    where the time savings come from — preventing repeated dead ends.
+  - Always auto-starts lab-pivot-watch so the 25/35min alerts always fire.
+"""
+import argparse
+import os
+import re
+import sys
+import time
+import subprocess
+import datetime
+from pathlib import Path
+
+DEFAULT_CTF_HOME = ""  # must be passed via --ctf-home or auto-detected from cwd
+PIVOT_WATCH_SCRIPT = os.environ.get("HACKING_LAB", os.path.expanduser("~/security-lab")) + "/bin/lab-pivot-watch"
+PIVOT_WATCH_PID = "/tmp/lab-pivot-watch.pid"
+
+# ANSI colors
+RED = "\033[31m"
+GREEN = "\033[32m"
+YELLOW = "\033[33m"
+BOLD = "\033[1m"
+RESET = "\033[0m"
+
+def color(text, c):
+    return f"{c}{text}{RESET}"
+
+def print_gate(name, status, detail=""):
+    icon = "PASS" if status == "pass" else "FAIL"
+    line = f"  [{color(icon, GREEN if status == 'pass' else RED)}] {name}"
+    if detail:
+        line += f" — {detail}"
+    print(line, flush=True)
+
+def extract_section(content, header_pattern):
+    """Extract a markdown section by header pattern until the next ## header."""
+    lines = content.split('\n')
+    in_section = False
+    section_lines = []
+    for line in lines:
+        if re.match(header_pattern, line):
+            in_section = True
+            section_lines.append(line)
+            continue
+        if in_section and re.match(r'^##\s', line):
+            break
+        if in_section:
+            section_lines.append(line)
+    return '\n'.join(section_lines) if section_lines else None
+
+def is_pivot_watch_running():
+    """Check if lab-pivot-watch daemon is running via PID file."""
+    try:
+        with open(PIVOT_WATCH_PID) as f:
+            pid = int(f.read().strip())
+        os.kill(pid, 0)
+        return True
+    except (FileNotFoundError, ProcessLookupError, ValueError, OSError):
+        return False
+
+def start_pivot_watch(ctf_home):
+    """Start lab-pivot-watch daemon if not already running."""
+    if is_pivot_watch_running():
+        return True
+    if not os.path.isfile(PIVOT_WATCH_SCRIPT):
+        print(color("  [WARN] lab-pivot-watch not found at " + PIVOT_WATCH_SCRIPT, YELLOW))
+        return False
+    try:
+        proc = subprocess.Popen(
+            [sys.executable, PIVOT_WATCH_SCRIPT, "--start",
+             "--ctf-home", str(ctf_home)],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+        time.sleep(1)
+        if is_pivot_watch_running():
+            return True
+        return False
+    except Exception as e:
+        print(f"  [WARN] Could not start lab-pivot-watch: {e}")
+        return False
+
+def check_context_gate(challenge_dir, ack_failed_paths):
+    """Gate 1: Read Failed Paths / Do Not Repeat from prior sessions."""
+    solve_log = challenge_dir / "solve_log.md"
+    if not solve_log.exists():
+        return "pass", "no prior solve_log (first session)"
+
+    content = solve_log.read_text(errors='replace')
+    failed_section = extract_section(content, r'^##\s+Failed\s+Paths')
+
+    if not failed_section:
+        # Also check for ### Failed Paths sub-section
+        failed_section = extract_section(content, r'^###\s+Failed\s+Paths')
+
+    if not failed_section:
+        return "pass", "no Failed Paths section yet"
+
+    # Check if the section has real content (not just the template)
+    content_lines = [l for l in failed_section.split('\n')
+                     if l.strip() and not l.strip().startswith('#')
+                     and not l.strip().startswith('This section')]
+    if not content_lines:
+        return "pass", "Failed Paths section empty"
+
+    if ack_failed_paths:
+        return "pass", f"acknowledged {len(content_lines)} dead-end entries"
+
+    return "fail", f"Failed Paths exists ({len(content_lines)} entries) — re-run with --ack-failed-paths after reading them"
+
+def check_blackboard_gate(ctf_home, challenge_name):
+    """Gate 2: Check .blackboard.md for dispatches targeting this challenge."""
+    blackboard = Path(ctf_home) / ".blackboard.md"
+    if not blackboard.exists():
+        return "pass", "no .blackboard.md"
+
+    content = blackboard.read_text(errors='replace')
+
+    # Find dispatches targeting this challenge
+    dispatch_pattern = rf'##\s+DISPATCH.*{re.escape(challenge_name)}'
+    dispatches = re.findall(r'(##\s+DISPATCH.*?)(?=\n##\s+DISPATCH|\n##\s+(?:Active|Resolved)|\Z)',
+                            content, re.DOTALL)
+
+    relevant = [d for d in dispatches if re.search(re.escape(challenge_name), d, re.IGNORECASE)]
+
+    if not relevant:
+        return "pass", "no dispatches for this challenge"
+
+    return "pass", f"{len(relevant)} dispatch(es) found (see above) — READ THEM"
+
+def check_pivot_gate(ctf_home, challenge_name):
+    """Gate 3: Check .pivot-alerts for CRIT alerts on this challenge."""
+    alerts_file = Path(ctf_home) / ".pivot-alerts"
+    if not alerts_file.exists():
+        return "pass", "no .pivot-alerts (pivot-watch may not have run yet)"
+
+    content = alerts_file.read_text(errors='replace')
+    crit_lines = [l for l in content.split('\n')
+                  if 'CRIT' in l and challenge_name in l]
+
+    if not crit_lines:
+        return "pass", "no CRIT alerts for this challenge"
+
+    return "warn", f"{len(crit_lines)} CRIT pivot alert(s) — challenge is past pivot threshold. Consider pivoting."
+
+def check_hint_theory_gate(challenge_dir, is_new, challenge_name):
+    """Gate 4: Verify ## Hint Theory exists in solve_log.md."""
+    solve_log = challenge_dir / "solve_log.md"
+
+    if is_new:
+        if solve_log.exists():
+            return "fail", "solve_log already exists — don't use --new"
+
+        # Create skeleton solve_log with Hint Theory placeholder
+        timestamp = datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+        skeleton = f"""# {challenge_name} Solve Log
+
+**CTF:** (set engagement name)
+**Date:** {timestamp}
+**Status:** active
+
+## Hint Theory
+
+<!-- MANDATORY: Write your hint theory here BEFORE any tool runs.
+- Challenge name: "{challenge_name}"
+- What does the name hint at? (one sentence)
+- Vuln class hypothesis: (SQLi / XSS / SSRF / IDOR / JWT / crypto / pwn / etc.)
+- Description/hint from the platform: (paste if available)
+-->
+
+## Known Facts
+
+## Hypotheses
+| id | surface | hypothesis | next test | finding | status |
+|---|---|---|---|---|---|
+
+## Failed Paths / Do Not Repeat
+
+## Evidence
+
+## Next Best Test
+
+## Primitive Chain
+| primitive | evidence | unlocks | next action | status |
+|---|---|---|---|---|
+
+## Session Log
+"""
+        solve_log.write_text(skeleton)
+        return "fail", f"created skeleton solve_log.md — write ## Hint Theory, then re-run preflight"
+
+    if not solve_log.exists():
+        return "fail", "no solve_log.md — run with --new to create one, or create the challenge workspace first"
+
+    content = solve_log.read_text(errors='replace')
+    if re.search(r'^##\s+Hint\s+Theory', content, re.MULTILINE):
+        # Check it has real content (not just the placeholder comment)
+        ht_section = extract_section(content, r'^##\s+Hint\s+Theory')
+        # Strip HTML comment blocks entirely
+        ht_section = re.sub(r'<!--.*?-->', '', ht_section, flags=re.DOTALL)
+        real_lines = [l for l in ht_section.split('\n')
+                      if l.strip() and not l.strip().startswith('#')]
+        if real_lines:
+            return "pass", "Hint Theory present"
+        return "fail", "Hint Theory section exists but is empty — fill it in"
+    return "fail", "no ## Hint Theory section — write one before any tool"
+
+def print_failed_paths(challenge_dir):
+    """Print the Failed Paths section for the agent to read."""
+    solve_log = challenge_dir / "solve_log.md"
+    if not solve_log.exists():
+        return
+    content = solve_log.read_text(errors='replace')
+    failed_section = extract_section(content, r'^##\s+Failed\s+Paths')
+    if not failed_section:
+        failed_section = extract_section(content, r'^###\s+Failed\s+Paths')
+    if not failed_section:
+        return
+
+    content_lines = [l for l in failed_section.split('\n')
+                     if l.strip() and not l.strip().startswith('#')
+                     and not l.strip().startswith('This section')]
+    if not content_lines:
+        return
+
+    print(color("\n" + "=" * 70, YELLOW))
+    print(color("  FAILED PATHS / DO NOT REPEAT — READ THESE BEFORE ATTACKING", YELLOW))
+    print(color("=" * 70, YELLOW))
+    print(failed_section)
+    print(color("=" * 70 + "\n", YELLOW))
+
+def print_blackboard_dispatches(ctf_home, challenge_name):
+    """Print any blackboard dispatches for this challenge."""
+    blackboard = Path(ctf_home) / ".blackboard.md"
+    if not blackboard.exists():
+        return
+    content = blackboard.read_text(errors='replace')
+    dispatches = re.findall(r'(##\s+DISPATCH.*?)(?=\n##\s+DISPATCH|\n##\s+(?:Active|Resolved)|\Z)',
+                            content, re.DOTALL)
+    relevant = [d for d in dispatches if re.search(re.escape(challenge_name), d, re.IGNORECASE)]
+    if not relevant:
+        return
+    print(color("\n  COORDINATOR DISPATCHES FOR THIS CHALLENGE:", BOLD))
+    for d in relevant:
+        print(d.strip())
+        print()
+
+def print_pivot_alerts(ctf_home, challenge_name):
+    """Print any CRIT pivot alerts for this challenge."""
+    alerts_file = Path(ctf_home) / ".pivot-alerts"
+    if not alerts_file.exists():
+        return
+    content = alerts_file.read_text(errors='replace')
+    crit_lines = [l for l in content.split('\n')
+                  if 'CRIT' in l and challenge_name in l]
+    if not crit_lines:
+        return
+    print(color("\n  PIVOT ALERTS (challenge is past pivot threshold):", RED))
+    for l in crit_lines:
+        print(color(f"    {l}", RED))
+    print()
+
+def main():
+    parser = argparse.ArgumentParser(
+        description='CTF preflight enforcement gate — run before ANY offensive tool',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Gates checked:
+  1. Context: read Failed Paths / Do Not Repeat from prior sessions
+  2. Blackboard: check .blackboard.md for coordinator dispatches
+  3. Pivot: check .pivot-alerts for CRIT alerts
+  4. Hint Theory: verify ## Hint Theory in solve_log.md
+  5. Pivot-watch: auto-start lab-pivot-watch if not running
+
+Exit 0 = all gates passed, you may proceed to attack
+Exit 1 = one or more gates failed — fix and re-run
+""")
+    parser.add_argument('challenge', help='Challenge name (directory under challenges/)')
+    parser.add_argument('--ctf-home', default=DEFAULT_CTF_HOME, help='CTF home directory')
+    parser.add_argument('--new', action='store_true', help='First session — create skeleton solve_log')
+    parser.add_argument('--target', help='Target URL (used with --new for context)')
+    parser.add_argument('--ack-failed-paths', action='store_true',
+                        help='Acknowledge that you have read the Failed Paths section')
+
+    args = parser.parse_args()
+
+    # Resolve ctf_home: explicit flag > cwd detection > fail
+    ctf_home_str = args.ctf_home
+    if not ctf_home_str:
+        cwd = os.getcwd()
+        if os.path.isdir(os.path.join(cwd, "challenges")):
+            ctf_home_str = cwd
+    if not ctf_home_str:
+        print(color("\n  FAIL: could not determine CTF home. Pass --ctf-home or run from a program folder.", RED))
+        sys.exit(1)
+    ctf_home = Path(os.path.expanduser(ctf_home_str))
+    challenges_dir = ctf_home / "challenges"
+    challenge_dir = challenges_dir / args.challenge
+
+    print(color(f"\n  lab-preflight — {args.challenge}", BOLD))
+    print(color(f"  {'=' * 60}", BOLD))
+
+    if not challenges_dir.exists():
+        print(color(f"\n  FAIL: challenges/ directory not found at {challenges_dir}", RED))
+        print(color("  Run this from the CTF home, or specify --ctf-home", RED))
+        sys.exit(1)
+
+    if args.new:
+        if challenge_dir.exists():
+            print(color(f"\n  FAIL: challenge directory already exists: {challenge_dir}", RED))
+            print(color("  Remove --new if this is a returning session", RED))
+            sys.exit(1)
+        challenge_dir.mkdir(parents=True, exist_ok=True)
+        print(f"  Created challenge directory: {challenge_dir}")
+    elif not challenge_dir.exists():
+        print(color(f"\n  FAIL: challenge directory not found: {challenge_dir}", RED))
+        print(color("  Run with --new for a first session, or check the challenge name", RED))
+        sys.exit(1)
+
+    all_passed = True
+    has_warnings = False
+
+    # Print context info first (for the agent to read)
+    if not args.new:
+        print_failed_paths(challenge_dir)
+        print_blackboard_dispatches(ctf_home, args.challenge)
+        print_pivot_alerts(ctf_home, args.challenge)
+
+    print(color(f"\n  GATES:", BOLD))
+
+    # Gate 1: Context (Failed Paths)
+    status, detail = check_context_gate(challenge_dir, args.ack_failed_paths)
+    print_gate("Context (Failed Paths)", status, detail)
+    if status == "fail":
+        all_passed = False
+        print(color("    -> Read the Failed Paths above, then re-run with --ack-failed-paths", YELLOW))
+
+    # Gate 2: Blackboard
+    status, detail = check_blackboard_gate(ctf_home, args.challenge)
+    print_gate("Blackboard (dispatches)", status, detail)
+
+    # Gate 3: Pivot alerts
+    status, detail = check_pivot_gate(ctf_home, args.challenge)
+    print_gate("Pivot alerts", status, detail)
+    if status == "warn":
+        has_warnings = True
+
+    # Gate 4: Hint Theory
+    status, detail = check_hint_theory_gate(challenge_dir, args.new, args.challenge)
+    print_gate("Hint Theory", status, detail)
+    if status == "fail":
+        all_passed = False
+
+    # Gate 5: Pivot-watch auto-start
+    if is_pivot_watch_running():
+        print_gate("Pivot-watch daemon", "pass", "already running")
+    else:
+        started = start_pivot_watch(ctf_home)
+        if started:
+            print_gate("Pivot-watch daemon", "pass", "auto-started")
+        else:
+            print_gate("Pivot-watch daemon", "warn", "could not auto-start (start manually)")
+            has_warnings = True
+
+    # Summary
+    print()
+    if all_passed:
+        if has_warnings:
+            print(color("  RESULT: GATES PASSED (with warnings) — proceed with caution", YELLOW))
+        else:
+            print(color("  RESULT: ALL GATES PASSED — you may proceed to attack", GREEN))
+        print()
+        sys.exit(0)
+    else:
+        print(color("  RESULT: GATES FAILED — fix the issues above before any tool", RED))
+        print(color("  Do NOT run httpx/nuclei/curl/ffuf until preflight passes.", RED))
+        print()
+        sys.exit(1)
+
+if __name__ == '__main__':
+    main()

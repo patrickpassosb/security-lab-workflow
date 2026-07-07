@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT="${CAIDO_MODE_DIR}"
+ROOT="${CAIDO_MODE_DIR:-$HOME/.agents/skills/caido-mode}"
+if [ ! -d "$ROOT" ]; then
+  echo "[!] caido-mode skill dir not found at $ROOT" >&2
+  echo "    Set CAIDO_MODE_DIR env var to its path." >&2
+  exit 1
+fi
 cd "$ROOT"
 exec npx tsx caido-client.ts "$@"

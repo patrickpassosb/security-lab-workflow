@@ -1,0 +1,42 @@
+#!/usr/bin/env bash
+# ctf-new — backward-compatible wrapper around lab-new
+#
+# Creates a CTF challenge workspace. Delegates to lab-new which handles
+# engagement-aware scope checking and all workspace scaffolding.
+#
+# Usage (unchanged from original):
+#   ctf-new <challenge-name> [--target <url>] [--category <web|crypto|...>] [--ctf-name <name>]
+#
+# The --ctf-name flag maps to --engagement for backward compatibility.
+# If not specified, lab-new requires --engagement explicitly.
+
+set -euo pipefail
+
+LAB="${HACKING_LAB:-$HOME/security-lab}"
+ARGS=()
+ENGAGEMENT=""
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --ctf-name)
+      shift
+      [ "$#" -gt 0 ] || { echo "[!] --ctf-name needs a value" >&2; exit 2; }
+      ENGAGEMENT="$1"
+      shift
+      ;;
+    --ctf-name=*)
+      ENGAGEMENT="${1#*=}"
+      shift
+      ;;
+    *)
+      ARGS+=("$1")
+      shift
+      ;;
+  esac
+done
+
+if [ -n "$ENGAGEMENT" ]; then
+  ARGS+=(--engagement "$ENGAGEMENT")
+fi
+
+exec "$LAB/bin/lab-new" ctf "${ARGS[@]}"

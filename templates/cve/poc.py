@@ -1,0 +1,143 @@
+#!/usr/bin/env python3
+"""Reusable CVE research PoC template.
+
+Use this to build a minimal proof-of-concept for a vulnerability found in
+source code analysis or local testing. The script saves raw response bytes,
+base64 response, and metadata under `evidence/`.
+
+Usage:
+    timeout 120s python3 work/poc.py
+
+Set via environment variables:
+    TARGET_URL       - base URL (default: http://127.0.0.1:8000)
+    TARGET_ENDPOINT  - path to test (default: /)
+    HTTP_METHOD      - GET, POST, etc (default: GET)
+    PARAM_NAME       - parameter name (default: q)
+    PAYLOAD_VALUE    - payload to send (default: probe)
+"""
+
+from __future__ import annotations
+
+import base64
+import json
+import os
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+import requests
+
+
+BASE = os.environ.get("TARGET_URL", "http://127.0.0.1:8000").rstrip("/")
+ENDPOINT = os.environ.get("TARGET_ENDPOINT", "/")
+METHOD = os.environ.get("HTTP_METHOD", "GET").upper()
+PARAM_NAME = os.environ.get("PARAM_NAME", "q")
+PAYLOAD_VALUE = os.environ.get("PAYLOAD_VALUE", "probe")
+PAYLOAD_ENCODING = os.environ.get("PAYLOAD_ENCODING", "plain").lower()
+SEND_AS = os.environ.get("SEND_AS", "params").lower()
+RESPONSE_BASENAME = os.environ.get("RESPONSE_BASENAME", "poc-response")
+TIMEOUT = float(os.environ.get("TARGET_TIMEOUT", "10"))
+HEADER_JSON = os.environ.get("HEADER_JSON", "{}").strip() or "{}"
+COOKIE = os.environ.get("COOKIE", "").strip()
+
+
+def workspace_root() -> Path:
+    script_dir = Path(__file__).resolve().parent
+    if script_dir.name == "work":
+        return script_dir.parent
+    return Path.cwd()
+
+
+def evidence_dir() -> Path:
+    path = workspace_root() / "evidence"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def encode_payload(value: str, mode: str) -> str:
+    raw = value.encode()
+    if mode == "base64":
+        return base64.b64encode(raw).decode("ascii")
+    if mode == "hex":
+        return raw.hex()
+    return value
+
+
+def load_headers() -> dict[str, str]:
+    try:
+        parsed: Any = json.loads(HEADER_JSON)
+    except json.JSONDecodeError as exc:
+        raise SystemExit(f"HEADER_JSON must be valid JSON: {exc}") from exc
+    if not isinstance(parsed, dict):
+        raise SystemExit("HEADER_JSON must decode to a JSON object")
+    headers = {str(key): str(value) for key, value in parsed.items()}
+    headers.setdefault("User-Agent", "hacking-lab-cve-poc/1.0")
+    if COOKIE:
+        headers["Cookie"] = COOKIE
+    return headers
+
+
+def build_request_kwargs(payload: str) -> dict[str, Any]:
+    kwargs: dict[str, Any] = {"headers": load_headers(), "timeout": TIMEOUT, "allow_redirects": False}
+    if SEND_AS == "json":
+        kwargs["json"] = {PARAM_NAME: payload}
+    elif SEND_AS == "data":
+        kwargs["data"] = {PARAM_NAME: payload}
+    elif SEND_AS == "raw":
+        kwargs["data"] = payload.encode()
+    else:
+        kwargs["params"] = {PARAM_NAME: payload}
+    return kwargs
+
+
+def save_response(response: requests.Response, payload: str) -> None:
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    safe_base = "".join(ch if ch.isalnum() or ch in "._-" else "_" for ch in RESPONSE_BASENAME)[:80]
+    base = evidence_dir() / f"{stamp}-{safe_base}"
+    raw_path = base.with_suffix(".bin")
+    b64_path = base.with_suffix(".b64.txt")
+    meta_path = base.with_suffix(".json")
+
+    body_b64 = base64.b64encode(response.content).decode("ascii")
+    raw_path.write_bytes(response.content)
+    b64_path.write_text(body_b64 + "\n", encoding="utf-8")
+    meta_path.write_text(
+        json.dumps(
+            {
+                "ts": stamp,
+                "method": METHOD,
+                "url": response.url,
+                "status_code": response.status_code,
+                "response_length": len(response.content),
+                "payload_encoding": PAYLOAD_ENCODING,
+                "send_as": SEND_AS,
+                "param_name": PARAM_NAME,
+                "payload_preview": payload[:120],
+                "saved_raw": str(raw_path),
+                "saved_base64": str(b64_path),
+            },
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    print(f"status={response.status_code} length={len(response.content)} url={response.url}")
+    print(f"saved_raw={raw_path}")
+    print(f"saved_base64={b64_path}")
+    print(f"saved_meta={meta_path}")
+    print("body_base64_preview=" + body_b64[:240])
+
+
+def main() -> int:
+    session = requests.Session()
+    payload = encode_payload(PAYLOAD_VALUE, PAYLOAD_ENCODING)
+    url = BASE + (ENDPOINT if ENDPOINT.startswith("/") else f"/{ENDPOINT}")
+    response = session.request(METHOD, url, **build_request_kwargs(payload))
+    save_response(response, payload)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

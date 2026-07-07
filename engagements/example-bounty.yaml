@@ -1,0 +1,132 @@
+# Engagement scope — Example Bug Bounty
+# Type: bounty
+# Copy this file to engagements/bounty-<program>.yaml and edit for your program.
+# Scope details can be pulled from HackerOne via: lab-h1-scope <handle>
+
+engagement:
+  name: "Example Bug Bounty"
+  type: bounty
+  platform: hackerone
+  program_url: "https://hackerone.com/<program>"
+  safe_harbor: true
+  authorized_by: "<Program operator> (via HackerOne program)"
+  about: "<Program description>"
+
+# In-scope assets from HackerOne structured scope.
+# Replace with your program's actual scope.
+in_scope:
+  - pattern: "example.com"
+    note: "Frontend / marketing site"
+  - pattern: "api.example.com"
+    note: "Public API"
+
+# Engagement-specific denials (merged with global scope.yaml denied list).
+denied: []
+
+# Rate limits — bounty = slow, careful, production.
+rate_limits:
+  nuclei_rps: 5
+  ffuf_rate: "100-300ms jitter"
+  httpx_threads: 10
+  nmap_timing: "T2"
+  global_max_parallel: 2
+
+# Techniques allowed without approval.
+# NOTE: Many programs prohibit automated scanning. Check the program rules.
+techniques_allowed:
+  - passive_recon
+  - active_recon
+  - web_app_testing
+  - api_testing
+  - idor
+  - ssrf
+  - ssti
+  - xss
+  - jwt_attacks
+  - auth_bypass
+  - parameter_pollution
+
+# Techniques requiring explicit human approval before use.
+techniques_require_approval:
+  - sqli
+  - file_upload
+  - deserialization
+  - race_conditions
+
+# Techniques NEVER allowed on this engagement.
+techniques_denied:
+  - dos_ddos
+  - ddos_amplification
+  - brute_force_without_oracle
+  - automated_scanning
+  - directory_fuzzing
+  - subdomain_enum
+  - nuclei_template_scans
+  - social_engineering
+
+# Bounty amounts per asset (replace with your program's actual rewards).
+bounty_table:
+  - asset: "Product API"
+    low: 100
+    medium: 250
+    high: 2000
+    critical: 5000
+  - asset: "Public API"
+    low: 100
+    medium: 250
+    high: 2000
+    critical: 5000
+  - asset: "Authentication"
+    low: 100
+    medium: 250
+    high: 2000
+    critical: 5000
+
+# Common out-of-scope findings (adapt to your program).
+out_of_scope_findings:
+  - "Use of automated scanning tools (nuclei, ffuf, feroxbuster, sqlmap, etc.)"
+  - "Lack of rate limiting on non-authentication endpoints"
+  - "Self-XSS issues"
+  - "Clickjacking without account takeover or sensitive disclosure"
+  - "CSRF on unauthenticated or non-sensitive forms"
+  - "Open redirect without additional security impact"
+  - "Content spoofing / text injection without modifying HTML/CSS"
+  - "Missing security headers (CSP, HttpOnly, Secure flags)"
+  - "Banner / version disclosure"
+  - "CSV injection without demonstrating vulnerability"
+  - "Missing best practices in SSL/TLS configuration"
+  - "DoS / stress tests"
+  - "Testing on accounts not owned by you"
+  - "Social engineering / phishing"
+
+# Program rules (adapt to your program).
+program_rules:
+  - "One vulnerability per report (unless chaining for impact)"
+  - "First report wins on duplicates"
+  - "Multiple vulns from one underlying issue = one bounty"
+  - "Reports covering multiple assets = paid once at highest category"
+  - "Create accounts specifically for testing — no testing on accounts you don't own"
+  - "No social engineering"
+  - "No DoS"
+  - "No automated scanning tools (if prohibited by the program)"
+
+# Response targets.
+response_targets:
+  first_response: "3 business days"
+  triage: "10 business days"
+  resolution: "varies by severity"
+
+# Evidence collection.
+evidence:
+  audit_log: "~/security-lab/.audit.jsonl"
+  findings_dir: "~/security-lab/bounties/<program>/findings/"
+
+# Reporting.
+reporting:
+  submit_via: "HackerOne report"
+  format: "impact-first: summary -> impact -> steps to reproduce -> remediation"
+  rules:
+    - "No data exfiltration beyond what proves the bug."
+    - "No destructive actions."
+    - "No automated scanning tools (if prohibited)."
+    - "Create testing accounts — use HackerOne username/email."

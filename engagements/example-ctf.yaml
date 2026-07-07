@@ -1,0 +1,105 @@
+# Engagement scope — Example CTF
+# Type: ctf
+# Copy this file to engagements/<your-ctf-name>.yaml and edit for your CTF.
+
+engagement:
+  name: "Example CTF"
+  type: ctf
+  date: "YYYY-MM-DD"
+  start_time_utc: "YYYY-MM-DDTHH:MM:SSZ"
+  duration_hours: 12
+  format: individual
+  authorized_by: "CTF organizer"
+  target_environment: "CTF platform (URL provided at event start)"
+
+# Hosts / domains the engagement explicitly authorizes.
+# Wildcards supported. IPs allowed.
+# Pre-expand to cover likely CTF platform patterns so you don't have to
+# edit this file mid-CTF when the target URL is revealed.
+in_scope:
+  - pattern: "*.example.ctf"
+    note: "CTF platform challenge instances"
+  - pattern: "example.ctf"
+    note: "CTF platform root"
+  - pattern: "10.*"
+    note: "CTF internal network (likely)"
+  - pattern: "172.16.*"
+    note: "Docker bridge (vulhub-style)"
+  - pattern: "172.17.*"
+    note: "Docker default bridge"
+  - pattern: "172.18.*"
+    note: "Docker custom network"
+  - pattern: "192.168.*"
+    note: "Local network (some CTFs use this range)"
+  - pattern: "localhost"
+    note: "Local practice targets (vulhub)"
+  - pattern: "127.0.0.1"
+    note: "Local practice targets"
+
+# Engagement-specific denials (merged with global scope.yaml denied list).
+denied: []
+
+# Rate limits — CTF = fast, aggressive, sandbox.
+rate_limits:
+  nuclei_rps: 25
+  ffuf_rate: "10-50ms jitter"
+  httpx_threads: 50
+  nmap_timing: "T3"
+  global_max_parallel: 8
+
+# Authorized techniques. Anything not here requires explicit human approval.
+techniques_allowed:
+  - passive_recon
+  - active_recon
+  - web_app_testing
+  - api_testing
+  - jwt_oauth_attacks
+  - sqli
+  - xss
+  - ssrf
+  - ssti
+  - idor
+  - file_upload
+  - deserialization
+  - directory_fuzzing
+  - subdomain_enum
+  - nuclei_template_scans
+  - jwt_attacks
+  - parameter_pollution
+  - race_conditions
+  - auth_bypass
+
+techniques_require_approval:
+  - dos_ddos
+  - ddos_amplification
+  - physical_attacks
+  - social_engineering
+  - supply_chain_attacks
+  - zero_day_exploitation_on_prod
+
+# Evidence collection.
+evidence:
+  audit_log: "~/security-lab/findings/.agent-audit.jsonl"
+  findings_dir: "~/security-lab/findings/ctf/"
+  vault_writeups: "$VAULT_DIR/Cybersecurity/CTFs/<CTF name>/99 - Writeups/"
+
+# Reporting.
+reporting:
+  draft_template: "PTES-style"
+  submit_via: "CTF platform flag submission + writeup"
+  deadline: "end of CTF"
+
+# Notes for the human
+notes:
+  - "Update `in_scope` patterns as the CTF reveals more targets."
+  - "First bloods are time-sensitive. Don't be polite on the easy challenges."
+  - "Hard challenges (>90 min with no progress): move on, come back later."
+  - "Hydrate. Stand up every 30 min. Marathon = endurance."
+
+# CTF-specific: flag handoff protocol
+flag_handoff:
+  enabled: true
+  format: "boxed"
+  flow: "find -> handoff -> pause -> human submits -> accepted=writeup / rejected=resume"
+  pause_on_handoff: true
+  writeup_after_acceptance: true

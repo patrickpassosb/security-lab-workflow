@@ -1,0 +1,197 @@
+#!/usr/bin/env bash
+# Category-focused CTF readiness check, with optional best-effort installs.
+
+set -uo pipefail
+
+CATEGORY="web"
+INSTALL=0
+LAB="${HACKING_LAB:-$HOME/security-lab}"
+PASS=0
+WARN=0
+FAIL=0
+
+usage() {
+  cat <<'EOF'
+Usage: ctf-health [web|crypto|pwn|forensics|all] [--install]
+
+Default is read-only. With --install, runs best-effort local/package-manager installs for missing tools.
+Agents may use --install during CTF only after scope is clear and the install is logged in solve_log.md.
+EOF
+}
+
+ok() { printf 'OK    %s\n' "$1"; PASS=$((PASS+1)); }
+warn() { printf 'WARN  %s\n' "$1"; WARN=$((WARN+1)); }
+fail() { printf 'FAIL  %s\n' "$1"; FAIL=$((FAIL+1)); }
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    --install)
+      INSTALL=1
+      ;;
+    web|crypto|pwn|forensics|all)
+      CATEGORY="$1"
+      ;;
+    *)
+      echo "[!] Unknown argument: $1" >&2
+      usage >&2
+      exit 2
+      ;;
+  esac
+  shift
+done
+
+have() { command -v "$1" >/dev/null 2>&1; }
+
+install_hint() {
+  tool="$1"
+  case "$tool" in
+    nuclei) echo "go install github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest" ;;
+    httpx) echo "go install github.com/projectdiscovery/httpx/cmd/httpx@latest" ;;
+    ffuf) echo "go install github.com/ffuf/ffuf/v2@latest" ;;
+    feroxbuster) echo "cargo install feroxbuster" ;;
+    jwt-tool) echo "uv tool install jwt-tool" ;;
+    wafw00f) echo "uv tool install wafw00f" ;;
+    ROPgadget) echo "uv tool install ROPGadget" ;;
+    zsteg) echo "gem install --user-install zsteg" ;;
+    *) echo "sudo dnf install -y $tool" ;;
+  esac
+}
+
+try_install() {
+  [ "$INSTALL" -eq 1 ] || return 0
+  tool="$1"
+  hint="$(install_hint "$tool")"
+  echo "[=] install attempt for $tool: $hint"
+  case "$tool" in
+    nuclei|httpx|ffuf)
+      have go && bash -lc "$hint" || true
+      ;;
+    feroxbuster)
+      have cargo && bash -lc "$hint" || true
+      ;;
+    jwt-tool|wafw00f|ROPgadget)
+      have uv && bash -lc "$hint" || true
+      ;;
+    zsteg)
+      have gem && bash -lc "$hint" || true
+      ;;
+    *)
+      if have dnf; then sudo dnf install -y "$tool" || true; fi
+      ;;
+  esac
+}
+
+log_install_result() {
+  tool="$1"
+  hint="$2"
+  result="$3"
+  if [ -f "solve_log.md" ]; then
+    {
+      printf '\n- Tool install %s `%s` via `%s` -> %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$tool" "$hint" "$result"
+    } >> solve_log.md
+  fi
+}
+
+check_cmd() {
+  tool="$1"
+  label="${2:-$tool}"
+  if have "$tool"; then
+    ok "$label"
+  else
+    hint="$(install_hint "$tool")"
+    warn "$label missing; install hint: $hint"
+    try_install "$tool"
+    if have "$tool"; then
+      ok "$label installed"
+      log_install_result "$tool" "$hint" "installed"
+    elif [ "$INSTALL" -eq 1 ]; then
+      log_install_result "$tool" "$hint" "still missing"
+    fi
+  fi
+}
+
+check_python_import() {
+  module="$1"
+  label="$2"
+  if python3 -c "import $module" >/dev/null 2>&1; then
+    ok "$label"
+  else
+    warn "$label missing"
+  fi
+}
+
+check_caido() {
+  if curl -sf -o /dev/null --max-time 2 http://127.0.0.1:8080/; then
+    ok "Caido reachable"
+  else
+    warn "Caido not reachable on 127.0.0.1:8080"
+  fi
+}
+
+check_web() {
+  echo "## web/AppSec"
+  for tool in curl jq httpx nuclei ffuf feroxbuster sqlmap jwt-tool wafw00f; do
+    check_cmd "$tool"
+  done
+  echo "## JS analysis + API fuzzing"
+  for tool in gf secretfinder graphw00f kr gitleaks trufflehog smuggler corsy; do
+    check_cmd "$tool"
+  done
+  check_python_import linkfinder "linkfinder (python module)"
+  check_python_import playwright "playwright (browser automation)"
+  check_python_import requests "python requests"
+  check_caido
+}
+
+check_crypto() {
+  echo "## crypto"
+  for tool in python3 openssl sage; do
+    check_cmd "$tool"
+  done
+  check_python_import z3 "python z3"
+  check_python_import Crypto "pycryptodome"
+}
+
+check_pwn() {
+  echo "## pwn/rev"
+  for tool in file gdb ROPgadget objdump readelf strings; do
+    check_cmd "$tool"
+  done
+  have pwn && ok "pwntools (pwn)" || warn "pwntools missing; install hint: uv tool install pwntools"
+  check_python_import pwnlib "python pwnlib"
+  check_cmd ghidra-analyze "Ghidra headless"
+}
+
+check_forensics() {
+  echo "## forensics/stego"
+  for tool in binwalk exiftool zsteg steghide tshark foremost xxd; do
+    check_cmd "$tool"
+  done
+}
+
+echo "=================================================="
+echo "CTF health ($CATEGORY) - $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+echo "=================================================="
+
+case "$CATEGORY" in
+  web) check_web ;;
+  crypto) check_crypto ;;
+  pwn) check_pwn ;;
+  forensics) check_forensics ;;
+  all)
+    check_web
+    check_crypto
+    check_pwn
+    check_forensics
+    ;;
+esac
+
+echo "=================================================="
+echo "Summary: $PASS OK, $WARN WARN, $FAIL FAIL"
+echo "=================================================="
+
+[ "$FAIL" -eq 0 ] && exit 0 || exit 1

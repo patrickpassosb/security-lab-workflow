@@ -1,0 +1,125 @@
+#!/usr/bin/env bash
+# lab-active — engagement dashboard for the multi-engagement hacking lab.
+#
+# Shows all engagements, their workspace counts, and last activity.
+#
+# Usage:
+#   lab-active              # show all engagements + workspace counts
+#   lab-active <name>       # show details for a specific engagement
+
+set -uo pipefail
+
+LAB="${HACKING_LAB:-$HOME/security-lab}"
+ENGAGEMENTS_DIR="$LAB/engagements"
+FINDINGS_DIR="$LAB/findings"
+
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+MUTED='\033[0;90m'
+NC='\033[0m'
+
+if [ "${1:-}" = "-h" ] || [ "${1:-}" = "--help" ]; then
+  echo "Usage: lab-active [<engagement-name>]"
+  echo "  No args: show all engagements + workspace counts"
+  echo "  <name>: show details for a specific engagement"
+  exit 0
+fi
+
+if [ ! -d "$ENGAGEMENTS_DIR" ]; then
+  echo "No engagements directory found at $ENGAGEMENTS_DIR"
+  exit 1
+fi
+
+if [ "$#" -ge 1 ]; then
+  exec "$LAB/bin/lab-scope" --engagement "$1"
+fi
+
+echo "=================================================="
+echo "Engagements — $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+echo "=================================================="
+echo
+
+# Gather engagement files
+ENG_FILES=$(find "$ENGAGEMENTS_DIR" -maxdepth 1 -name "*.yaml" -type f 2>/dev/null | sort)
+
+if [ -z "$ENG_FILES" ]; then
+  echo "No engagements found. Create one in $ENGAGEMENTS_DIR/"
+  exit 0
+fi
+
+printf "%-30s %-8s %-5s %-20s %s\n" "NAME" "TYPE" "WS" "LAST ACTIVITY" "STATUS"
+echo "--------------------------------------------------------------------------------"
+
+for f in $ENG_FILES; do
+  STEM=$(basename "$f" .yaml)
+
+  # Extract type and name from the YAML (simple grep)
+  TYPE=$(grep -m1 '^  type:' "$f" 2>/dev/null | sed 's/.*type: *//;s/"//g;s/'"'"'//g' || echo "?")
+  NAME=$(grep -m1 '^  name:' "$f" 2>/dev/null | sed 's/.*name: *//;s/"//g;s/'"'"'//g' || echo "$STEM")
+  STATUS=$(grep -m1 '^  status:' "$f" 2>/dev/null | sed 's/.*status: *//;s/"//g;s/'"'"'//g' || echo "active")
+
+  # Determine which program folder to scan
+  case "$TYPE" in
+    ctf)     PROG_DIR="$LAB/ctfs"; WS_SUBDIR="challenges" ;;
+    bounty)  PROG_DIR="$LAB/bounties"; WS_SUBDIR="findings" ;;
+    cve)     PROG_DIR="$LAB/cves"; WS_SUBDIR="findings" ;;
+    *)       PROG_DIR=""; WS_SUBDIR="" ;;
+  esac
+
+  WS_COUNT=0
+  LAST_ACT="never"
+
+  # Scan new structure: ctfs/*/challenges/, bounties/*/findings/, cves/*/findings/
+  # Also scan legacy findings/<type>/ for backward compat
+  SEARCH_PATHS=""
+  if [ -n "$PROG_DIR" ] && [ -d "$PROG_DIR" ]; then
+    # Find all program folders matching this engagement
+    for prog in "$PROG_DIR"/*/; do
+      [ -d "$prog$WS_SUBDIR" ] && SEARCH_PATHS="$SEARCH_PATHS $prog$WS_SUBDIR"
+    done
+  fi
+  # Legacy fallback
+  case "$TYPE" in
+    ctf)    [ -d "$FINDINGS_DIR/ctf" ] && SEARCH_PATHS="$SEARCH_PATHS $FINDINGS_DIR/ctf" ;;
+    bounty) [ -d "$FINDINGS_DIR/bounty" ] && SEARCH_PATHS="$SEARCH_PATHS $FINDINGS_DIR/bounty" ;;
+    cve)    [ -d "$FINDINGS_DIR/cve" ] && SEARCH_PATHS="$SEARCH_PATHS $FINDINGS_DIR/cve" ;;
+  esac
+
+  if [ -n "$SEARCH_PATHS" ]; then
+    for search_path in $SEARCH_PATHS; do
+      for ws in "$search_path"/*/; do
+        [ -d "$ws" ] || continue
+        WS_BASE=$(basename "$ws")
+        [ "$WS_BASE" = "*" ] && continue
+        if [ -f "${ws}engagement.txt" ] || [ -f "${ws}evidence" ] || [ -d "${ws}evidence" ] || [ -d "${ws}work" ]; then
+          WS_COUNT=$((WS_COUNT+1))
+        fi
+      done
+    done
+
+    # Find last activity
+    for search_path in $SEARCH_PATHS; do
+      LAST_FILE=$(find "$search_path" -type f \( -name "*.md" -o -name "*.txt" -o -name "*.json" -o -name "*.py" \) 2>/dev/null | xargs ls -t 2>/dev/null | head -1)
+      if [ -n "$LAST_FILE" ]; then
+        LAST_ACT=$(date -r "$LAST_FILE" +%Y-%m-%d 2>/dev/null || echo "unknown")
+        break
+      fi
+    done
+  fi
+
+  # Color the type
+  case "$TYPE" in
+    ctf)     TYPE_DISP="${GREEN}ctf${NC}    " ;;
+    bounty)  TYPE_DISP="${YELLOW}bounty${NC} " ;;
+    cve)     TYPE_DISP="${MUTED}cve${NC}    " ;;
+    *)       TYPE_DISP="$TYPE" ;;
+  esac
+
+  printf "%-30s %-8s %-5s %-20s %s\n" "$STEM" "$TYPE" "$WS_COUNT" "$LAST_ACT" "$STATUS"
+done
+
+echo
+echo "=================================================="
+echo "Use 'lab-scope --engagement <name>' for scope details."
+echo "Use 'lab-new <type> <name> --engagement <name>' to create a workspace."
+echo "=================================================="

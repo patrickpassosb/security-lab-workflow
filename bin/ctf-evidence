@@ -1,0 +1,192 @@
+#!/usr/bin/env bash
+# Capture CTF evidence with timestamped output and metadata.
+
+set -euo pipefail
+
+LAB="${HACKING_LAB:-$HOME/security-lab}"
+CHALLENGE=""
+LABEL=""
+FILE_PATH=""
+NOTE=""
+
+usage() {
+  cat <<'EOF'
+Usage:
+  ctf-evidence <challenge> <label> -- <command> [args...]
+  ctf-evidence <challenge> <label> --file <path> [--note <text>]
+  command | ctf-evidence <challenge> <label> [--note <text>]
+
+Writes evidence under ~/security-lab/findings/ctf/<challenge>/evidence/ and creates JSON metadata.
+EOF
+}
+
+sanitize() {
+  printf '%s' "$1" | tr -c 'A-Za-z0-9._-' '_'
+}
+
+if [ "${1:-}" = "-h" ] || [ "${1:-}" = "--help" ]; then
+  usage
+  exit 0
+fi
+
+[ "$#" -ge 2 ] || { usage >&2; exit 2; }
+CHALLENGE="$1"
+LABEL="$2"
+shift 2
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    --file)
+      shift
+      [ "$#" -gt 0 ] || { echo "[!] --file needs a value" >&2; exit 2; }
+      FILE_PATH="$1"
+      ;;
+    --file=*)
+      FILE_PATH="${1#*=}"
+      ;;
+    --note)
+      shift
+      [ "$#" -gt 0 ] || { echo "[!] --note needs a value" >&2; exit 2; }
+      NOTE="$1"
+      ;;
+    --note=*)
+      NOTE="${1#*=}"
+      ;;
+    --)
+      shift
+      break
+      ;;
+    *)
+      break
+      ;;
+  esac
+  shift
+done
+
+case "$CHALLENGE" in
+  *..*|*\\*|"")
+    echo "[!] Invalid challenge name. Use a single folder name." >&2
+    exit 2
+    ;;
+esac
+
+# Auto-detect workspace root.
+# 1. Check if CHALLENGE is a subdirectory of cwd (cd-then-create mode)
+# 2. Walk up from cwd to find a program folder (has AGENTS.md), then look for challenges/<name>/ or findings/<name>/
+# 3. Fall back to legacy global findings/<type>/<name>/ paths
+WORK=""
+
+# Mode 1: CHALLENGE is directly under cwd (e.g. ./challenges/<name>/ or ./findings/<name>/)
+for SUBDIR in challenges findings; do
+  CANDIDATE="$PWD/$SUBDIR/$CHALLENGE"
+  if [ -d "$CANDIDATE" ]; then
+    WORK="$CANDIDATE"
+    break
+  fi
+done
+
+# Mode 2: Walk up from cwd to find a program folder, then look for <name>/ under challenges/ or findings/
+if [ -z "$WORK" ]; then
+  SEARCH_DIR="$PWD"
+  while [ "$SEARCH_DIR" != "/" ]; do
+    if [ -f "$SEARCH_DIR/AGENTS.md" ]; then
+      for SUBDIR in challenges findings; do
+        CANDIDATE="$SEARCH_DIR/$SUBDIR/$CHALLENGE"
+        if [ -d "$CANDIDATE" ]; then
+          WORK="$CANDIDATE"
+          break 2
+        fi
+      done
+    fi
+    SEARCH_DIR="$(dirname "$SEARCH_DIR")"
+  done
+fi
+
+# Mode 3: Legacy global findings/<type>/<name>/ paths
+if [ -z "$WORK" ]; then
+  for SUBDIR in ctf bounty cve; do
+    CANDIDATE="$LAB/findings/$SUBDIR/$CHALLENGE"
+    if [ -d "$CANDIDATE" ]; then
+      WORK="$CANDIDATE"
+      break
+    fi
+  done
+fi
+
+if [ -z "$WORK" ]; then
+  echo "[!] Missing workspace for '$CHALLENGE'. Run bin/lab-new first." >&2
+  echo "    Searched: cwd subdirs, program folders (walk up), and $LAB/findings/{ctf,bounty,cve}/$CHALLENGE" >&2
+  exit 2
+fi
+EVIDENCE_DIR="$WORK/evidence"
+mkdir -p "$EVIDENCE_DIR"
+
+STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
+SAFE_LABEL="$(sanitize "$LABEL")"
+BASE="$EVIDENCE_DIR/$STAMP-$SAFE_LABEL"
+EXIT_CODE=0
+MODE="stdin"
+COMMAND_JSON="[]"
+OUTPUT_PATH="$BASE.txt"
+
+if [ -n "$FILE_PATH" ]; then
+  MODE="file"
+  BASENAME="$(basename "$FILE_PATH")"
+  OUTPUT_PATH="$BASE-$(sanitize "$BASENAME")"
+  cp "$FILE_PATH" "$OUTPUT_PATH"
+elif [ "$#" -gt 0 ]; then
+  MODE="command"
+  OUTPUT_PATH="$BASE.out"
+  ERR_PATH="$BASE.err"
+  set +e
+  "$@" > "$OUTPUT_PATH" 2> "$ERR_PATH"
+  EXIT_CODE=$?
+  set -e
+  COMMAND_JSON="$(python3 - "$@" <<'PY'
+import json
+import sys
+print(json.dumps(sys.argv[1:]))
+PY
+)"
+else
+  cat > "$OUTPUT_PATH"
+fi
+
+META_PATH="$BASE.json"
+python3 - "$META_PATH" "$MODE" "$OUTPUT_PATH" "$EXIT_CODE" "$NOTE" "$COMMAND_JSON" <<'PY'
+import json
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+meta_path, mode, output_path, exit_code, note, command_json = sys.argv[1:]
+try:
+    command = json.loads(command_json)
+except json.JSONDecodeError:
+    command = []
+meta = {
+    "ts": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    "mode": mode,
+    "output": output_path,
+    "exit": int(exit_code),
+    "note": note,
+    "command": command,
+}
+Path(meta_path).write_text(json.dumps(meta, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+PY
+
+TARGET=""
+[ -f "$WORK/target.txt" ] && TARGET="$(tr -d '\r' < "$WORK/target.txt" | head -n 1)"
+ENGAGEMENT=""
+[ -f "$WORK/engagement.txt" ] && ENGAGEMENT="$(tr -d '\r' < "$WORK/engagement.txt" | head -n 1)"
+printf '{"ts":"%s","agent":"%s","action":"ctf-evidence","challenge":"%s","target":"%s","engagement":"%s","label":"%s","exit":%s}\n' \
+  "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$(whoami)" "$CHALLENGE" "$TARGET" "$ENGAGEMENT" "$LABEL" "$EXIT_CODE" \
+  >> "$LAB/findings/.agent-audit.jsonl"
+
+echo "[+] evidence: $OUTPUT_PATH"
+echo "[+] metadata: $META_PATH"
+exit "$EXIT_CODE"

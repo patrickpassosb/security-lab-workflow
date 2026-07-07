@@ -1,0 +1,309 @@
+#!/usr/bin/env python3
+"""lab-oob — OOB (Out-of-Band) confirmation automation using interactsh.
+
+Starts an interactsh listener, gives you a unique callback URL to use in
+payloads, and auto-polls for callbacks. When a callback is received, it
+confirms the vulnerability and saves evidence.
+
+Usage:
+    lab-oob start                    # Start interactsh listener, get callback URL
+    lab-oob poll [--timeout 60]       # Poll for callbacks (default 60s)
+    lab-oob check                     # One-shot check (exit 0 if callback received)
+    lab-oob stop                       # Stop the listener
+    lab-oob url                        # Print the current callback URL
+
+Workflow:
+    1. lab-oob start                   # Get your unique URL
+    2. Send payload with that URL (e.g. SSRF: http://xxx.oast.fun)
+    3. lab-oob poll --timeout 60       # Wait for callback
+    4. If callback received → vulnerability confirmed, evidence saved
+    5. lab-oob stop                     # Clean up
+
+The listener state is stored in /tmp/lab-oob-state.json so multiple
+terminal sessions can access it.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import re
+import signal
+import subprocess
+import sys
+import time
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+LAB = Path(os.environ.get("HACKING_LAB", os.path.expanduser("~/security-lab")))
+STATE_FILE = Path("/tmp/lab-oob-state.json")
+EVIDENCE_DIR = Path.cwd() / "evidence"
+
+
+def log(msg: str) -> None:
+    ts = datetime.now(timezone.utc).strftime("%H:%M:%S")
+    print(f"[{ts}] {msg}", flush=True)
+
+
+def load_state() -> dict[str, Any]:
+    if STATE_FILE.exists():
+        return json.loads(STATE_FILE.read_text())
+    return {}
+
+
+def save_state(state: dict[str, Any]) -> None:
+    STATE_FILE.write_text(json.dumps(state, indent=2), encoding="utf-8")
+
+
+def clear_state() -> None:
+    if STATE_FILE.exists():
+        STATE_FILE.unlink()
+
+
+def start_listener() -> int:
+    """Start interactsh-client in background, capture the callback URL."""
+    state = load_state()
+    if state.get("pid"):
+        log("Listener already running. Use 'lab-oob stop' first.")
+        log(f"Callback URL: {state.get('url', 'unknown')}")
+        return 0
+
+    log("Starting interactsh listener...")
+    # Start interactsh-client in background, output to log file
+    log_file = Path("/tmp/lab-oob-output.log")
+    log_handle = open(log_file, "w", buffering=1)
+    proc = subprocess.Popen(
+        ["interactsh-client", "-v"],
+        stdout=log_handle,
+        stderr=subprocess.STDOUT,
+        text=True,
+        preexec_fn=os.setsid,
+    )
+
+    # Wait for the callback URL to appear in log file
+    url = None
+    start = time.time()
+    while time.time() - start < 30:
+        if log_file.exists():
+            content = log_file.read_text()
+            # Look for the oast URL
+            match = re.search(r'([a-z0-9]+\.oast\.(?:fun|live|site|me|net))', content)
+            if match:
+                url = match.group(1)
+                break
+        time.sleep(1)
+
+    if not url:
+        log("ERROR: Could not get callback URL from interactsh")
+        proc.kill()
+        return 1
+
+    state = {
+        "pid": proc.pid,
+        "url": url,
+        "full_url": f"http://{url}",
+        "dns_url": url,
+        "started_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "log_file": str(log_file),
+        "callbacks": [],
+    }
+    save_state(state)
+
+    log(f"Listener started (PID {proc.pid})")
+    log(f"")
+    log(f"╔══════════════════════════════════════════╗")
+    log(f"║  OOB Callback URL:                       ║")
+    log(f"║  {url:<39}║")
+    log(f"╠══════════════════════════════════════════╣")
+    log(f"║  Use this URL in your payloads:          ║")
+    log(f"║  http://{url:<34}║")
+    log(f"╚══════════════════════════════════════════╝")
+    log(f"")
+    log(f"Next: send your payload with this URL, then run 'lab-oob poll'")
+    return 0
+
+
+def poll_listener(timeout: int = 60) -> int:
+    """Poll the interactsh log for callbacks."""
+    state = load_state()
+    if not state.get("pid"):
+        log("No listener running. Run 'lab-oob start' first.")
+        return 1
+
+    log_file = Path(state.get("log_file", "/tmp/lab-oob-output.log"))
+    url = state.get("url", "")
+    log(f"Polling for callbacks (timeout: {timeout}s)...")
+    log(f"Listening for: {url}")
+    log("")
+
+    seen_callbacks = set()
+    start = time.time()
+
+    while time.time() - start < timeout:
+        # Check if process is still running
+        try:
+            os.kill(state["pid"], 0)
+        except ProcessLookupError:
+            log("Listener process died. Restart with 'lab-oob start'.")
+            return 1
+
+        # Read new output from log file
+        if log_file.exists():
+            content = log_file.read_text()
+            # Look for callback entries (interactsh prints them as they come)
+            for line in content.splitlines():
+                if url in line and line not in seen_callbacks:
+                    # Extract the callback info
+                    if "DNS" in line or "HTTP" in line or "Interaction" in line or "Received" in line:
+                        seen_callbacks.add(line)
+                        # Determine type
+                        cb_type = "UNKNOWN"
+                        if "DNS" in line:
+                            cb_type = "DNS"
+                        elif "HTTP" in line:
+                            cb_type = "HTTP"
+                        elif "SMTP" in line:
+                            cb_type = "SMTP"
+
+                        log(f"╔══════════════════════════════════════════╗")
+                        log(f"║  OOB CALLBACK RECEIVED!                  ║")
+                        log(f"╠══════════════════════════════════════════╣")
+                        log(f"║  Type: {cb_type:<34}║")
+                        log(f"║  URL: {url:<37}║")
+                        log(f"║  Time: {datetime.now().strftime('%H:%M:%S'):<36}║")
+                        log(f"╚══════════════════════════════════════════╝")
+                        log(f"")
+                        log(f"VULNERABILITY CONFIRMED via OOB callback!")
+                        log(f"Raw: {line[:200]}")
+
+                        # Save evidence
+                        EVIDENCE_DIR.mkdir(parents=True, exist_ok=True)
+                        ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+                        ev_path = EVIDENCE_DIR / f"{ts}-oob-callback.txt"
+                        ev_path.write_text(
+                            f"OOB Callback Confirmed\n"
+                            f"Time: {datetime.now(timezone.utc).isoformat()}\n"
+                            f"Type: {cb_type}\n"
+                            f"Callback URL: {url}\n"
+                            f"Raw: {line}\n",
+                            encoding="utf-8",
+                        )
+                        log(f"Evidence saved: {ev_path}")
+
+                        # Update state
+                        callbacks = state.get("callbacks", [])
+                        callbacks.append({"type": cb_type, "time": datetime.now(timezone.utc).isoformat(), "raw": line[:500]})
+                        state["callbacks"] = callbacks
+                        save_state(state)
+
+                        return 0
+
+        time.sleep(2)
+        elapsed = int(time.time() - start)
+        sys.stdout.write(f"\r  Waiting... {elapsed}s / {timeout}s")
+        sys.stdout.flush()
+
+    print()
+    log("No callbacks received within timeout.")
+    log("The payload may not have triggered, or the target has no outbound access.")
+    return 1
+
+
+def check_once() -> int:
+    """One-shot check — exit 0 if callback received, 1 if not."""
+    state = load_state()
+    if not state.get("pid"):
+        print("No listener running")
+        return 1
+    log_file = Path(state.get("log_file", "/tmp/lab-oob-output.log"))
+    url = state.get("url", "")
+    if log_file.exists():
+        content = log_file.read_text()
+        for line in content.splitlines():
+            if url in line and ("DNS" in line or "HTTP" in line or "Interaction" in line or "Received" in line):
+                print(f"CALLBACK RECEIVED: {line[:100]}")
+                return 0
+    print("No callback received")
+    return 1
+
+
+def stop_listener() -> int:
+    """Stop the interactsh listener."""
+    state = load_state()
+    pid = state.get("pid")
+    if not pid:
+        log("No listener running.")
+        clear_state()
+        return 0
+
+    log(f"Stopping listener (PID {pid})...")
+    try:
+        os.killpg(os.getpgid(pid), signal.SIGTERM)
+    except ProcessLookupError:
+        pass
+    except Exception:
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except Exception:
+            pass
+
+    # Show summary
+    callbacks = state.get("callbacks", [])
+    log(f"Listener stopped. {len(callbacks)} callback(s) received.")
+    for cb in callbacks:
+        log(f"  - [{cb.get('type')}] {cb.get('time', '')}")
+
+    clear_state()
+    return 0
+
+
+def print_url() -> int:
+    """Print the current callback URL."""
+    state = load_state()
+    url = state.get("url")
+    if url:
+        print(url)
+        return 0
+    print("No listener running")
+    return 1
+
+
+def main() -> int:
+    if len(sys.argv) < 2 or sys.argv[1] in ("-h", "--help"):
+        print(__doc__)
+        return 1
+
+    cmd = sys.argv[1]
+
+    if cmd == "start":
+        return start_listener()
+    elif cmd == "poll":
+        timeout = 60
+        if len(sys.argv) > 2:
+            try:
+                timeout = int(sys.argv[2])
+            except ValueError:
+                if sys.argv[2] == "--timeout" and len(sys.argv) > 3:
+                    timeout = int(sys.argv[3])
+        # Parse --timeout flag
+        for i, a in enumerate(sys.argv[2:], 2):
+            if a == "--timeout" and i + 1 < len(sys.argv):
+                timeout = int(sys.argv[i + 1])
+            elif a.startswith("--timeout="):
+                timeout = int(a.split("=", 1)[1])
+        return poll_listener(timeout)
+    elif cmd == "check":
+        return check_once()
+    elif cmd == "stop":
+        return stop_listener()
+    elif cmd == "url":
+        return print_url()
+    else:
+        print(f"Unknown command: {cmd}")
+        print(__doc__)
+        return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

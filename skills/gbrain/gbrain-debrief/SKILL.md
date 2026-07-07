@@ -42,12 +42,12 @@ gbrain put --type gstack/learning --title "JWT confusion with RS256-to-HS256 key
 - Insight: The server's RS256 public key is the HMAC secret when alg confusion succeeds
 - Worked: yes
 - Failed approaches: tried kid SQLi first, took 20 min
-- Reference: ${HACKING_LAB}/findings/ctf/X/exploit.py
+- Reference: ~/security-lab/findings/ctf/X/exploit.py
 - Tags: jwt, ctf, web
 "
 
 # Pattern 2: freeform note
-gbrain put --type gstack/note --title "Day 3 of <CTF_ORG> prep" --body "..."
+gbrain put --type gstack/note --title "Day 3 of CTF prep" --body "..."
 ```
 
 The `--type` lets future queries filter: `gbrain search --type gstack/learning JWT` returns just learning pages about JWT.
@@ -81,7 +81,7 @@ gbrain search "JWT confusion" --limit 3
 
 ## Auto-debrief trigger
 
-If you set `auto_debrief: true` in `${HACKING_LAB}/AGENTS.md` (or your gstack config), the agent auto-runs debrief at session end. Otherwise, manually invoke.
+If you set `auto_debrief: true` in `~/security-lab/AGENTS.md` (or your gstack config), the agent auto-runs debrief at session end. Otherwise, manually invoke.
 
 ## Time budget
 

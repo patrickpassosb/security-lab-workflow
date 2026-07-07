@@ -1,9 +1,40 @@
+# ─── Third-party content (own licenses; users clone themselves) ───
 sandboxes/
 tools/
 wordlists/
-findings/
-targets/
 proxy/
+containers/
+
+# ─── Engagement-specific workspaces (YOUR data, never committed) ───
+ctfs/
+bounties/
+cves/
+findings/
+gbrain/learning/
+
+# ─── Personal artifacts at repo root ───
+.audit.jsonl
+PLAN.md
+PRE_STAGE_REPORT.md
+POST_CTF_PLAN.md
+docs/open-source-plan.html
+*-lessons.md
+*-postmortem.md
+*-handoff.md
+fastapi-*.md
+pycel-*.md
+MULTI_ENGAGEMENT_PLAN.html
+ctf/
+ctf-fluid-attacks/
+
+# ─── Stale backups ───
+*.bak.*
+scope.yaml.bak.*
+
+# ─── Local install artifacts ───
+.agents/
+
+# ─── OS / editor cruft ───
 .DS_Store
 *.swp
 *.swo
@@ -12,3 +43,12 @@ proxy/
 node_modules/
 __pycache__/
 *.pyc
+
+# ─── Secrets (the .env pattern) ───
+.env
+.env.*
+!.env.example
+
+# ─── Evidence dumps (defensive: even inside tracked dirs) ───
+core.*
+*.core

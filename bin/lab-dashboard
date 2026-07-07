@@ -1,0 +1,175 @@
+#!/usr/bin/env python3
+"""lab-dashboard — CTF challenge tracking dashboard.
+
+Shows all active challenges across all program folders, their status,
+time spent, flag status, and last activity. Helps you track progress
+during a CTF.
+
+Usage:
+    lab-dashboard              # show all challenges in all CTF program folders
+    lab-dashboard <ctf-folder>  # show challenges for a specific CTF
+    lab-dashboard --watch      # refresh every 30 seconds
+
+Reads solve_log.md from each challenge workspace to extract status.
+"""
+
+from __future__ import annotations
+
+import os
+import re
+import sys
+import time
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+LAB = Path(os.environ.get("HACKING_LAB", os.path.expanduser("~/security-lab")))
+CTFS_DIR = LAB / "ctfs"
+
+
+def find_challenges(ctf_folder: Path) -> list[Path]:
+    """Find all challenge workspace dirs in a CTF folder."""
+    challenges_dir = ctf_folder / "challenges"
+    if not challenges_dir.exists():
+        return []
+    return sorted([d for d in challenges_dir.iterdir() if d.is_dir() and (d / "engagement.txt").exists() or (d / "solve_log.md").exists()])
+
+
+def parse_solve_log(path: Path) -> dict[str, Any]:
+    """Extract status from solve_log.md."""
+    info: dict[str, Any] = {
+        "status": "unknown",
+        "flag": "",
+        "time_spent": "",
+        "last_hypothesis": "",
+        "failed_count": 0,
+    }
+    if not path.exists():
+        return info
+
+    text = path.read_text(encoding="utf-8")
+
+    # Status (from the Status: line)
+    m = re.search(r'\*\*Status:\*\*\s*(\w+)', text)
+    if m:
+        info["status"] = m.group(1).lower()
+
+    # Eval section
+    eval_match = re.search(r'## Eval\s*\n(.*?)(?=\n##\s|\Z)', text, re.DOTALL)
+    if eval_match:
+        eval_text = eval_match.group(1)
+        solved_match = re.search(r'Solved:\s*(\w+)', eval_text)
+        if solved_match:
+            info["solved"] = solved_match.group(1).lower() == "yes"
+        time_match = re.search(r'Time spent:\s*(.+)', eval_text)
+        if time_match:
+            info["time_spent"] = time_match.group(1).strip()
+
+    # Flag
+    flag_match = re.search(r'flag\{[^}]+\}|CTF\{[^}]+\}', text)
+    if flag_match:
+        info["flag"] = flag_match.group(0)
+
+    # Failed paths count
+    failed_section = re.search(r'## Failed Paths.*?\n(.*?)(?=\n##\s|\Z)', text, re.DOTALL)
+    if failed_section:
+        lines = [l for l in failed_section.group(1).splitlines() if l.strip().startswith("-")]
+        info["failed_count"] = len(lines)
+
+    # Last hypothesis
+    hypo_match = re.findall(r'\|\s*\w+\s*\|[^|]+\|([^|]+)\|([^|]*)\|([^|]*)\|', text)
+    if hypo_match:
+        info["last_hypothesis"] = hypo_match[-1][0].strip()[:60]
+
+    return info
+
+
+def get_last_activity(challenge_dir: Path) -> str:
+    """Get the most recent file modification time in a challenge dir."""
+    try:
+        latest = max(challenge_dir.rglob("*"), key=lambda p: p.stat().st_mtime if p.is_file() else 0)
+        mtime = datetime.fromtimestamp(latest.stat().st_mtime, tz=timezone.utc)
+        return mtime.strftime("%H:%M")
+    except Exception:
+        return "?"
+
+
+def render_dashboard(challenges: list[tuple[Path, dict]]) -> None:
+    """Render the dashboard table."""
+    if not challenges:
+        print("No challenges found. Create one with: lab-new ctf <name> --target <url> --engagement <name>")
+        return
+
+    print(f"\n{'CHALLENGE':<25} {'STATUS':<12} {'FLAG':<10} {'TIME':<10} {'FAILED':<8} {'LAST':<6} {'HYPOTHESIS'}")
+    print("-" * 110)
+
+    for challenge_dir, info in challenges:
+        name = challenge_dir.name[:24]
+        status = info.get("status", "unknown")[:11]
+        flag = "FOUND" if info.get("flag") else ("SOLVED" if info.get("solved") else "-")
+        time_spent = info.get("time_spent", "-")[:9]
+        failed = str(info.get("failed_count", 0))
+        last = get_last_activity(challenge_dir)
+        hypo = info.get("last_hypothesis", "")[:45]
+
+        # Color coding (ANSI)
+        if flag == "SOLVED" or info.get("status") == "solved":
+            status_color = "\033[92m"  # green
+        elif info.get("status") == "active":
+            status_color = "\033[93m"  # yellow
+        else:
+            status_color = "\033[0m"
+
+        reset = "\033[0m"
+        print(f"{name:<25} {status_color}{status:<12}{reset} {flag:<10} {time_spent:<10} {failed:<8} {last:<6} {hypo}")
+
+    print(f"\nTotal: {len(challenges)} challenges")
+    solved = sum(1 for _, i in challenges if i.get("flag") or i.get("solved"))
+    active = sum(1 for _, i in challenges if i.get("status") == "active" and not i.get("flag"))
+    print(f"Solved: {solved} | Active: {active} | Stuck: {len(challenges) - solved - active}")
+
+
+def main() -> int:
+    watch = "--watch" in sys.argv
+    specific = next((a for a in sys.argv[1:] if not a.startswith("-")), None)
+
+    while True:
+        # Clear screen for watch mode
+        if watch:
+            os.system("clear" if os.name != "nt" else "cls")
+
+        print(f"CTF Challenge Dashboard — {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        print("=" * 110)
+
+        all_challenges: list[tuple[Path, dict]] = []
+
+        if specific:
+            ctf_folder = CTFS_DIR / specific
+            if not ctf_folder.exists():
+                print(f"CTF folder not found: {ctf_folder}")
+                return 1
+            folders = [ctf_folder]
+        else:
+            folders = sorted([d for d in CTFS_DIR.iterdir() if d.is_dir()]) if CTFS_DIR.exists() else []
+
+        for ctf_folder in folders:
+            challenges = find_challenges(ctf_folder)
+            for ch in challenges:
+                info = parse_solve_log(ch / "solve_log.md")
+                all_challenges.append((ch, info))
+
+        render_dashboard(all_challenges)
+
+        if not watch:
+            return 0
+
+        print("\n(Refreshing in 30s... Ctrl+C to exit)")
+        time.sleep(30)
+
+
+if __name__ == "__main__":
+    try:
+        raise SystemExit(main())
+    except KeyboardInterrupt:
+        print("\nExited.")
+        sys.exit(0)

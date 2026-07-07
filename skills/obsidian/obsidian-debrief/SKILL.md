@@ -25,7 +25,7 @@ Writes a structured note to the Obsidian vault at the end of a session. Pairs wi
 ### Method 1 — Bash (works even if Obsidian app isn't running)
 
 ```bash
-VAULT=${VAULT_DIR}
+VAULT="${VAULT_DIR:-$HOME/obsidian-vault}"
 TODAY=$(date +%Y-%m-%d)
 SESSION_NOTE="$VAULT/Cybersecurity/Sessions/$TODAY.md"
 
@@ -85,9 +85,9 @@ The first time you append to a date file, add frontmatter:
 ---
 date: 2026-07-01
 type: session-journal
-tags: [journal, ctf-prep, fluid-attacks]
+tags: [journal, ctf-prep]
 related:
-  - "[[../../CTFs/<CTF_NAME>/01 - Methodology]]"
+  - "[[../../CTFs/<CTF name>/01 - Methodology]]"
 ---
 ```
 

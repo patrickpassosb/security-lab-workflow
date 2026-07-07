@@ -1,54 +1,84 @@
 ---
 name: scope
 description: |
-  Validates a target is in-scope before any tool runs. Reads
-  ${HACKING_LAB}/scope.yaml. Use when: "is this in scope", "check target",
-  "validate scope", before any offensive tool invocation. Default-deny.
+  Validates a target is in-scope before any tool runs. Uses the
+  engagement-aware scope system: global ~/security-lab/scope.yaml (denied
+  list + defaults) merged with ~/security-lab/engagements/<name>.yaml
+  (per-engagement in_scope, rate_limits, techniques). Use when: "is
+  this in scope", "check target", "validate scope", before any
+  offensive tool invocation. Default-deny.
 ---
 
 # scope
 
-## Always run first
+## Multi-engagement system
 
-Before any offensive tool (nuclei, sqlmap, ffuf, nmap, etc.), check the target against `${HACKING_LAB}/scope.yaml`.
+The lab now supports **parallel engagements** (CTF, bounty, CVE research).
+Each engagement has its own scope file in `~/security-lab/engagements/<name>.yaml`.
+The global `~/security-lab/scope.yaml` contains only the universal denied list
+(gov/mil/edu) and default rate limits.
+
+**To check a target:**
+
+```bash
+# If you know the engagement:
+lab-scope <target> --engagement <name>
+
+# If you're in a workspace directory (auto-detect engagement):
+lab-scope <target>    # reads engagement.txt from the workspace
+
+# List all engagements:
+lab-scope --list
+```
+
+**Exit codes:** 0 = OK, 2 = DENIED, 3 = UNKNOWN (ask human).
 
 ## Logic (default-deny)
 
 ```python
-# Pseudocode — translate to bash or your tool
-def is_in_scope(target):
-    cfg = load_yaml("${HACKING_LAB}/scope.yaml")
+# Pseudocode — implemented in ~/security-lab/bin/lab-scope
+def is_in_scope(target, engagement):
+    global = load("~/security-lab/scope.yaml")
+    eng = load(f"~/security-lab/engagements/{engagement}.yaml")
 
-    # 1. Denied patterns always reject
-    for pat in cfg.denied:
+    # 1. Global denied always rejects (gov/mil/edu — non-negotiable)
+    for pat in global.denied:
+        if matches(target, pat.pattern):
+            return False, f"GLOBAL DENIED: {pat.reason}"
+
+    # 2. Engagement-specific denied rejects (merged with global)
+    for pat in eng.denied:
         if matches(target, pat.pattern):
             return False, f"DENIED: {pat.reason}"
 
-    # 2. In-scope patterns allow
-    for pat in cfg.in_scope:
+    # 3. Engagement in-scope allows
+    for pat in eng.in_scope:
         if matches(target, pat.pattern):
             return True, f"OK: {pat.note}"
 
-    # 3. Default-deny
+    # 4. Default-deny
     return False, "NOT in scope; ask human before proceeding"
 ```
 
-## Bash implementation (use this if you don't want to write a script)
+## Determining the engagement
+
+If you're working inside a workspace directory (e.g. `~/security-lab/findings/ctf/my-challenge/`),
+read `engagement.txt` to get the engagement name, then pass it to `lab-scope`:
 
 ```bash
-TARGET="$1"
-DENY_PATTERN='\.gov$|\.mil$|\.edu$|target\.example\.ctf|^github\.com$'
-if echo "$TARGET" | grep -qE "$DENY_PATTERN"; then
-  echo "DENIED: $TARGET matches a denied pattern"
-  exit 1
+ENG=$(cat engagement.txt 2>/dev/null || echo "")
+if [ -n "$ENG" ]; then
+  lab-scope "$TARGET" --engagement "$ENG"
+else
+  echo "No engagement.txt found. Specify --engagement manually."
 fi
-# Otherwise, ASK before proceeding (default-deny)
-echo "Target $TARGET not explicitly in scope. Confirm with human."
 ```
 
 ## If the human approves an out-of-scope target
 
-Add the target to `${HACKING_LAB}/scope.yaml` `in_scope` section FIRST, then proceed. Don't bypass scope via approval alone — persist the approval.
+Add the target to the **engagement scope file** (`~/security-lab/engagements/<name>.yaml`)
+`in_scope` section FIRST, then proceed. Don't bypass scope via approval alone —
+persist the approval.
 
 ## Edge cases
 
@@ -56,12 +86,12 @@ Add the target to `${HACKING_LAB}/scope.yaml` `in_scope` section FIRST, then pro
 - **URLs with paths:** validate the host, not the full URL. `https://ctf.example.com/admin` → check `ctf.example.com`.
 - **Wildcards in `in_scope` patterns:** `*.example.com` matches `foo.example.com` AND `foo.bar.example.com` (most glob libs treat `*` as a single segment unless specified).
 - **The human's own machine:** `localhost`, `127.0.0.1`, and the agent's host IP are always in-scope for local lab work.
+- **No engagement specified:** `lab-scope` checks against the global denied list only. This is a warning, not an error — but you should always know which engagement you're working under.
 
 ## Audit log
 
-Every scope check (pass or fail) is logged:
+Every scope check (pass or fail) is logged by `lab-scope`:
 
-```bash
-echo "{\"ts\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\",\"action\":\"scope-check\",\"target\":\"$TARGET\",\"result\":\"$RESULT\"}" \
-  >> ${HACKING_LAB}/findings/.agent-audit.jsonl
+```json
+{"ts":"2026-07-03T...","action":"scope-check","target":"example.com","engagement":"bounty-example","result":"OK: ..."}
 ```

@@ -1,5 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT="${HACKING_LAB}/tools/jwt_tool"
+LAB="${HACKING_LAB:-$HOME/security-lab}"
+ROOT="${JWT_TOOL_DIR:-$LAB/tools/jwt_tool}"
+if [ ! -f "$ROOT/jwt_tool.py" ]; then
+  echo "[!] jwt_tool not found at $ROOT/jwt_tool.py" >&2
+  echo "    Set JWT_TOOL_DIR env var to its path, or clone jwt_tool into \$LAB/tools/." >&2
+  exit 1
+fi
 exec "$ROOT/.venv/bin/python" "$ROOT/jwt_tool.py" "$@"

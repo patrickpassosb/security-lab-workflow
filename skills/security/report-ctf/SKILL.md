@@ -1,31 +1,88 @@
 ---
 name: report-ctf
 description: |
-  Generate a flag writeup for a CTF challenge. Captures: challenge
-  metadata, target, vuln class, exploit chain, evidence, lessons. Writes
-  to ${HACKING_LAB}/findings/ctf/<challenge>/ and the Obsidian vault.
+  Generate a flag writeup for a CTF challenge — but ONLY after the flag
+  has been submitted and accepted by the human. The agent hands off
+  the flag first, the human submits it, and only on "accepted" does
+  the agent write the writeup. Captures: challenge metadata, target,
+  vuln class, exploit chain, evidence, lessons. Writes to
+  ~/security-lab/findings/ctf/<challenge>/ and the Obsidian vault.
   Use when: "write up this flag", "I found a flag", "document this
-  finding". Routes from ctf-workflow (or directly when invoked).
+  finding" — but only after the human confirms the flag was accepted.
+  Routes from ctf-workflow (or directly when invoked).
 ---
 
 # report-ctf
 
-## Inputs (gather before writing)
+## CRITICAL: Flag handoff comes BEFORE the writeup
 
+**Speed wins CTFs. First bloods = money.** The writeup is post-hoc
+documentation. The flag submission is the time-critical path.
+
+```
+WRONG:  find flag → write full writeup → "submit: $FLAG"
+RIGHT:  find flag → capture evidence (1 cmd) → HAND OFF flag → [human submits]
+        → human says "accepted" → NOW write the writeup
+        → human says "rejected" → log in Failed Paths, resume hunting
+```
+
+### When you find a flag candidate
+
+1. **Capture evidence** (if not already saved during solving):
+   ```bash
+   ~/security-lab/bin/ctf-evidence "$CHALLENGE" winning-request -- curl -i "$URL"
+   ```
+   This is ~1 second. The raw request/response is the receipt for the writeup.
+
+2. **Output the boxed FLAG CANDIDATE block** and STOP:
+   ```
+   ╔════════════════════════════════════════╗
+   ║          FLAG CANDIDATE                ║
+   ╠════════════════════════════════════════╣
+   ║  flag{example_123}                     ║
+   ║                                        ║
+   ║  Confidence: 80%                        ║
+   ║  Source: SQLi on /login, resp line 42   ║
+   ║  Evidence: evidence/20260704-sqli.txt   ║
+   ╠════════════════════════════════════════╣
+   ║  Submit and tell me: accepted/rejected  ║
+   ╚════════════════════════════════════════╝
+   ```
+
+3. **Wait for the human's verdict.** Do NOT write the writeup yet.
+
+### On "accepted" → write the writeup (steps below)
+
+### On "rejected"
+
+1. Append to `solve_log.md` under `Failed Paths / Do Not Repeat`:
+   ```markdown
+   - Flag `flag{wrong_example}` rejected. Hypothesis: SQLi on /login extracts
+     the flag from the error message. The extracted string was a decoy.
+   ```
+2. Resume hunting with a different approach.
+3. Do NOT write a writeup.
+
+## Inputs (gather before writing the writeup — AFTER acceptance)
+
+- `~/security-lab/findings/ctf/<challenge>/solve_log.md` (primary source of truth)
+- `~/security-lab/findings/ctf/<challenge>/evidence/` (request/response, screenshots, exploit output)
 - Challenge name + category (web/pwn/crypto/stego/etc.)
 - Target (URL, file, host)
-- The flag itself (if you have it)
+- The flag itself (confirmed accepted)
 - Vulnerability class (SQLi, IDOR, RCE, etc.)
 - The exploit chain (steps to reproduce)
-- Evidence (request/response, screenshots, code snippets)
+- Evidence (request/response, screenshots, code snippets) — already saved during solving
 - Time spent
 - Lessons learned
+
+If `solve_log.md` is missing, create it before writing the report. Do not reconstruct from memory unless the user explicitly asks.
 
 ## Write the writeup
 
 ### File 1: findings dir writeup
 
-`${HACKING_LAB}/findings/ctf/<challenge-name>/writeup.md`
+`~/security-lab/findings/ctf/<challenge-name>/writeup.md`
 
 ```markdown
 # <Challenge Name>
@@ -82,7 +139,9 @@ description: |
 
 ### File 2: vault writeup
 
-`${VAULT_DIR}/Cybersecurity/CTFs/<CTF name>/99 - Writeups/<YYYY-MM-DD> - <challenge>.md`
+`$VAULT_DIR/Cybersecurity/CTFs/<CTF name>/99 - Writeups/<YYYY-MM-DD> - <challenge>.md`
+
+> **Note:** `VAULT_DIR` must point to your Obsidian vault root (e.g. export `VAULT_DIR=~/path/to/obsidian-vault` before running). The examples below assume this env var is set.
 
 Same structure, but with these additions:
 
@@ -119,10 +178,26 @@ The vault writeup gets:
 ```bash
 # Save the winning request/response
 CHALLENGE="<name>"
-mkdir -p ${HACKING_LAB}/findings/ctf/$CHALLENGE
-cp ${HACKING_LAB}/findings/ctf/$TGT/web-attack/nuclei.json ${HACKING_LAB}/findings/ctf/$CHALLENGE/ 2>/dev/null
-# Or save the raw curl that worked
-curl -i "$URL" -X POST -d "..." > ${HACKING_LAB}/findings/ctf/$CHALLENGE/evidence-curl.txt
+mkdir -p ~/security-lab/findings/ctf/$CHALLENGE
+cp ~/security-lab/findings/ctf/$TGT/web-attack/nuclei.json ~/security-lab/findings/ctf/$CHALLENGE/ 2>/dev/null
+# Or capture a reproducible command with metadata
+~/security-lab/bin/ctf-evidence "$CHALLENGE" winning-request -- curl -i "$URL"
+```
+
+Prefer evidence files produced by `work/exploit.py` for payload-bearing requests. Sensitive/binary output should be saved raw and Base64-encoded; do not paste raw secrets into the writeup.
+
+## Add final eval to solve_log.md
+
+Before final response, append:
+
+```markdown
+## Eval
+- Solved: yes
+- Category: <category>
+- Time spent: <Xm>
+- Winning primitive: <primitive>
+- Biggest blocker: <blocker or none>
+- Workflow improvement: <what to add to playbook>
 ```
 
 ## Update the playbook
@@ -130,15 +205,15 @@ curl -i "$URL" -X POST -d "..." > ${HACKING_LAB}/findings/ctf/$CHALLENGE/evidenc
 If the challenge taught you a new trick for a vuln class, append to the playbook:
 
 ```bash
-# ${VAULT_DIR}/Cybersecurity/CTFs/<CTF name>/02 - Playbooks/<vuln-class>.md
-obsidian append file="Cybersecurity/CTFs/<CTF_NAME>/02 - Playbooks/SQLi.md" \
+# $VAULT_DIR/Cybersecurity/CTFs/<CTF name>/02 - Playbooks/<vuln-class>.md
+obsidian append file="Cybersecurity/CTFs/<CTF name>/02 - Playbooks/SQLi.md" \
   content="\n## <YYYY-MM-DD> — <Challenge name>\n- Insight: <the trick you learned>"
 ```
 
 ## Update the methodology journal
 
 ```bash
-obsidian append file="Cybersecurity/CTFs/<CTF_NAME>/01 - Methodology.md" \
+obsidian append file="Cybersecurity/CTFs/<CTF name>/01 - Methodology.md" \
   content="- <YYYY-MM-DD> Solved <Challenge> via <vuln_class> in <Xm>."
 ```
 
@@ -152,36 +227,29 @@ gbrain sync --source <obsidian-vault-source-id>
 
 The gbrain's semantic search will then find this writeup when you (or another agent) encounter a similar challenge.
 
-## Submit the flag (last step)
+## Submit the flag (ALREADY DONE — this step is before the writeup)
 
-If the CTF has a flag submission platform:
+The flag was already submitted by the human BEFORE this skill runs.
+The writeup is written only after the human confirms "accepted".
 
-```bash
-# Manual submission via the CTF web UI
-echo "Submit: $FLAG on $URL"
-```
-
-If via API (rare):
-
-```bash
-curl -X POST "$CTF_SUBMIT_URL" \
-  -H "Authorization: Bearer $CTF_TOKEN" \
-  -d "{\"flag\": \"$FLAG\"}"
-```
+If somehow the flag hasn't been submitted yet (the human skipped the
+handoff and went straight to "write the writeup"), output the boxed
+FLAG CANDIDATE block from the handoff protocol and STOP. The writeup
+comes after submission.
 
 ## Common pitfalls
 
-- **Writing the writeup after submitting.** If you forget the steps, you lose time reconstructing. Write AS you go.
+- **Writing the writeup BEFORE the flag is submitted.** This wastes time. Hand off the flag first, let the human submit, then write.
+- **Missing evidence.** Evidence should be captured DURING solving (via `ctf-evidence`), not reconstructed after. If the winning request/response wasn't saved, you've lost the receipt.
 - **Missing the "Lessons" section.** This is the part that compounds. Future-you reads the lessons, not the steps.
 - **No related-to link to the playbook.** Breaks the knowledge graph. Always link.
 - **Skipping the gbrain sync.** The writeup is invisible to the brain until synced.
-- **No evidence saved.** The writeup is just a story without the receipts. Save request/response always.
 
 ## Output
 
 After running report-ctf, you should have:
-- `${HACKING_LAB}/findings/ctf/<challenge>/writeup.md` (the full writeup)
-- `${VAULT_DIR}/Cybersecurity/CTFs/<CTF name>/99 - Writeups/<date> - <challenge>.md` (the vault version)
+- `~/security-lab/findings/ctf/<challenge>/writeup.md` (the full writeup)
+- `$VAULT_DIR/Cybersecurity/CTFs/<CTF name>/99 - Writeups/<date> - <challenge>.md` (the vault version)
 - Updated playbook (if new insight)
 - Updated methodology journal
 - gbrain synced

@@ -1,0 +1,312 @@
+#!/usr/bin/env python3
+"""lab-handoff — mechanical session-end context capture for CTF challenges.
+
+Run this before pivoting away from a challenge or stopping a session. It
+captures what was tested, what failed, and what the next agent should try.
+This makes cross-session handoff mechanical rather than depending on the
+agent remembering to do it.
+
+The #1 failure mode in CTFs is agents not reading prior
+session context and repeating dead ends 10 times. lab-handoff fixes the
+supply side: it ensures the context is actually written.
+
+Actions:
+  1. Append a ### Session N block to solve_log.md with structured template
+  2. Update Failed Paths / Do Not Repeat with new dead ends
+  3. Write/update HANDOFF.md with TL;DR for the next agent
+
+Usage:
+  lab-handoff <challenge-name> [--ctf-home <path>] [--status <solved|stuck|pivoting>]
+  lab-handoff <challenge-name> --solved --flag flag{...}
+  lab-handoff <challenge-name> --stuck --next "try the X hypothesis"
+
+Exit 0 = handoff captured successfully
+Exit 1 = error (challenge not found, etc.)
+"""
+import argparse
+import os
+import re
+import sys
+import datetime
+import json
+from pathlib import Path
+
+DEFAULT_CTF_HOME = ""  # must be passed via --ctf-home or cd into a program folder
+
+# ANSI colors
+RED = "\033[31m"
+GREEN = "\033[32m"
+YELLOW = "\033[33m"
+BOLD = "\033[1m"
+RESET = "\033[0m"
+
+def color(text, c):
+    return f"{c}{text}{RESET}"
+
+def count_sessions(content):
+    """Count existing ### Session blocks in solve_log."""
+    matches = re.findall(r'^###\s+Session\s+\d+', content, re.MULTILINE)
+    if matches:
+        nums = [int(re.search(r'\d+', m).group()) for m in matches]
+        return max(nums)
+    return 0
+
+def extract_section(content, header_pattern):
+    """Extract a markdown section by header pattern until the next ## header."""
+    lines = content.split('\n')
+    in_section = False
+    section_lines = []
+    for line in lines:
+        if re.match(header_pattern, line):
+            in_section = True
+            section_lines.append(line)
+            continue
+        if in_section and re.match(r'^##\s', line):
+            break
+        if in_section:
+            section_lines.append(line)
+    return '\n'.join(section_lines) if section_lines else None
+
+def append_session_block(solve_log_path, session_num, status, summary, 
+                         tested, failed, next_test, read_next, flag):
+    """Append a ### Session N block to solve_log.md."""
+    ts = datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+    block = f"\n### Session {session_num} ({ts}, {status})\n\n"
+    
+    if summary:
+        block += f"**Summary:** {summary}\n\n"
+    if flag:
+        block += f"**Flag:** `{flag}`\n\n"
+    if tested and len(tested) > 0:
+        block += "**Tested this session:**\n"
+        for item in tested:
+            block += f"- {item}\n"
+        block += "\n"
+    if failed and len(failed) > 0:
+        block += "**New dead ends (added to Failed Paths):**\n"
+        for item in failed:
+            block += f"- {item}\n"
+        block += "\n"
+    if next_test:
+        block += f"**Next best test:** {next_test}\n\n"
+    if read_next and len(read_next) > 0:
+        block += "**READ THIS NEXT (for next agent):**\n"
+        for item in read_next:
+            block += f"- {item}\n"
+        block += "\n"
+    
+    block += "---\n"
+    
+    content = solve_log_path.read_text(errors='replace')
+    content += block
+    solve_log_path.write_text(content)
+
+def update_failed_paths(solve_log_path, new_dead_ends):
+    """Add new dead-end entries to the Failed Paths / Do Not Repeat section."""
+    if not new_dead_ends:
+        return
+    
+    content = solve_log_path.read_text(errors='replace')
+    
+    # Find the Failed Paths section
+    fp_pattern = r'^(##\s+Failed\s+Paths\s*/\s*Do\s+Not\s+Repeat\s*)$'
+    if not re.search(fp_pattern, content, re.MULTILINE):
+        # Section doesn't exist — create it
+        return
+    
+    # Build the new entries
+    ts = datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%d')
+    new_entries = "\n".join(f"- [{ts}] {entry}" for entry in new_dead_ends)
+    
+    # Insert after the header line, before any sub-sections
+    lines = content.split('\n')
+    for i, line in enumerate(lines):
+        if re.search(fp_pattern, line):
+            # Find the next blank line or ## header
+            j = i + 1
+            while j < len(lines) and (lines[j].strip() == '' or lines[j].startswith('-')):
+                j += 1
+            # Insert new entries at position j
+            lines.insert(j, new_entries)
+            break
+    
+    solve_log_path.write_text('\n'.join(lines))
+
+def write_handoff_md(challenge_dir, challenge_name, status, summary, 
+                     flag, next_test, read_next, missing_primitive):
+    """Write or update HANDOFF.md with TL;DR for the next agent."""
+    handoff_path = challenge_dir / "HANDOFF.md"
+    ts = datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+    
+    if handoff_path.exists():
+        # Append to existing
+        content = handoff_path.read_text(errors='replace')
+    else:
+        content = f"# {challenge_name} — Handoff for Next Agent\n\n"
+    
+    block = f"\n---\n\n## Handoff {ts} — {status}\n\n"
+    
+    if status == "solved" and flag:
+        block += f"**STATUS: SOLVED** — Flag: `{flag}`\n\n"
+        block += f"**Winning technique:** {summary}\n\n"
+    elif status == "stuck":
+        block += f"**STATUS: STUCK** — missing primitive identified below\n\n"
+        if missing_primitive:
+            block += f"**Missing primitive:** {missing_primitive}\n\n"
+        if summary:
+            block += f"**What was tried:** {summary}\n\n"
+    elif status == "pivoting":
+        block += f"**STATUS: PIVOTING** — returning to this challenge later\n\n"
+        if summary:
+            block += f"**Where we are:** {summary}\n\n"
+    
+    if next_test:
+        block += f"**Next agent should try:** {next_test}\n\n"
+    if read_next and len(read_next) > 0:
+        block += "**READ THIS FIRST (before any tool):**\n"
+        for item in read_next:
+            block += f"- {item}\n"
+        block += "\n"
+    
+    block += "**Before attacking:** run `lab-preflight {name}` — it will show you the Failed Paths.\n".format(name=challenge_name)
+    
+    content += block
+    handoff_path.write_text(content)
+
+def log_audit(challenge_name, action, detail):
+    """Log to the audit log."""
+    audit_path = os.path.expanduser("~/security-lab/findings/.agent-audit.jsonl")
+    ts = datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+    entry = {
+        "ts": ts,
+        "agent": os.environ.get("USER", "unknown"),
+        "action": action,
+        "challenge": challenge_name,
+        "detail": detail,
+    }
+    try:
+        with open(audit_path, 'a') as f:
+            f.write(json.dumps(entry) + "\n")
+    except Exception:
+        pass  # Don't fail the handoff if audit log is unwritable
+
+def main():
+    parser = argparse.ArgumentParser(
+        description='CTF session handoff — capture context for the next agent',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Run this before pivoting or stopping. It captures:
+  1. Session block in solve_log.md (what was tested, what failed, what's next)
+  2. Updates Failed Paths / Do Not Repeat with new dead ends
+  3. HANDOFF.md with TL;DR for the next agent
+
+Examples:
+  lab-handoff sheets --stuck --next "try the same-site navigation approach"
+  lab-handoff sheets --solved --flag "flag{abc123}" --summary "SameSite cookie chain"
+  lab-handoff sheets --pivoting --summary "stuck on CSP bypass, trying other challenges"
+""")
+    parser.add_argument('challenge', help='Challenge name')
+    parser.add_argument('--ctf-home', default=DEFAULT_CTF_HOME, help='CTF home directory')
+    parser.add_argument('--status', choices=['solved', 'stuck', 'pivoting'],
+                        help='Session outcome status')
+    parser.add_argument('--solved', action='store_true', help='Challenge was solved')
+    parser.add_argument('--stuck', action='store_true', help='Stuck — missing primitive')
+    parser.add_argument('--pivoting', action='store_true', help='Pivoting to another challenge')
+    parser.add_argument('--flag', help='Flag value (with --solved)')
+    parser.add_argument('--summary', help='One-line summary of the session')
+    parser.add_argument('--next', help='Next best test for the next agent')
+    parser.add_argument('--missing', help='Description of the missing primitive (with --stuck)')
+    parser.add_argument('--tested', nargs='*', default=[], help='List of things tested this session')
+    parser.add_argument('--failed', nargs='*', default=[], help='New dead ends to add to Failed Paths')
+    parser.add_argument('--read-next', nargs='*', default=[], help='Files/items the next agent should read first')
+
+    args = parser.parse_args()
+
+    # Determine status
+    if args.solved:
+        status = "solved"
+    elif args.stuck:
+        status = "stuck"
+    elif args.pivoting:
+        status = "pivoting"
+    elif args.status:
+        status = args.status
+    else:
+        status = "pivoting"  # default
+
+    # Resolve ctf_home: explicit flag > cwd detection > fail
+    ctf_home_str = args.ctf_home
+    if not ctf_home_str:
+        cwd = Path.cwd()
+        # If cwd is inside a .../challenges/<name> dir, ctf_home is the grandparent's parent
+        if (cwd / "solve_log.md").exists() and cwd.name == args.challenge:
+            ctf_home_str = str(cwd.parent.parent)
+        # If cwd contains a challenges/ dir, it's the ctf home
+        elif (cwd / "challenges").is_dir():
+            ctf_home_str = str(cwd)
+    if not ctf_home_str:
+        print(color("\n  FAIL: could not determine CTF home. Pass --ctf-home or run from a program folder.", RED))
+        sys.exit(1)
+    ctf_home = Path(os.path.expanduser(ctf_home_str))
+    challenge_dir = ctf_home / "challenges" / args.challenge
+    solve_log_path = challenge_dir / "solve_log.md"
+
+    if not challenge_dir.exists():
+        print(color(f"\n  FAIL: challenge directory not found: {challenge_dir}", RED))
+        sys.exit(1)
+
+    if not solve_log_path.exists():
+        print(color(f"\n  FAIL: solve_log.md not found: {solve_log_path}", RED))
+        sys.exit(1)
+
+    content = solve_log_path.read_text(errors='replace')
+    session_num = count_sessions(content) + 1
+
+    print(color(f"\n  lab-handoff — {args.challenge} (session {session_num}, {status})", BOLD))
+    print(color(f"  {'=' * 50}", BOLD))
+
+    # 1. Append session block
+    append_session_block(
+        solve_log_path, session_num, status, args.summary,
+        args.tested, args.failed, args.next, args.read_next, args.flag
+    )
+    print(color("  [PASS]", GREEN) + f" Session {session_num} block appended to solve_log.md")
+
+    # 2. Update Failed Paths
+    if args.failed:
+        update_failed_paths(solve_log_path, args.failed)
+        print(color("  [PASS]", GREEN) + f" {len(args.failed)} new dead end(s) added to Failed Paths")
+    else:
+        print(color("  [SKIP]", YELLOW) + " No new dead ends to add to Failed Paths")
+
+    # 3. Write/update HANDOFF.md
+    write_handoff_md(
+        challenge_dir, args.challenge, status, args.summary,
+        args.flag, args.next, args.read_next, args.missing
+    )
+    print(color("  [PASS]", GREEN) + " HANDOFF.md updated with TL;DR for next agent")
+
+    # 4. Log to audit
+    detail = f"status={status}"
+    if args.flag:
+        detail += f" flag={args.flag}"
+    if args.missing:
+        detail += f" missing={args.missing}"
+    log_audit(args.challenge, "lab-handoff", detail)
+    print(color("  [PASS]", GREEN) + " Audit log updated")
+
+    # Summary
+    print()
+    if status == "solved":
+        print(color("  HANDOFF COMPLETE — challenge solved, context captured.", GREEN))
+    elif status == "stuck":
+        print(color("  HANDOFF COMPLETE — next agent should run: lab-preflight " + args.challenge, YELLOW))
+        if args.missing:
+            print(color(f"  Missing primitive: {args.missing}", YELLOW))
+    else:
+        print(color("  HANDOFF COMPLETE — next agent should run: lab-preflight " + args.challenge, GREEN))
+    print()
+    sys.exit(0)
+
+if __name__ == '__main__':
+    main()

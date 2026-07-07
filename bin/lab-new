@@ -1,0 +1,325 @@
+#!/usr/bin/env python3
+"""lab-new — generalized workspace creator for the multi-engagement hacking lab.
+
+Creates a scoped, evidence-ready workspace for any engagement type:
+    ctf, bounty, or cve.
+
+Usage:
+    lab-new <type> <name> [--target <url>] [--engagement <name>] [--category <web|crypto|...>]
+
+Examples:
+    lab-new ctf my-challenge --target http://localhost:8080 --engagement ctf-example
+    lab-new bounty my-program --target example.com --engagement bounty-example
+    lab-new cve log4j --engagement cve-research
+
+Creates:
+    ~/security-lab/findings/<type>/<name>/
+        ├── engagement.txt            # engagement name (for downstream tools)
+        ├── target.txt                 # target URL or host
+        ├── scope_snapshot.yaml        # copy of the engagement scope file
+        ├── solve_log.md OR bounty_log.md OR cve_log.md
+        ├── writeup.md OR report_h1.md OR advisory.md
+        ├── work/exploit.py OR poc.py
+        ├── work/endpoint_siblings.txt
+        ├── evidence/
+        ├── recon/
+        └── web-attack/
+
+The workspace is self-contained: each has its own scope snapshot, log,
+evidence, and work dirs. Multiple agents can work in parallel without
+cross-contamination.
+"""
+
+from __future__ import annotations
+
+import os
+import re
+import shutil
+import subprocess
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+LAB = Path(os.environ.get("HACKING_LAB", os.path.expanduser("~/security-lab")))
+FINDINGS_ROOT = LAB / "findings"
+ENGAGEMENTS_DIR = LAB / "engagements"
+TEMPLATES_DIR = LAB / "templates"
+GLOBAL_SCOPE = LAB / "scope.yaml"
+
+TYPE_CONFIG = {
+    "ctf": {
+        "findings_subdir": "ctf",
+        "workspace_subdir": "challenges",
+        "log_template": "solve_log.md",
+        "log_filename": "solve_log.md",
+        "writeup_filename": "writeup.md",
+        "exploit_filename": "exploit.py",
+        "exploit_template": "exploit.py",
+        "template_subdir": "ctf",
+        "default_engagement": "",
+        "default_category": "web",
+    },
+    "bounty": {
+        "findings_subdir": "bounty",
+        "workspace_subdir": "findings",
+        "log_template": "bounty_log.md",
+        "log_filename": "bounty_log.md",
+        "writeup_filename": "report_h1.md",
+        "exploit_filename": "exploit.py",
+        "exploit_template": "exploit.py",
+        "template_subdir": "bounty",
+        "default_engagement": "",
+        "default_category": "web",
+    },
+    "cve": {
+        "findings_subdir": "cve",
+        "workspace_subdir": "findings",
+        "log_template": "cve_log.md",
+        "log_filename": "cve_log.md",
+        "writeup_filename": "advisory.md",
+        "exploit_filename": "poc.py",
+        "exploit_template": "poc.py",
+        "template_subdir": "cve",
+        "default_engagement": "cve-research",
+        "default_category": "web",
+    },
+}
+
+
+def usage() -> None:
+    print(__doc__)
+
+
+def parse_args() -> dict[str, Any]:
+    args = {"type": "", "name": "", "target": "", "engagement": "", "category": ""}
+    remaining = sys.argv[1:]
+
+    if not remaining or remaining[0] in ("-h", "--help"):
+        usage()
+        sys.exit(0)
+
+    idx = 0
+    while idx < len(remaining):
+        arg = remaining[idx]
+        if arg in ("--target", "--url") and idx + 1 < len(remaining):
+            args["target"] = remaining[idx + 1]
+            idx += 2
+        elif arg.startswith("--target="):
+            args["target"] = arg.split("=", 1)[1]
+            idx += 1
+        elif arg == "--engagement" and idx + 1 < len(remaining):
+            args["engagement"] = remaining[idx + 1]
+            idx += 2
+        elif arg.startswith("--engagement="):
+            args["engagement"] = arg.split("=", 1)[1]
+            idx += 1
+        elif arg == "--category" and idx + 1 < len(remaining):
+            args["category"] = remaining[idx + 1]
+            idx += 2
+        elif arg.startswith("--category="):
+            args["category"] = arg.split("=", 1)[1]
+            idx += 1
+        elif arg.startswith("-"):
+            print(f"Unknown option: {arg}", file=sys.stderr)
+            sys.exit(2)
+        elif not args["type"]:
+            args["type"] = arg
+            idx += 1
+        elif not args["name"]:
+            args["name"] = arg
+            idx += 1
+        else:
+            print(f"Unexpected argument: {arg}", file=sys.stderr)
+            sys.exit(2)
+
+    if not args["type"] or not args["name"]:
+        usage()
+        sys.exit(2)
+
+    if args["type"] not in TYPE_CONFIG:
+        print(f"Unknown type: {args['type']}. Must be one of: {', '.join(TYPE_CONFIG)}", file=sys.stderr)
+        sys.exit(2)
+
+    name_check = re.match(r"^[A-Za-z0-9._-]+$", args["name"])
+    if not name_check:
+        print(f"Invalid name: {args['name']}. Use only letters, numbers, dots, hyphens, underscores.", file=sys.stderr)
+        sys.exit(2)
+
+    if ".." in args["name"] or "/" in args["name"] or "\\" in args["name"]:
+        print(f"Invalid name: {args['name']}", file=sys.stderr)
+        sys.exit(2)
+
+    return args
+
+
+def scope_check(target: str, engagement: str) -> tuple[int, str]:
+    result = subprocess.run(
+        [str(LAB / "bin" / "lab-scope"), target, "--engagement", engagement],
+        capture_output=True,
+        text=True,
+    )
+    return result.returncode, result.stdout.strip()
+
+
+def fill_template(template_path: Path, dest_path: Path, replacements: dict[str, str]) -> None:
+    text = template_path.read_text(encoding="utf-8")
+    for key, value in replacements.items():
+        text = text.replace(f"{{{{{key}}}}}", value)
+    dest_path.write_text(text, encoding="utf-8")
+
+
+def main() -> int:
+    args = parse_args()
+    cfg = TYPE_CONFIG[args["type"]]
+
+    engagement = args["engagement"] or cfg["default_engagement"]
+    if not engagement:
+        print(f"ERROR: --engagement is required for type '{args['type']}'", file=sys.stderr)
+        return 2
+
+    eng_scope_path = ENGAGEMENTS_DIR / f"{engagement}.yaml"
+    if not eng_scope_path.exists():
+        print(f"ERROR: engagement scope file not found: {eng_scope_path}", file=sys.stderr)
+        print(f"Available engagements:", file=sys.stderr)
+        for f in sorted(ENGAGEMENTS_DIR.glob("*.yaml")):
+            print(f"  {f.stem}", file=sys.stderr)
+        return 2
+
+    scope_checked = "no"
+    if args["target"]:
+        code, msg = scope_check(args["target"], engagement)
+        print(msg)
+        if code == 2:
+            return 2
+        if code == 3:
+            print("Target not in scope. Add it to the engagement scope file or confirm with human.", file=sys.stderr)
+            return 3
+        scope_checked = "yes"
+
+    # Determine workspace path: cd-then-create mode or legacy global mode.
+    # If cwd contains AGENTS.md, we're in a program folder → create workspace relative to cwd.
+    # Otherwise, fall back to the old global findings/<type>/<name>/ path.
+    cwd = Path.cwd()
+    if (cwd / "AGENTS.md").exists():
+        # cd-then-create: workspace = ./<workspace_subdir>/<name>/
+        work = cwd / cfg["workspace_subdir"] / args["name"]
+        ws_mode = "program"
+    else:
+        # Legacy: workspace = ~/security-lab/findings/<type>/<name>/
+        work = FINDINGS_ROOT / cfg["findings_subdir"] / args["name"]
+        ws_mode = "legacy"
+
+    work.mkdir(parents=True, exist_ok=True)
+
+    (work / "recon").mkdir(exist_ok=True)
+    (work / "web-attack").mkdir(exist_ok=True)
+    (work / "work").mkdir(exist_ok=True)
+    (work / "evidence").mkdir(exist_ok=True)
+    (work / "extracts").mkdir(exist_ok=True)
+    (work / "notes").mkdir(exist_ok=True)
+
+    target = args["target"]
+    (work / "target.txt").write_text(target + "\n", encoding="utf-8")
+
+    if GLOBAL_SCOPE.exists():
+        shutil.copy2(GLOBAL_SCOPE, work / "scope_snapshot.yaml")
+    if eng_scope_path.exists():
+        shutil.copy2(eng_scope_path, work / "engagement_scope_snapshot.yaml")
+
+    (work / "engagement.txt").write_text(engagement + "\n", encoding="utf-8")
+
+    date_utc = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    category = args["category"] or cfg["default_category"]
+
+    tmpl_dir = TEMPLATES_DIR / cfg["template_subdir"]
+
+    log_template = tmpl_dir / cfg["log_template"]
+    log_dest = work / cfg["log_filename"]
+    if not log_dest.exists() and log_template.exists():
+        replacements = {
+            "CHALLENGE": args["name"],
+            "TARGET": target or "unknown",
+            "CATEGORY": category,
+            "CTF_NAME": engagement,
+            "DATE": date_utc,
+            "SCOPE_CHECKED": scope_checked,
+            "PROGRAM": args["name"],
+            "PLATFORM": "hackerone",
+            "PROGRAM_URL": "",
+            "ENGAGEMENT": engagement,
+            "PROJECT": args["name"],
+            "REPO": "",
+            "LOCAL_CLONE": "",
+            "REPORTER": os.environ.get("USER", "agent"),
+        }
+        fill_template(log_template, log_dest, replacements)
+
+    exploit_template = tmpl_dir / cfg["exploit_template"]
+    exploit_dest = work / "work" / cfg["exploit_filename"]
+    if not exploit_dest.exists() and exploit_template.exists():
+        shutil.copy2(exploit_template, exploit_dest)
+        exploit_dest.chmod(0o755)
+
+    siblings_src = tmpl_dir / "endpoint_siblings.txt"
+    if not siblings_src.exists():
+        siblings_src = TEMPLATES_DIR / "ctf" / "endpoint_siblings.txt"
+    siblings_dest = work / "work" / "endpoint_siblings.txt"
+    if not siblings_dest.exists() and siblings_src.exists():
+        shutil.copy2(siblings_src, siblings_dest)
+
+    writeup_dest = work / cfg["writeup_filename"]
+    if not writeup_dest.exists():
+        if args["type"] == "ctf":
+            writeup_dest.write_text(
+                f"# {args['name']}\n\n"
+                f"**CTF:** {engagement}\n"
+                f"**Category:** {category}\n"
+                f"**Target:** {target or 'unknown'}\n"
+                f"**Status:** draft\n\n"
+                f"## TL;DR\n\n## Exploit Chain\n\n## Evidence\n\n## Flag\n\n## Lessons\n",
+                encoding="utf-8",
+            )
+        else:
+            writeup_template = tmpl_dir / cfg["writeup_filename"].replace(".md", "_template.md")
+            if not writeup_template.exists():
+                writeup_template = tmpl_dir / ("report_h1.md" if args["type"] == "bounty" else "advisory_template.md" if args["type"] == "cve" else "")
+            if writeup_template and writeup_template.exists() and writeup_template.is_file():
+                shutil.copy2(writeup_template, writeup_dest)
+            else:
+                writeup_dest.write_text(
+                    f"# {args['name']}\n\n"
+                    f"**Type:** {args['type']}\n"
+                    f"**Engagement:** {engagement}\n"
+                    f"**Target:** {target or 'unknown'}\n"
+                    f"**Status:** draft\n\n"
+                    f"## Summary\n\n## Details\n\n## Evidence\n\n## Lessons\n",
+                    encoding="utf-8",
+                )
+
+    FINDINGS_ROOT.mkdir(parents=True, exist_ok=True)
+    audit_path = FINDINGS_ROOT / ".agent-audit.jsonl"
+    audit_entry = '{"ts":"%s","agent":"%s","action":"lab-new","type":"%s","name":"%s","target":"%s","engagement":"%s","exit":0}\n' % (
+        date_utc,
+        os.environ.get("USER", "agent"),
+        args["type"],
+        args["name"],
+        target,
+        engagement,
+    )
+    with open(audit_path, "a", encoding="utf-8") as f:
+        f.write(audit_entry)
+
+    print(f"\n[+] Workspace: {work}")
+    print(f"[+] Mode: {ws_mode}")
+    print(f"[+] Log: {work / cfg['log_filename']}")
+    print(f"[+] {cfg['exploit_filename']}: {exploit_dest}")
+    print(f"[+] Evidence dir: {work / 'evidence'}")
+    print(f"[+] Engagement: {engagement}")
+    print(f"\nNext: cd '{work}' && keep {cfg['log_filename']} current before running tools.")
+
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

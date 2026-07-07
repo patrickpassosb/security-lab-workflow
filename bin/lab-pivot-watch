@@ -1,0 +1,273 @@
+#!/usr/bin/env python3
+"""lab-pivot-watch — monitors CTF challenge solve_logs for pivot rule violations.
+
+Alerts when a challenge has been active for 25+ minutes without a useful primitive.
+This enforces the "pivot after 20-30 min" rule.
+
+Usage:
+  lab-pivot-watch --start [--ctf-home ~/security-lab/ctfs/<ctf-name>] [--warn 25] [--crit 35]
+  lab-pivot-watch --stop
+  lab-pivot-watch --status
+
+Output:
+  Writes alerts to <ctf-home>/.pivot-alerts (one line per alert, append-only)
+  Also prints to stdout for the coordinator to read.
+
+Alert levels:
+  WARN  at 25 min — "consider pivoting"
+  CRIT  at 35 min — "PIVOT NOW" (also marks top hypothesis as STUCK in solve_log)
+"""
+import argparse
+import os
+import re
+import sys
+import time
+import datetime
+import signal
+import json
+from pathlib import Path
+
+DEFAULT_CTF_HOME = ""  # must be passed via --ctf-home or auto-detected from cwd
+DEFAULT_WARN_MIN = 25
+DEFAULT_CRIT_MIN = 35
+PID_FILE = "/tmp/lab-pivot-watch.pid"
+ALERTS_FILE = ".pivot-alerts"
+
+def parse_solve_log_start(path):
+    """Extract the start timestamp from a solve_log.md file.
+    Looks for **Date:** field in ISO format.
+    Falls back to file mtime if no date found.
+    """
+    try:
+        content = path.read_text(errors='replace')
+        # Look for **Date:** 2026-07-04T13:20:42Z
+        match = re.search(r'\*\*Date:\*\*\s*(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z)', content)
+        if match:
+            ts = datetime.datetime.strptime(match.group(1), '%Y-%m-%dT%H:%M:%SZ')
+            return ts.replace(tzinfo=datetime.timezone.utc)
+    except Exception:
+        pass
+    # Fall back to file mtime
+    mtime = datetime.datetime.fromtimestamp(path.stat().st_mtime, tz=datetime.timezone.utc)
+    return mtime
+
+def get_challenge_status(path):
+    """Check if a challenge is SOLVED or still active."""
+    try:
+        content = path.read_text(errors='replace')
+        # Check Status field
+        if re.search(r'\*\*Status:\*\*\s*(solved|SOLVED|completed|COMPLETED)', content):
+            return 'solved'
+        if re.search(r'\bSOLVED\b', content):
+            return 'solved'
+        # Check Eval section for "Solved: yes"
+        if re.search(r'(?i)^\s*-\s*Solved:\s*yes', content, re.MULTILINE):
+            return 'solved'
+        # Check for flag in the content
+        if re.search(r'(?i)flag\{[^}]+\}', content):
+            return 'solved'
+        return 'active'
+    except Exception:
+        return 'unknown'
+
+def get_last_update_time(path):
+    """Get the time of the last update to the solve_log (file mtime)."""
+    return datetime.datetime.fromtimestamp(path.stat().st_mtime, tz=datetime.timezone.utc)
+
+def scan_challenges(ctf_home):
+    """Scan all challenge solve_logs and return their status."""
+    challenges_dir = Path(ctf_home) / "challenges"
+    if not challenges_dir.exists():
+        return []
+
+    results = []
+    for chal_dir in sorted(challenges_dir.iterdir()):
+        if not chal_dir.is_dir():
+            continue
+        solve_log = chal_dir / "solve_log.md"
+        if not solve_log.exists():
+            continue
+
+        name = chal_dir.name
+        status = get_challenge_status(solve_log)
+        if status == 'solved':
+            continue  # Skip solved challenges
+
+        start_time = parse_solve_log_start(solve_log)
+        last_update = get_last_update_time(solve_log)
+        now = datetime.datetime.now(datetime.timezone.utc)
+
+        elapsed_min = (now - start_time).total_seconds() / 60.0
+        idle_min = (now - last_update).total_seconds() / 60.0
+
+        results.append({
+            'name': name,
+            'status': status,
+            'start_time': start_time,
+            'elapsed_min': elapsed_min,
+            'idle_min': idle_min,
+            'last_update': last_update,
+            'solve_log': str(solve_log),
+        })
+
+    return results
+
+def write_alert(ctf_home, level, challenge, elapsed_min, idle_min):
+    """Write an alert to the .pivot-alerts file."""
+    alerts_path = Path(ctf_home) / ALERTS_FILE
+    ts = datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+    if level == 'WARN':
+        msg = f"[{ts}] WARN {challenge}: {elapsed_min:.0f}min elapsed, {idle_min:.0f}min idle — consider pivoting"
+    else:
+        msg = f"[{ts}] CRIT {challenge}: {elapsed_min:.0f}min elapsed, {idle_min:.0f}min idle — PIVOT NOW"
+
+    with open(alerts_path, 'a') as f:
+        f.write(msg + '\n')
+
+    print(msg, flush=True)
+    return msg
+
+def mark_hypothesis_stuck(solve_log_path):
+    """Try to mark the top ACTIVE hypothesis as STUCK in the solve_log."""
+    try:
+        content = solve_log_path.read_text(errors='replace')
+        # Replace the first ACTIVE hypothesis status with STUCK
+        updated = re.sub(r'(\|\s*\w+\s*\|[^|]*\|[^|]*\|[^|]*\|[^|]*\|\s*)ACTIVE',
+                         r'\1STUCK-PIVOT', content, count=1)
+        if updated != content:
+            solve_log_path.write_text(updated)
+    except Exception:
+        pass  # Don't crash if we can't update the solve_log
+
+def run_once(ctf_home, warn_min, crit_min):
+    """Run a single scan and write alerts."""
+    challenges = scan_challenges(ctf_home)
+    alerts = []
+    for chal in challenges:
+        if chal['elapsed_min'] >= crit_min:
+            alert = write_alert(ctf_home, 'CRIT', chal['name'],
+                              chal['elapsed_min'], chal['idle_min'])
+            alerts.append(alert)
+            mark_hypothesis_stuck(Path(chal['solve_log']))
+        elif chal['elapsed_min'] >= warn_min:
+            alert = write_alert(ctf_home, 'WARN', chal['name'],
+                              chal['elapsed_min'], chal['idle_min'])
+            alerts.append(alert)
+    return alerts
+
+def run_daemon(ctf_home, warn_min, crit_min, interval=300):
+    """Run as a daemon, scanning every `interval` seconds (default 5 min)."""
+    # Write PID file
+    with open(PID_FILE, 'w') as f:
+        f.write(str(os.getpid()))
+
+    print(f"[lab-pivot-watch] Daemon started, PID={os.getpid()}", flush=True)
+    print(f"[lab-pivot-watch] CTF home: {ctf_home}", flush=True)
+    print(f"[lab-pivot-watch] WARN at {warn_min}min, CRIT at {crit_min}min", flush=True)
+    print(f"[lab-pivot-watch] Scanning every {interval}s", flush=True)
+
+    def cleanup(sig, frame):
+        try:
+            os.unlink(PID_FILE)
+        except OSError:
+            pass
+        print("[lab-pivot-watch] Stopped", flush=True)
+        sys.exit(0)
+
+    signal.signal(signal.SIGTERM, cleanup)
+    signal.signal(signal.SIGINT, cleanup)
+
+    while True:
+        alerts = run_once(ctf_home, warn_min, crit_min)
+        if not alerts:
+            # Only print "all clear" if there are active challenges
+            challenges = scan_challenges(ctf_home)
+            if challenges:
+                print(f"[{datetime.datetime.now(datetime.timezone.utc).strftime('%H:%M:%S')}] "
+                      f"{len(challenges)} active challenges, no pivot alerts", flush=True)
+        time.sleep(interval)
+
+def stop_daemon():
+    """Stop the running daemon."""
+    try:
+        with open(PID_FILE) as f:
+            pid = int(f.read().strip())
+        os.kill(pid, signal.SIGTERM)
+        print(f"[lab-pivot-watch] Sent SIGTERM to PID {pid}")
+        # Wait for it to die
+        for _ in range(10):
+            try:
+                os.kill(pid, 0)
+                time.sleep(0.5)
+            except ProcessLookupError:
+                break
+        try:
+            os.unlink(PID_FILE)
+        except OSError:
+            pass
+    except FileNotFoundError:
+        print("[lab-pivot-watch] Not running (no PID file)")
+    except ProcessLookupError:
+        print("[lab-pivot-watch] Process not found, cleaning up PID file")
+        try:
+            os.unlink(PID_FILE)
+        except OSError:
+            pass
+
+def show_status(ctf_home, warn_min, crit_min):
+    """Show current status without running as daemon."""
+    challenges = scan_challenges(ctf_home)
+    if not challenges:
+        print("No active challenges found.")
+        return
+
+    print(f"\n{'Challenge':<30} {'Elapsed':>8} {'Idle':>8} {'Status':>8}")
+    print("-" * 60)
+    for chal in challenges:
+        elapsed = f"{chal['elapsed_min']:.0f}m"
+        idle = f"{chal['idle_min']:.0f}m"
+        if chal['elapsed_min'] >= crit_min:
+            status = "CRIT"
+        elif chal['elapsed_min'] >= warn_min:
+            status = "WARN"
+        else:
+            status = "ok"
+        print(f"{chal['name']:<30} {elapsed:>8} {idle:>8} {status:>8}")
+    print()
+
+def main():
+    parser = argparse.ArgumentParser(description='CTF pivot rule enforcement daemon')
+    parser.add_argument('--start', action='store_true', help='Start the daemon')
+    parser.add_argument('--stop', action='store_true', help='Stop the daemon')
+    parser.add_argument('--status', action='store_true', help='Show current status')
+    parser.add_argument('--once', action='store_true', help='Run a single scan and exit')
+    parser.add_argument('--ctf-home', default=DEFAULT_CTF_HOME, help='CTF home directory')
+    parser.add_argument('--warn', type=int, default=DEFAULT_WARN_MIN, help='Warning threshold (minutes)')
+    parser.add_argument('--crit', type=int, default=DEFAULT_CRIT_MIN, help='Critical threshold (minutes)')
+    parser.add_argument('--interval', type=int, default=300, help='Scan interval in seconds (default 300)')
+
+    args = parser.parse_args()
+
+    if args.stop:
+        stop_daemon()
+        return
+
+    if args.status:
+        show_status(args.ctf_home, args.warn, args.crit)
+        return
+
+    if args.once:
+        alerts = run_once(args.ctf_home, args.warn, args.crit)
+        if not alerts:
+            print("No pivot alerts.")
+        return
+
+    if args.start:
+        run_daemon(args.ctf_home, args.warn, args.crit, args.interval)
+        return
+
+    # Default: show status
+    show_status(args.ctf_home, args.warn, args.crit)
+
+if __name__ == '__main__':
+    main()
