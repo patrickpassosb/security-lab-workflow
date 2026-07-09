@@ -424,6 +424,7 @@ def main() -> int:
     url = sys.argv[1]
     engagement = ""
     output_dir = ""
+    force_scope = False
 
     idx = 2
     while idx < len(sys.argv):
@@ -438,6 +439,9 @@ def main() -> int:
             idx += 2
         elif sys.argv[idx].startswith("--output="):
             output_dir = sys.argv[idx].split("=", 1)[1]
+            idx += 1
+        elif sys.argv[idx] == "--force-scope":
+            force_scope = True
             idx += 1
         else:
             idx += 1
@@ -473,7 +477,10 @@ def main() -> int:
             log("DENIED — aborting")
             return 2
         if scope.returncode == 3:
-            log("WARNING: target not in scope — proceeding anyway (add to engagement scope file)")
+            if not force_scope:
+                log("UNKNOWN: target not in scope — aborting (add to engagement scope file or use --force-scope)")
+                return 3
+            log("WARNING: target not in scope — proceeding (--force-scope)")
 
     audit("lab-firstpass", url, engagement, "started")
 

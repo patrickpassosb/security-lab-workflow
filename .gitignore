@@ -15,6 +15,8 @@ gbrain/learning/
 # ─── Personal artifacts at repo root ───
 .audit.jsonl
 PLAN.md
+PLAN_OPEN_SOURCE.md
+PLAN_OPEN_SOURCE.html
 PRE_STAGE_REPORT.md
 POST_CTF_PLAN.md
 docs/open-source-plan.html
@@ -24,8 +26,8 @@ docs/open-source-plan.html
 fastapi-*.md
 pycel-*.md
 MULTI_ENGAGEMENT_PLAN.html
-ctf/
-ctf-fluid-attacks/
+/ctf/
+/ctf-fluid-attacks/
 
 # ─── Stale backups ───
 *.bak.*

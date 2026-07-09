@@ -54,15 +54,51 @@ if [ -d "$INSTALL_DIR/bin" ]; then
       __pycache__) continue ;;
     esac
     target="$LOCAL_BIN/$name"
+    if [ -e "$target" ] && [ ! -L "$target" ]; then
+      echo "   SKIP: $name already exists in $LOCAL_BIN (not a symlink)"
+      continue
+    fi
     if [ -L "$target" ]; then
       rm -f "$target"
     fi
-    ln -sf "$script" "$target"
+    ln -s "$script" "$target"
     chmod +x "$script" 2>/dev/null || true
   done
 else
   echo ">> No bin/ found in $INSTALL_DIR — skipping script symlink."
 fi
+
+# ─── Generate .agents/skills/ symlinks from skills/ ──────────────────────────
+AGENTS_SKILLS="$INSTALL_DIR/.agents/skills"
+mkdir -p "$AGENTS_SKILLS"
+
+echo ">> Generating .agents/skills/ symlinks from skills/"
+
+for skill_tree in security gbrain obsidian; do
+  for skill_dir in "$INSTALL_DIR"/skills/$skill_tree/*/; do
+    [ -d "$skill_dir" ] || continue
+    name="$(basename "$skill_dir")"
+    target="$AGENTS_SKILLS/$name"
+    if [ -L "$target" ]; then
+      rm -f "$target"
+    fi
+    ln -s "$skill_dir" "$target"
+  done
+done
+
+# ─── Private overlay (local-only skills, never committed) ───────────────────
+OVERLAY_DIR="${HOME}/.config/opencode/skills"
+if [ -d "$OVERLAY_DIR" ]; then
+  echo ">> Linking private overlay skills from $OVERLAY_DIR"
+  for skill_dir in "$OVERLAY_DIR"/*/; do
+    [ -d "$skill_dir" ] || continue
+    name="$(basename "$skill_dir")"
+    target="$AGENTS_SKILLS/$name"
+    [ -L "$target" ] || ln -s "$skill_dir" "$target"
+  done
+fi
+
+echo "   Generated $(ls -1 "$AGENTS_SKILLS" | wc -l) skill symlinks"
 
 # ─── PATH check ─────────────────────────────────────────────────────────────
 case ":${PATH}:" in

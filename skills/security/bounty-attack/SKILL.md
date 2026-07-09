@@ -13,7 +13,7 @@ description: |
 
 ## CRITICAL: No automated scanning
 
-Most bounty programs (including the program) prohibit automated scanning tools.
+Most bounty programs (including major programs) prohibit automated scanning tools.
 **Do NOT use:** nuclei, ffuf, feroxbuster, sqlmap automation, nmap automation,
 masscan, or any tool that sends large volumes of automated requests.
 

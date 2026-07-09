@@ -23,8 +23,6 @@ jobs:
         id: find
         run: |
           set -e
-          # Anything in bin/ that is a regular file and not a .bak or __pycache__.
-          # shellcheck handles shebang-based detection; we pass files with a bash shebang.
           scripts=""
           for f in bin/*; do
             [ -f "$f" ] || continue
@@ -32,15 +30,16 @@ jobs:
               *.bak.*) continue ;;
               __pycache__) continue ;;
             esac
-            # Only check files that look like shell (bash/sh shebang or no extension).
             head -n1 "$f" 2>/dev/null | grep -Eq '^#!.*(bash|/sh)' || continue
-            scripts="$scripts $f"
+            scripts="$scripts:$f"
           done
           echo "scripts=$scripts" >> "$GITHUB_OUTPUT"
       - name: Run shellcheck
         run: |
           set -e
-          shellcheck install.sh ${{ steps.find.outputs.scripts }}
+          IFS=':' read -ra FILES <<< "${{ steps.find.outputs.scripts }}"
+          FILES=("${FILES[@]:1}")
+          shellcheck install.sh "${FILES[@]}"
 
   ruff:
     name: ruff (python scripts)

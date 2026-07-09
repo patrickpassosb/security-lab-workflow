@@ -15,7 +15,7 @@
 
 ## Impact
 
-(What can an attacker do? Who is affected? What data/systems are compromised? Why does this matter to the program/this company?)
+(What can an attacker do? Who is affected? What data/systems are compromised? Why does this matter to the program/company?)
 
 ## Steps to Reproduce
 
