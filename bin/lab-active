@@ -55,7 +55,6 @@ for f in $ENG_FILES; do
 
   # Extract type and name from the YAML (simple grep)
   TYPE=$(grep -m1 '^  type:' "$f" 2>/dev/null | sed 's/.*type: *//;s/"//g;s/'"'"'//g' || echo "?")
-  NAME=$(grep -m1 '^  name:' "$f" 2>/dev/null | sed 's/.*name: *//;s/"//g;s/'"'"'//g' || echo "$STEM")
   STATUS=$(grep -m1 '^  status:' "$f" 2>/dev/null | sed 's/.*status: *//;s/"//g;s/'"'"'//g' || echo "active")
 
   # Determine which program folder to scan
@@ -99,7 +98,7 @@ for f in $ENG_FILES; do
 
     # Find last activity
     for search_path in $SEARCH_PATHS; do
-      LAST_FILE=$(find "$search_path" -type f \( -name "*.md" -o -name "*.txt" -o -name "*.json" -o -name "*.py" \) 2>/dev/null | xargs ls -t 2>/dev/null | head -1)
+      LAST_FILE=$(find "$search_path" -type f \( -name "*.md" -o -name "*.txt" -o -name "*.json" -o -name "*.py" \) -print0 2>/dev/null | xargs -0 ls -t 2>/dev/null | head -1)
       if [ -n "$LAST_FILE" ]; then
         LAST_ACT=$(date -r "$LAST_FILE" +%Y-%m-%d 2>/dev/null || echo "unknown")
         break
@@ -115,7 +114,7 @@ for f in $ENG_FILES; do
     *)       TYPE_DISP="$TYPE" ;;
   esac
 
-  printf "%-30s %-8s %-5s %-20s %s\n" "$STEM" "$TYPE" "$WS_COUNT" "$LAST_ACT" "$STATUS"
+  printf "%-30s %-8s %-5s %-20s %s\n" "$STEM" "$TYPE_DISP" "$WS_COUNT" "$LAST_ACT" "$STATUS"
 done
 
 echo

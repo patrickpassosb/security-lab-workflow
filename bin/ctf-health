@@ -5,7 +5,6 @@ set -uo pipefail
 
 CATEGORY="web"
 INSTALL=0
-LAB="${HACKING_LAB:-$HOME/security-lab}"
 PASS=0
 WARN=0
 FAIL=0

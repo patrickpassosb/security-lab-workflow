@@ -35,11 +35,17 @@ jobs:
           done
           echo "scripts=$scripts" >> "$GITHUB_OUTPUT"
       - name: Run shellcheck
+        # -S warning: surface genuine warnings (unused vars, unsafe find,
+        # etc.) but don't fail CI on info/style notes (SC2015 A&&B||C idiom,
+        # SC2012 ls, SC2016 single-quoted expansions). Many helper scripts
+        # intentionally use `cmd && ok || warn` for concise status checks
+        # where the `ok` branch cannot fail. See .shellcheckrc for the full
+        # rationale.
         run: |
           set -e
           IFS=':' read -ra FILES <<< "${{ steps.find.outputs.scripts }}"
           FILES=("${FILES[@]:1}")
-          shellcheck install.sh "${FILES[@]}"
+          shellcheck -S warning install.sh "${FILES[@]}"
 
   ruff:
     name: ruff (python scripts)
@@ -52,7 +58,10 @@ jobs:
       - name: Install ruff
         run: pip install ruff
       - name: Ruff check
-        run: ruff check bin/ templates/ install.sh
+        # Only lint actual Python files. install.sh and the extensionless
+        # bin/ scripts are bash — ruff parses them as Python and throws a wall
+        # of syntax errors. They are covered by the shellcheck job instead.
+        run: ruff check bin/ templates/
 
   gitleaks:
     name: gitleaks (secrets scan)
@@ -61,7 +70,28 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - name: gitleaks
-        uses: gitleaks/gitleaks-action@v2
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Install gitleaks
+        run: |
+          set -e
+          VERSION=8.24.3
+          curl -sSL "https://github.com/gitleaks/gitleaks/releases/download/v${VERSION}/gitleaks_${VERSION}_linux_x64.tar.gz" -o /tmp/gitleaks.tar.gz
+          tar -xzf /tmp/gitleaks.tar.gz -C /tmp gitleaks
+          sudo mv /tmp/gitleaks /usr/local/bin/gitleaks
+          gitleaks version
+      - name: Scan for secrets
+        # Full-repo scan (no commit-range). The gitleaks-action hard-codes a
+        # BASE^..HEAD range for push events, which fails on the first commit
+        # of a repo (BASE has no parent). Scanning the whole tree from source
+        # is robust to first-push / shallow-clone / force-push edge cases.
+        run: |
+          set -e
+          gitleaks detect --source . --redact --verbose \
+            --report-format=sarif --report-path=results.sarif \
+            --log-level=info
+      - name: Upload SARIF report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gitleaks-results.sarif
+          path: results.sarif
+          if-no-files-found: ignore

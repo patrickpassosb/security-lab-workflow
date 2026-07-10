@@ -1,0 +1,22 @@
+# ShellCheck config — security-lab-workflow
+#
+# Why severity=warning:
+#   The lab helper scripts intentionally use the `A && B || C` idiom (SC2015)
+#   for concise status checks like `command -v foo && ok || warn`. The `ok`
+#   branch cannot realistically fail, so SC2015 is a false positive here.
+#   We surface genuine warnings (unused vars, unsafe find, etc.) but suppress
+#   info/style notes that would otherwise fail CI without improving safety.
+#
+# SC2015 (info):    A && B || C is not if-then-else — intentional, suppressed.
+# SC2012 (style):   use ls — many scripts use ls for display output.
+# SC2034 (warning): caught and fixed in code.
+# SC2038 (warning): caught and fixed in code.
+
+severity=warning
+
+# Disable specific info/style rules globally (these are the noisy ones that
+# flood the log without indicating a real bug).
+disable=SC2015
+
+# External sources we want to follow (none by default).
+external-sources=true
