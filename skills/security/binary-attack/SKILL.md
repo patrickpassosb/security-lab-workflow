@@ -12,9 +12,9 @@ description: |
 ## Pre-flight (always)
 
 ```bash
-# 1. pwndbg loaded in gdb
-echo "source ~/tools/pwndbg/gdbinit.py" > /tmp/gdbtest.gdb
-gdb -batch -x /tmp/gdbtest.gdb -ex "info functions pwndbg" -ex quit 2>&1 | head -3
+# 1. Detect which gdb extension is loaded (pwndbg or gef)
+#    ~/.gdbinit sources it automatically. Probe to confirm:
+gdb -batch -ex "quit" 2>&1 | grep -iE "pwndbg|gef" | head -1 || echo "WARN: no gdb extension detected"
 
 # 2. Ghidra headless available
 command -v ghidra-analyze || echo "WARN: ghidra-analyze not in PATH"
@@ -69,14 +69,14 @@ Look for:
 ## Step 3 — Decompile (ghidra headless)
 
 ```bash
-# Create a Ghidra project
-PROJECT="$WORK/ghidra-project"
-mkdir -p "$PROJECT"
-ghidra-analyze Import "$BIN" \
-  -postScript AnalyzeHeadless.java \
-  -deleteProject \
-  -project "$PROJECT" \
+# Create a Ghidra project (correct analyzeHeadless syntax)
+PROJECT_DIR="$WORK/ghidra-project"
+PROJECT_NAME="anal"
+mkdir -p "$PROJECT_DIR"
+ghidra-analyze "$PROJECT_DIR" "$PROJECT_NAME" \
   -import "$BIN" 2>&1 | tail -20
+# To run a postscript: -postScript <ScriptName> (compiled, in GhidraScript path)
+# To delete the project after: add -deleteProject flag
 ```
 
 For an interactive look, use `ghidraRun` (if you have a display) or the `ghidra-mcp` server.

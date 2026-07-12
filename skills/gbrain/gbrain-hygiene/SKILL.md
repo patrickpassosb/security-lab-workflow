@@ -28,74 +28,89 @@ A knowledge graph decays if not maintained. Stale pages, near-duplicates, and co
 
 ## How to run
 
+> **CLI reference:** all commands below use the real `gbrain` v0.42+ CLI. There is no
+> `find-duplicates`, `find-broken-refs`, `archive`, `merge`, or `edit` command. Use
+> `orphans`, `check-backlinks`, `lint`, `sources`, `embed --stale`, and `list --type` instead.
+
 ### Step 1 — Inventory
 
 ```bash
-# Total page count
+# Total page count + health
 gbrain stats
-# By type
-gbrain stats --by-type
-# By source
-gbrain stats --by-source
+gbrain health
+
+# List pages by type (filter)
+gbrain list --type gstack/learning -n 50
 ```
 
-### Step 2 — Stale pages
+### Step 2 — Stale pages (orphans = no inbound refs)
 
 ```bash
-# Find pages >90 days old with no inbound refs
-gbrain search --type gstack/learning --older-than 90d --no-inbound-refs --limit 50
-# Candidate archive list
+# orphans: pages with no inbound wikilinks (candidates for archive/review)
+gbrain orphans --json | jq 'length'   # count
+gbrain orphans --json | jq -r '.[].slug' | head -30   # list slugs
+
+# Combine with age: list learning pages, then check mtime in the brain dir.
+# gbrain has no --older-than flag; use the filesystem for age filtering.
 ```
 
-### Step 3 — Duplicates
+Review each orphan: if it's >90 days old and no longer relevant, delete it with `gbrain delete <slug>`. If it's still useful, add a backlink from a related page or tag it.
+
+### Step 3 — Broken refs (wikilinks that don't resolve)
 
 ```bash
-# Find pages with similar embeddings (top 5% similarity)
-gbrain find-duplicates --threshold 0.92 --limit 20
+# check-backlinks: find (and optionally fix) missing back-links across the brain
+gbrain check-backlinks check        # report only
+gbrain check-backlinks fix           # apply fixes (add missing backlink edges)
+
+# lint: catch LLM artifacts, placeholder dates, bad frontmatter
+gbrain lint .
+gbrain lint . --fix
 ```
 
-For each pair, decide:
-- **Merge:** one is the canonical, the other adds no info → merge into one page
-- **Keep both:** they cover different aspects → keep, add a `related:` link
-- **Archive one:** if a newer version supersedes an older one
-
-### Step 4 — Broken refs
+### Step 4 — Source audit
 
 ```bash
-# Find wikilinks that don't resolve
-gbrain find-broken-refs --limit 50
+# List registered sources and their status
+gbrain sources list
+
+# Sync stale sources
+gbrain sync --all        # incremental sync of all sources
+gbrain sync --source <id> # sync one specific source
 ```
 
-These are usually typos in page bodies. Fix the typo, or create the missing page (even with a stub).
-
-### Step 5 — Source audit
+### Step 5 — Embedding freshness
 
 ```bash
-# Last sync time per source
-gbrain sources list --format json | jq '.[] | {name, last_synced, page_count}'
+# Refresh stale embeddings (pages whose embeddings are out of date)
+gbrain embed --stale
 
-# Sources not synced in 7+ days
-gbrain sources list --stale 7d
+# Re-embed everything (slow, only if embeddings are corrupt)
+gbrain embed --all
 ```
-
-If a source is stale, the brain is missing recent knowledge. Run `gbrain sync --source <name>`.
 
 ### Step 6 — Take action
 
-For each finding from Steps 2-5:
-
 ```bash
-# Archive a stale page
-gbrain archive --page <id>
+# Delete a stale/superseded page (gbrain has no archive; delete is the action)
+gbrain delete <slug>
 
-# Merge duplicates
-gbrain merge --from <id1> --into <id2>
+# Fix a broken ref: edit the source .md file, then re-sync
+gbrain sync --source <id>
 
-# Fix a broken ref
-gbrain edit --page <id> --replace "old text" "new text"
+# Tag a page to mark it reviewed
+gbrain tag <slug> reviewed
+gbrain tag <slug> last-reviewed-$(date +%Y-%m-%d)
 
-# Sync a stale source
-gbrain sync --source <name>
+# Capture a corrective note (use put with frontmatter)
+gbrain put <new-slug> --content "$(cat <<'EOF'
+---
+type: gstack/decision
+tags: [hygiene]
+---
+<corrective content here>
+EOF
+)"
 ```
 
 ## What to archive (decision criteria)

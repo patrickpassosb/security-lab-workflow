@@ -57,11 +57,16 @@ test -f ~/security-lab/wordlists/rockyou.txt || \
     -o ~/security-lab/wordlists/rockyou.txt
 
 # 2. Common-words (if rockyou fails)
-hashcat -m 0 -a 0 "$HASH" ~/security-lab/wordlists/SecLists/Passwords/Common-Credentials/10-million-password-list-top-1000000.txt
+hashcat -m 0 -a 0 "$HASH" ~/security-lab/wordlists/SecLists/Passwords/xato-net-10-million-passwords-1000000.txt
 
 # 3. With mutations (rules)
-hashcat -m 0 -a 0 "$HASH" ~/security-lab/wordlists/SecLists/Passwords/Common-Credentials/10-million-password-list-top-1000000.txt \
-  -r ~/security-lab/wordlists/SecLists/Rules/best64.rule
+# Note: best64.rule is bundled with hashcat. Use the system path if installed:
+#   - Fedora/RHEL: /usr/share/hashcat/rules/best64.rule
+#   - Or download from https://github.com/hashcat/hashcat/raw/master/rules/best64.rule
+RULES=/usr/share/hashcat/rules/best64.rule
+[ -f "$RULES" ] || RULES=~/security-lab/wordlists/best64.rule
+hashcat -m 0 -a 0 "$HASH" ~/security-lab/wordlists/SecLists/Passwords/xato-net-10-million-passwords-1000000.txt \
+  -r "$RULES"
 
 # 4. Pure brute force (last resort, GPU)
 hashcat -m 0 -a 3 "$HASH" ?a?a?a?a?a?a?a?a  # 8 chars, all printable

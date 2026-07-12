@@ -90,7 +90,7 @@ for f in $ENG_FILES; do
         [ -d "$ws" ] || continue
         WS_BASE=$(basename "$ws")
         [ "$WS_BASE" = "*" ] && continue
-        if [ -f "${ws}engagement.txt" ] || [ -f "${ws}evidence" ] || [ -d "${ws}evidence" ] || [ -d "${ws}work" ]; then
+        if [ -f "${ws}engagement.txt" ] || [ -d "${ws}evidence" ] || [ -d "${ws}work" ]; then
           WS_COUNT=$((WS_COUNT+1))
         fi
       done

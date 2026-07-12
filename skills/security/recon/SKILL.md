@@ -34,7 +34,7 @@ Preferred workspace variables:
 ```bash
 CHALLENGE="challenge-name"
 TGT="target.example.ctf"
-ENG="ctf-example"    # engagement name (from engagement.txt or --engagement)
+ENG="example-ctf"    # engagement name (from engagement.txt or --engagement)
 WORK=~/security-lab/findings/ctf/$CHALLENGE/recon
 mkdir -p "$WORK"
 ```
@@ -47,7 +47,7 @@ WORK=~/security-lab/findings/ctf/$TGT/recon
 
 # Subdomain enumeration (passive)
 subfinder -d "$TGT" -all -silent -json -o $WORK/subfinder.json 2>/dev/null &
-amass enum -passive -d "$TGT" -json $WORK/amass.json 2>/dev/null &
+amass enum -passive -d "$TGT" -oA $WORK/amass 2>/dev/null &
 wait
 
 # DNS resolution
@@ -74,7 +74,7 @@ cat $WORK/dnsx.json 2>/dev/null | jq -r '.host' | sort -u \
 
 # Crawl for endpoints (shallow, ~3 levels)
 cat $WORK/httpx.json 2>/dev/null | jq -r '.url' | head -100 \
-  | katana -silent -json -depth 3 -o $WORK/katana.json
+  | katana -silent -j -depth 3 -o $WORK/katana.json
 
 # Tech fingerprint with nuclei
 nuclei -l <(jq -r '.url' $WORK/httpx.json 2>/dev/null) \

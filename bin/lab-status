@@ -5,7 +5,7 @@
 
 set -uo pipefail
 
-LAB=~/security-lab
+LAB="${HACKING_LAB:-$HOME/security-lab}"
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
@@ -63,10 +63,10 @@ done
 echo
 echo "## Skills drafts (~/security-lab/skills/)"
 SKILL_COUNT=$(find $LAB/skills -name SKILL.md 2>/dev/null | wc -l)
-if [ "$SKILL_COUNT" -ge 12 ]; then
+if [ "$SKILL_COUNT" -ge 15 ]; then
   ok "Skill drafts: $SKILL_COUNT"
 else
-  warn "Skill drafts: $SKILL_COUNT (expected 12+)"
+  warn "Skill drafts: $SKILL_COUNT (expected 15+)"
 fi
 
 echo

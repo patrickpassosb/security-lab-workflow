@@ -123,7 +123,7 @@ High-value chains:
 
 ```bash
 URLS=$(jq -r '.url' ~/security-lab/findings/ctf/$TGT/recon/httpx.json)
-echo "$URLS" | wafw00f -o ~/security-lab/findings/ctf/$TGT/web-attack/wafw00f.json
+wafw00f -i <(echo "$URLS") -o ~/security-lab/findings/ctf/$TGT/web-attack/wafw00f.json
 ```
 
 If a WAF is detected, **reduce rate limits and tune payloads** (Step 7).
@@ -195,7 +195,7 @@ ffuf -u "https://$TGT/FUZZ" \
 # Recursive (slower, deeper)
 feroxbuster -u "https://$TGT" \
   -w ~/security-lab/wordlists/SecLists/Discovery/Web-Content/raft-medium-directories.txt \
-  -t 50 -d 5 \
+  -t 50 -d 5 --json \
   -o ~/security-lab/findings/ctf/$TGT/web-attack/feroxbuster.json
 ```
 
@@ -292,7 +292,7 @@ Pivot when:
 
 - 8 commands produce no new fact.
 - The same error happens 3 times.
-- 20-30 minutes pass without a useful primitive.
+- 25-35 minutes pass without a useful primitive (WARN at 25, CRIT at 35, per lab-pivot-watch).
 - The path needs broad brute force without candidate count, runtime estimate, and oracle.
 
 Mark the current hypothesis `STUCK` in `solve_log.md` before switching surfaces.

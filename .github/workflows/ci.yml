@@ -28,7 +28,6 @@ jobs:
             [ -f "$f" ] || continue
             case "$(basename "$f")" in
               *.bak.*) continue ;;
-              __pycache__) continue ;;
             esac
             head -n1 "$f" 2>/dev/null | grep -Eq '^#!.*(bash|/sh)' || continue
             scripts="$scripts:$f"

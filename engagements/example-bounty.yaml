@@ -1,7 +1,7 @@
 # Engagement scope — Example Bug Bounty
 # Type: bounty
 # Copy this file to engagements/bounty-<program>.yaml and edit for your program.
-# Scope details can be pulled from HackerOne via: lab-h1-scope <handle>
+# Scope details can be pulled from HackerOne via: lab-h1-scope <handle> (planned — see ROADMAP.md)
 
 engagement:
   name: "Example Bug Bounty"
@@ -118,7 +118,7 @@ response_targets:
 
 # Evidence collection.
 evidence:
-  audit_log: "~/security-lab/.audit.jsonl"
+  audit_log: "~/security-lab/findings/.agent-audit.jsonl"
   findings_dir: "~/security-lab/bounties/<program>/findings/"
 
 # Reporting.

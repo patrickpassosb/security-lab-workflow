@@ -34,7 +34,8 @@ sha256sum "$FILE" | tee $WORK/sha256.txt
 # zsteg: LSB stego, multiple bit planes
 zsteg "$FILE" | tee $WORK/zsteg.txt
 zsteg -a "$FILE" 2>/dev/null | head -30  # all methods, slow
-zsteg "$FILE" --extract "specific_method:out.bin"  # extract
+# Extract a specific channel: use -E NAME (e.g. 1b,rgb,lsb) and redirect stdout
+zsteg "$FILE" -E "1b,rgb,lsb" > $WORK/out.bin 2>/dev/null
 ```
 
 ### JPG / WAV → steghide
@@ -99,9 +100,10 @@ olevba "$FILE" 2>&1 | tee $WORK/olevba.txt
 test -f /usr/bin/autopsy || test -f /usr/bin/sleuthkit
 fls "$FILE"  # list files in image
 
-# Memory dump (if given a .raw or .vmem)
-volatility -f "$FILE" imageinfo
-volatility -f "$FILE" --profile=Win7SP1x64 pslist
+# Memory dump (if given a .raw or .vmem) — Volatility 3 syntax
+vol -f "$FILE" windows.info
+vol -f "$FILE" windows.pslist
+vol -f "$FILE" windows.pstree
 ```
 
 ## Capture and report

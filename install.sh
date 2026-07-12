@@ -51,7 +51,6 @@ if [ -d "$INSTALL_DIR/bin" ]; then
     name="$(basename "$script")"
     case "$name" in
       *.bak.*) continue ;;
-      __pycache__) continue ;;
     esac
     target="$LOCAL_BIN/$name"
     if [ -e "$target" ] && [ ! -L "$target" ]; then

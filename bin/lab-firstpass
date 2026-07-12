@@ -37,7 +37,8 @@ from pathlib import Path
 from typing import Any
 
 LAB = Path(os.environ.get("HACKING_LAB", os.path.expanduser("~/security-lab")))
-AUDIT_LOG = LAB / ".audit.jsonl"
+AUDIT_LOG = LAB / "findings" / ".agent-audit.jsonl"
+AUDIT_LOG.parent.mkdir(parents=True, exist_ok=True)
 
 # Tool paths
 TOOLS = {

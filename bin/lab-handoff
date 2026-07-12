@@ -32,6 +32,7 @@ import json
 from pathlib import Path
 
 DEFAULT_CTF_HOME = ""  # must be passed via --ctf-home or cd into a program folder
+LAB = Path(os.environ.get("HACKING_LAB", os.path.expanduser("~/security-lab")))
 
 # ANSI colors
 RED = "\033[31m"
@@ -175,7 +176,7 @@ def write_handoff_md(challenge_dir, challenge_name, status, summary,
 
 def log_audit(challenge_name, action, detail):
     """Log to the audit log."""
-    audit_path = os.path.expanduser("~/security-lab/findings/.agent-audit.jsonl")
+    audit_path = str(LAB / "findings" / ".agent-audit.jsonl")
     ts = datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
     entry = {
         "ts": ts,
