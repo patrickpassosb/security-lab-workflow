@@ -65,8 +65,8 @@ RIGHT:  find flag → capture evidence (1 cmd) → HAND OFF flag → [human subm
 
 ## Inputs (gather before writing the writeup — AFTER acceptance)
 
-- `~/security-lab/findings/ctf/<challenge>/solve_log.md` (primary source of truth)
-- `~/security-lab/findings/ctf/<challenge>/evidence/` (request/response, screenshots, exploit output)
+- `solve_log.md` (primary source of truth)
+- `evidence/` (request/response, screenshots, exploit output)
 - Challenge name + category (web/pwn/crypto/stego/etc.)
 - Target (URL, file, host)
 - The flag itself (confirmed accepted)
@@ -76,13 +76,23 @@ RIGHT:  find flag → capture evidence (1 cmd) → HAND OFF flag → [human subm
 - Time spent
 - Lessons learned
 
+> **Workspace detection:** The workspace is found by the same 3-mode
+> auto-detection as `ctf-evidence` (cwd subdir → walk up to find AGENTS.md →
+> legacy `findings/ctf/<challenge>/`). Set `CHALLENGE` to the challenge name.
+> The writeup goes to `<workspace>/writeup.md`. If you're in a program
+> folder (`ctfs/<ctf-name>/`), the workspace is `challenges/<challenge>/`.
+> If you're in legacy mode, it's `findings/ctf/<challenge>/`.
+
 If `solve_log.md` is missing, create it before writing the report. Do not reconstruct from memory unless the user explicitly asks.
 
 ## Write the writeup
 
 ### File 1: findings dir writeup
 
-`~/security-lab/findings/ctf/<challenge-name>/writeup.md`
+`<workspace>/writeup.md`
+
+(Where `<workspace>` is `challenges/<challenge>/` in program mode or
+`findings/ctf/<challenge>/` in legacy mode — auto-detected like ctf-evidence.)
 
 ```markdown
 # <Challenge Name>
@@ -178,8 +188,10 @@ The vault writeup gets:
 ```bash
 # Save the winning request/response
 CHALLENGE="<name>"
-mkdir -p ~/security-lab/findings/ctf/$CHALLENGE
-cp ~/security-lab/findings/ctf/$TGT/web-attack/nuclei.json ~/security-lab/findings/ctf/$CHALLENGE/ 2>/dev/null
+mkdir -p ~/security-lab/findings/ctf/$CHALLENGE 2>/dev/null || true
+cp ~/security-lab/findings/ctf/$CHALLENGE/web-attack/nuclei.json ~/security-lab/findings/ctf/$CHALLENGE/ 2>/dev/null || true
+# In program mode, use the workspace-relative path instead:
+# cp "$WORKSPACE/web-attack/nuclei.json" "$WORKSPACE/" 2>/dev/null || true
 # Or capture a reproducible command with metadata
 ~/security-lab/bin/ctf-evidence "$CHALLENGE" winning-request -- curl -i "$URL"
 ```
@@ -248,7 +260,7 @@ comes after submission.
 ## Output
 
 After running report-ctf, you should have:
-- `~/security-lab/findings/ctf/<challenge>/writeup.md` (the full writeup)
+- `<workspace>/writeup.md` (the full writeup)
 - `$VAULT_DIR/Cybersecurity/CTFs/<CTF name>/99 - Writeups/<date> - <challenge>.md` (the vault version)
 - Updated playbook (if new insight)
 - Updated methodology journal

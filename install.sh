@@ -21,6 +21,9 @@ fi
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # ─── Clone or use existing dir ──────────────────────────────────────────────
+# T2-26: pin to a release tag for supply-chain integrity. Override with
+# LAB_INSTALL_REF=main for dev installs.
+LAB_INSTALL_REF="${LAB_INSTALL_REF:-v0.1.0}"
 if [ ! -d "$INSTALL_DIR" ]; then
   if command -v git >/dev/null 2>&1; then
     echo ">> Installing security-lab-workflow to $INSTALL_DIR"

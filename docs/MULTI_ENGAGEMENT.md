@@ -114,14 +114,29 @@ rate_limits:                 # CTF = fast, aggressive
   global_max_parallel: 8
 
 techniques_allowed:
-  - passive_recon, active_recon, web_app_testing, api_testing
-  - sqli, xss, ssrf, ssti, idor, file_upload, deserialization
-  - directory_fuzzing, subdomain_enum, jwt_attacks, auth_bypass
-  - parameter_pollution, race_conditions
+  - passive_recon
+  - active_recon
+  - web_app_testing
+  - api_testing
+  - sqli
+  - xss
+  - ssrf
+  - ssti
+  - idor
+  - file_upload
+  - deserialization
+  - directory_fuzzing
+  - subdomain_enum
+  - jwt_attacks
+  - auth_bypass
+  - parameter_pollution
+  - race_conditions
 
 techniques_require_approval:
-  - dos_ddos, ddos_amplification
-  - physical_attacks, social_engineering
+  - dos_ddos
+  - ddos_amplification
+  - physical_attacks
+  - social_engineering
 ```
 
 ### Engagement: Bug Bounty (`engagements/example-bounty.yaml`)
@@ -145,18 +160,29 @@ rate_limits:                      # bounty = slow, careful, production
   global_max_parallel: 2
 
 techniques_allowed:
-  - passive_recon, active_recon, web_app_testing, api_testing
-  - idor, ssrf, ssti, xss, jwt_attacks, auth_bypass
+  - passive_recon
+  - active_recon
+  - web_app_testing
+  - api_testing
+  - idor
+  - ssrf
+  - ssti
+  - xss
+  - jwt_attacks
+  - auth_bypass
   - parameter_pollution
 
 techniques_require_approval:
   - sqli              # injection on prod — needs explicit care
-  - file_upload, deserialization, race_conditions
+  - file_upload
+  - deserialization
+  - race_conditions
   - directory_fuzzing  # can look like an attack
   - subdomain_enum     # DNS noise
 
 techniques_denied:               # NEVER on bounty
-  - dos_ddos, ddos_amplification
+  - dos_ddos
+  - ddos_amplification
   - brute_force_without_oracle
   - automated_scanning
 
@@ -177,7 +203,8 @@ in_scope:
   - pattern: "localhost"
   - pattern: "127.0.0.1"
   - pattern: "10.*"
-  - pattern: "172.16.*", "172.17.*"   # Docker bridges
+  - pattern: "172.16.*"   # Docker bridge
+  - pattern: "172.17.*"   # Docker bridge
   - pattern: "192.168.*"
 
 rate_limits:                          # local = unlimited
@@ -185,9 +212,20 @@ rate_limits:                          # local = unlimited
   global_max_parallel: 16
 
 techniques_allowed:
-  - passive_recon, active_recon, web_app_testing, api_testing
-  - sqli, xss, ssrf, ssti, idor, file_upload, deserialization
-  - directory_fuzzing, fuzzing, binary_exploitation
+  - passive_recon
+  - active_recon
+  - web_app_testing
+  - api_testing
+  - sqli
+  - xss
+  - ssrf
+  - ssti
+  - idor
+  - file_upload
+  - deserialization
+  - directory_fuzzing
+  - fuzzing
+  - binary_exploitation
   - reverse_engineering
 
 reporting:

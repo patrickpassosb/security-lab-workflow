@@ -49,7 +49,13 @@ Common hash lengths:
 ```bash
 # Default wordlists (in order of speed-to-find)
 # 1. rockyou (most common, fastest for easy CTF flags)
-hashcat -m 0 -a 0 "$HASH" ~/security-lab/wordlists/SecLists/Passwords/Leaked-Databases/rockyou.txt.tar.gz 2>/dev/null
+# T2-57: rockyou.txt is shipped as rockyou.txt.tar.gz — decompress first:
+if [ ! -f ~/security-lab/wordlists/rockyou.txt ] && [ -f ~/security-lab/wordlists/rockyou.txt.tar.gz ]; then
+  tar -xzf ~/security-lab/wordlists/rockyou.txt.tar.gz -C ~/security-lab/wordlists/ 2>/dev/null || \
+    tar -xzf ~/security-lab/wordlists/SecLists/Passwords/Leaked-Databases/rockyou.txt.tar.gz -C ~/security-lab/wordlists/ 2>/dev/null || true
+fi
+hashcat -m 0 -a 0 "$HASH" ~/security-lab/wordlists/rockyou.txt 2>/dev/null || \
+  hashcat -m 0 -a 0 "$HASH" ~/security-lab/wordlists/SecLists/Passwords/Leaked-Databases/rockyou.txt.tar.gz 2>/dev/null
 
 # If rockyou is the priority, download separately (NOT in SecLists):
 test -f ~/security-lab/wordlists/rockyou.txt || \
@@ -100,6 +106,26 @@ if [ -n "$CRACKED" ]; then
   echo "{\"hash\":\"$HASH\",\"plain\":\"$CRACKED\",\"type\":\"md5\"}" >> $WORK/results.json
 fi
 ```
+
+### Flag handoff (MANDATORY when the cracked value IS the flag)
+
+If the cracked plaintext is (or contains) the flag, hand it off boxed and STOP:
+
+```
+╔════════════════════════════════════════╗
+║          FLAG CANDIDATE                ║
+╠════════════════════════════════════════╣
+║  <paste the cracked flag here>         ║
+║                                        ║
+║  Confidence: <high/medium/low>         ║
+║  Source: hashcat cracked <hash>        ║
+║  Evidence: $WORK/results.txt           ║
+╠════════════════════════════════════════╣
+║  Submit and tell me: accepted/rejected  ║
+╚════════════════════════════════════════╝
+```
+
+Then STOP. Wait for the human's verdict before writing the writeup.
 
 ## Common pitfalls
 

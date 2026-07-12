@@ -288,11 +288,25 @@ def main() -> int:
                 encoding="utf-8",
             )
         else:
+            # T2-15: use fill_template for writeup templates too (was shutil.copy2,
+            # which left {{...}} placeholders unfilled). Add missing keys with
+            # empty defaults so the templates render cleanly.
             writeup_template = tmpl_dir / cfg["writeup_filename"].replace(".md", "_template.md")
             if not writeup_template.exists():
                 writeup_template = tmpl_dir / ("report_h1.md" if args["type"] == "bounty" else "advisory_template.md" if args["type"] == "cve" else "")
             if writeup_template and writeup_template.exists() and writeup_template.is_file():
-                shutil.copy2(writeup_template, writeup_dest)
+                writeup_replacements = {
+                    **replacements,
+                    "VULN_CLASS": "",
+                    "SEVERITY": "",
+                    "TITLE": args["name"],
+                    "VENDOR": "",
+                    "AFFECTED_VERSIONS": "",
+                    "CVE_ID": "",
+                    "CVSS_SCORE": "",
+                    "PROGRAM_URL": "",
+                }
+                fill_template(writeup_template, writeup_dest, writeup_replacements)
             else:
                 writeup_dest.write_text(
                     f"# {args['name']}\n\n"

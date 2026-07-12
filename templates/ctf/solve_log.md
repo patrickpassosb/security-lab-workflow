@@ -74,3 +74,5 @@ For every finding, record the primitive and the next unlock.
 - Winning primitive: n/a
 - Biggest blocker: n/a
 - Workflow improvement: n/a
+
+## Session Log

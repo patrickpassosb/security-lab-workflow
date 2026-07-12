@@ -28,8 +28,13 @@ python3 -c "import angr; print('angr', angr.__version__)" 2>&1
 
 ```bash
 BIN="$1"
-mkdir -p ~/security-lab/findings/ctf/$(basename $BIN)/binary
-WORK=~/security-lab/findings/ctf/$(basename $BIN)/binary
+CHALLENGE="${2:-$(basename "$BIN")}"   # challenge name (falls back to binary basename)
+
+# Create a proper workspace via lab-new (keys by challenge name, not basename):
+#   lab-new ctf "$CHALLENGE" --target "$BIN" --engagement <eng>
+# Then set WORK to the workspace:
+WORK=~/security-lab/findings/ctf/$CHALLENGE/binary
+mkdir -p "$WORK"
 
 # File type + arch
 file "$BIN" | tee $WORK/triage.txt
@@ -141,15 +146,36 @@ else:
 
 Run with: `python3 $WORK/exploit.py "$BIN"` (local) or `python3 $WORK/exploit.py "$BIN" host port` (remote).
 
-## Step 7 — Capture the flag
+## Step 7 — Capture the flag and HAND OFF
 
 When the binary prints the flag, copy it to:
 ```bash
-FLAG=$(python3 $WORK/exploit.py "$BIN" 2>&1 | grep -oE "flag\{[^}]+\}")
+FLAG=$(python3 $WORK/exploit.py "$BIN" 2>&1 | grep -oE "(flag|CTF|picoCTF|HTB)\{[^}]+\}")
 echo "$FLAG" > $WORK/flag.txt
 ```
 
-Then route to `report-ctf` for the writeup.
+### Flag handoff (MANDATORY — see AGENTS.md #6 + ctf-workflow)
+
+Output the boxed FLAG CANDIDATE block and STOP. Do NOT write the writeup, do
+NOT submit the flag. The human submits; the agent writes the writeup only
+after the human says "accepted".
+
+```
+╔════════════════════════════════════════╗
+║          FLAG CANDIDATE                ║
+╠════════════════════════════════════════╣
+║  <paste the flag here>                 ║
+║                                        ║
+║  Confidence: <high/medium/low>         ║
+║  Source: binary-attack on <binary>     ║
+║  Evidence: $WORK/flag.txt              ║
+╠════════════════════════════════════════╣
+║  Submit and tell me: accepted/rejected  ║
+╚════════════════════════════════════════╝
+```
+
+Then STOP. Wait for the human's verdict. Only on "accepted" do you route
+to `report-ctf` for the writeup.
 
 ## Common pitfalls
 

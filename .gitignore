@@ -51,6 +51,32 @@ __pycache__/
 .env.*
 !.env.example
 
+# ─── Keys, certs, credentials (T2-27) ───
+*.pem
+*.key
+*.crt
+*.p12
+*.pfx
+*.keystore
+id_rsa
+id_rsa.pub
+id_ed25519
+id_ed25519.pub
+id_ecdsa
+id_dsa
+known_hosts
+authorized_keys
+
+# ─── Databases and local state ───
+*.sqlite
+*.sqlite3
+*.db
+*.db-journal
+brain.pglite/
+.aws/
+.gnupg/
+.ssh/
+
 # ─── Evidence dumps (defensive: even inside tracked dirs) ───
 core.*
 *.core

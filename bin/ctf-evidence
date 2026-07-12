@@ -137,7 +137,14 @@ if [ -n "$FILE_PATH" ]; then
   MODE="file"
   BASENAME="$(basename "$FILE_PATH")"
   OUTPUT_PATH="$BASE-$(sanitize "$BASENAME")"
+  # T2-51: wrap cp in set +e so failure doesn't abort before metadata/audit
+  set +e
   cp "$FILE_PATH" "$OUTPUT_PATH"
+  EXIT_CODE=$?
+  set -e
+  if [ $EXIT_CODE -ne 0 ]; then
+    echo "[!] cp failed (exit $EXIT_CODE): $FILE_PATH -> $OUTPUT_PATH" >&2
+  fi
 elif [ "$#" -gt 0 ]; then
   MODE="command"
   OUTPUT_PATH="$BASE.out"

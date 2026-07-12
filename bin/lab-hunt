@@ -190,10 +190,24 @@ def main() -> int:
             endpoint_count = len(endpoints_file.read_text().splitlines())
             if endpoint_count > 0:
                 hypotheses.append(("H5", f"{endpoint_count} endpoints found in JS", "Test each endpoint for IDOR and auth bypass", "Review endpoints.txt and test each manually"))
-        # Check for secrets
-        secrets_file = workspace / "recon" / "secretfinder-secrets.txt"
-        if secrets_file.exists() and secrets_file.stat().st_size > 0:
-            hypotheses.append(("H6", "Potential secrets in JS", "Verify if any found secrets are live API keys or tokens", "Review secretfinder output and test keys"))
+        # T2-44: lab-firstpass writes results to firstpass-results.json and
+        # gitleaks-js.json, NOT secretfinder-secrets.txt. Check both.
+        secrets_file = workspace / "recon" / "firstpass-results.json"
+        gitleaks_file = workspace / "recon" / "gitleaks-js.json"
+        has_secrets = False
+        if gitleaks_file.exists() and gitleaks_file.stat().st_size > 0:
+            has_secrets = True
+        if secrets_file.exists():
+            try:
+                results = json.loads(secrets_file.read_text(encoding="utf-8"))
+                for step in results:
+                    if step.get("step") == "secretfinder" and step.get("secrets"):
+                        has_secrets = True
+                        break
+            except Exception:
+                pass
+        if has_secrets:
+            hypotheses.append(("H6", "Potential secrets in JS", "Verify if any found secrets are live API keys or tokens", "Review gitleaks-js.json and secretfinder output, test keys"))
 
     if not hypotheses:
         hypotheses.append(("H1", "initial recon", "Manual review of first-pass report and test high-value features", "Read FIRSTPASS_REPORT.md"))

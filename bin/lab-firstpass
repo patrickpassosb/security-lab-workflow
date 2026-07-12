@@ -9,7 +9,7 @@ Runs the full first-pass in one command:
   5. Directory scan (ffuf, small wordlist, rate-limited)
   6. CVE scan (nuclei CVE templates)
   7. GraphQL detection (graphw00f)
-  8. OOB listener check (interactsh, if running)
+  8. GraphQL endpoint testing (step_graphql)
 
 Outputs a structured JSON report + markdown summary.
 Saves all artifacts under the current workspace.

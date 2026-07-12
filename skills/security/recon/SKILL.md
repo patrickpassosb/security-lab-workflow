@@ -43,7 +43,7 @@ mkdir -p "$WORK"
 
 ```bash
 TGT="$1"
-WORK=~/security-lab/findings/ctf/$TGT/recon
+WORK=~/security-lab/findings/ctf/$CHALLENGE/recon
 
 # Subdomain enumeration (passive)
 subfinder -d "$TGT" -all -silent -json -o $WORK/subfinder.json 2>/dev/null &

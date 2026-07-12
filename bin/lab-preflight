@@ -218,6 +218,10 @@ def check_hint_theory_gate(challenge_dir, is_new, challenge_name):
 | primitive | evidence | unlocks | next action | status |
 |---|---|---|---|---|
 
+## Tool Installs
+
+## Eval
+
 ## Session Log
 """
         # Use O_CREAT|O_EXCL so only one writer wins (T2-14). If two concurrent

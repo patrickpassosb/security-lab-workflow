@@ -109,11 +109,33 @@ vol -f "$FILE" windows.pstree
 ## Capture and report
 
 ```bash
-FLAG=$(strings $WORK/extracted.* 2>/dev/null | grep -oE "flag\{[^}]+\}" | head -1)
+FLAG=$(strings $WORK/extracted.* 2>/dev/null | grep -oE "(flag|CTF|picoCTF|HTB)\{[^}]+\}" | head -1)
 if [ -n "$FLAG" ]; then
   echo "$FLAG" > $WORK/flag.txt
 fi
 ```
+
+### Flag handoff (MANDATORY — see AGENTS.md #6 + ctf-workflow)
+
+When you find a flag candidate, you MUST hand it off boxed and STOP. Do NOT
+write the writeup, do NOT submit it. The human submits; the agent writes the
+writeup only after the human says "accepted".
+
+```
+╔════════════════════════════════════════╗
+║          FLAG CANDIDATE                ║
+╠════════════════════════════════════════╣
+║  <paste the flag here>                 ║
+║                                        ║
+║  Confidence: <high/medium/low>         ║
+║  Source: stego-forensics on <file>     ║
+║  Evidence: evidence/<file>             ║
+╠════════════════════════════════════════╣
+║  Submit and tell me: accepted/rejected  ║
+╚════════════════════════════════════════╝
+```
+
+Then STOP. Wait for the human's verdict before doing anything else.
 
 ## Common pitfalls
 

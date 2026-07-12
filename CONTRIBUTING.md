@@ -51,18 +51,22 @@ description: |
 
 # My Skill
 
-## When to use
+## What it does
+- One-paragraph summary of what this skill accomplishes.
+
+## When to run
 - Trigger phrases that route here.
 - What inputs it expects.
 - What it produces.
 
-## Workflow
+## How to run
 1. Step one.
 2. Step two.
 3. Decision branch.
 
-## When NOT to use
+## Common pitfalls
 - Cases that belong to another skill.
+- Frequent mistakes and how to avoid them.
 
 ## References
 - Links to docs, related skills, tools.
