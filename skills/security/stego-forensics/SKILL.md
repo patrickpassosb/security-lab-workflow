@@ -13,7 +13,7 @@ description: |
 
 ```bash
 FILE="$1"
-WORK=~/security-lab/findings/ctf/forensics/$(basename $FILE)
+WORK=$HACKING_LAB/findings/ctf/forensics/$(basename $FILE)
 mkdir -p $WORK
 
 # What is it really?

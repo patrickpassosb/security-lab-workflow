@@ -17,8 +17,12 @@ Actions:
 
 Usage:
   lab-handoff <challenge-name> [--ctf-home <path>] [--status <solved|stuck|pivoting>]
-  lab-handoff <challenge-name> --solved --flag flag{...}
+  lab-handoff <challenge-name> --solved --accepted-flag flag{...}
   lab-handoff <challenge-name> --stuck --next "try the X hypothesis"
+
+Note: --accepted-flag (previously --flag) records an accepted flag AFTER the
+human has submitted it. It does NOT output a boxed FLAG CANDIDATE or STOP.
+For the pre-acceptance handoff, see the FLAG CANDIDATE block in ctf-workflow.
 
 Exit 0 = handoff captured successfully
 Exit 1 = error (challenge not found, etc.)
@@ -74,72 +78,100 @@ def extract_section(content, header_pattern):
 
 def append_session_block(solve_log_path, session_num, status, summary, 
                          tested, failed, next_test, read_next, flag):
-    """Append a ### Session N block to solve_log.md."""
+    """Append a ### Session N block to solve_log.md.
+
+    T2-11: user-supplied text is escaped to prevent markdown injection.
+    Lines starting with '#', '**Status:**', or '## ' are prefixed with '>'
+    so they render as blockquotes, not as authoritative headers.
+    T2-13: returns the new content instead of writing, so the caller can
+    do a single atomic write after both append_session_block and
+    update_failed_paths.
+    """
+    def _escape(text: str) -> str:
+        """Prevent markdown injection: blockquote lines that look like headers/status."""
+        if not text:
+            return text
+        lines = []
+        for line in str(text).splitlines():
+            stripped = line.lstrip()
+            if stripped.startswith("#") or stripped.lower().startswith("**status:**") or stripped.startswith("## "):
+                lines.append(f"> {line}")
+            else:
+                lines.append(line)
+        return "\n".join(lines)
+
     ts = datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
     block = f"\n### Session {session_num} ({ts}, {status})\n\n"
     
     if summary:
-        block += f"**Summary:** {summary}\n\n"
+        block += f"**Summary:** {_escape(summary)}\n\n"
     if flag:
+        # Flag is expected to match flag{...} format; validate loosely.
         block += f"**Flag:** `{flag}`\n\n"
     if tested and len(tested) > 0:
         block += "**Tested this session:**\n"
         for item in tested:
-            block += f"- {item}\n"
+            block += f"- {_escape(item)}\n"
         block += "\n"
     if failed and len(failed) > 0:
         block += "**New dead ends (added to Failed Paths):**\n"
         for item in failed:
-            block += f"- {item}\n"
+            block += f"- {_escape(item)}\n"
         block += "\n"
     if next_test:
-        block += f"**Next best test:** {next_test}\n\n"
+        block += f"**Next best test:** {_escape(next_test)}\n\n"
     if read_next and len(read_next) > 0:
         block += "**READ THIS NEXT (for next agent):**\n"
         for item in read_next:
-            block += f"- {item}\n"
+            block += f"- {_escape(item)}\n"
         block += "\n"
     
     block += "---\n"
+    return block
 
-    content = solve_log_path.read_text(errors='replace')
-    content += block
-    labutil.atomic_write(solve_log_path, content)
 
-def update_failed_paths(solve_log_path, new_dead_ends):
-    """Add new dead-end entries to the Failed Paths / Do Not Repeat section."""
+def update_failed_paths_content(content: str, new_dead_ends: list[str]) -> str:
+    """T2-13: pure version — returns updated content instead of writing.
+
+    Add new dead-end entries to the Failed Paths / Do Not Repeat section.
+    Creates the section if missing (T2-50).
+    """
     if not new_dead_ends:
-        return
-    
-    content = solve_log_path.read_text(errors='replace')
+        return content
     
     # Find the Failed Paths section
     fp_pattern = r'^(##\s+Failed\s+Paths\s*/\s*Do\s+Not\s+Repeat\s*)$'
-    if not re.search(fp_pattern, content, re.MULTILINE):
-        # Section doesn't exist — create it at the end
-        ts = datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%d')
-        new_entries = "\n".join(f"- [{ts}] {entry}" for entry in new_dead_ends)
-        content += f"\n## Failed Paths / Do Not Repeat\n\n{new_entries}\n"
-        labutil.atomic_write(solve_log_path, content)
-        return
-    
-    # Build the new entries
     ts = datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%d')
     new_entries = "\n".join(f"- [{ts}] {entry}" for entry in new_dead_ends)
+    
+    if not re.search(fp_pattern, content, re.MULTILINE):
+        # Section doesn't exist — create it at the end
+        return content + f"\n## Failed Paths / Do Not Repeat\n\n{new_entries}\n"
     
     # Insert after the header line, before any sub-sections
     lines = content.split('\n')
     for i, line in enumerate(lines):
         if re.search(fp_pattern, line):
-            # Find the next blank line or ## header
             j = i + 1
             while j < len(lines) and (lines[j].strip() == '' or lines[j].startswith('-')):
                 j += 1
-            # Insert new entries at position j
             lines.insert(j, new_entries)
             break
+    
+    return '\n'.join(lines)
 
-    labutil.atomic_write(solve_log_path, '\n'.join(lines))
+def update_failed_paths(solve_log_path, new_dead_ends):
+    """Add new dead-end entries to the Failed Paths / Do Not Repeat section.
+
+    T2-13: kept for backward compat, but main() now uses the pure
+    update_failed_paths_content + single atomic_write to avoid the
+    two-write TOCTOU.
+    """
+    if not new_dead_ends:
+        return
+    content = solve_log_path.read_text(errors='replace')
+    content = update_failed_paths_content(content, new_dead_ends)
+    labutil.atomic_write(solve_log_path, content)
 
 def write_handoff_md(challenge_dir, challenge_name, status, summary, 
                      flag, next_test, read_next, missing_primitive):
@@ -269,19 +301,24 @@ Examples:
     print(color(f"\n  lab-handoff — {args.challenge} (session {session_num}, {status})", BOLD))
     print(color(f"  {'=' * 50}", BOLD))
 
-    # 1. Append session block
-    append_session_block(
+    # 1. Append session block (T2-13: pure — returns block, no write)
+    session_block = append_session_block(
         solve_log_path, session_num, status, args.summary,
         args.tested, args.failed, args.next, args.read_next, args.flag
     )
-    print(color("  [PASS]", GREEN) + f" Session {session_num} block appended to solve_log.md")
 
-    # 2. Update Failed Paths
+    # 2. Build updated content with failed paths (T2-13: pure — returns content)
+    content = solve_log_path.read_text(errors='replace')
+    content = content + session_block
     if args.failed:
-        update_failed_paths(solve_log_path, args.failed)
+        content = update_failed_paths_content(content, args.failed)
         print(color("  [PASS]", GREEN) + f" {len(args.failed)} new dead end(s) added to Failed Paths")
     else:
         print(color("  [SKIP]", YELLOW) + " No new dead ends to add to Failed Paths")
+
+    # Single atomic write (T2-13: no two-write TOCTOU)
+    labutil.atomic_write(solve_log_path, content)
+    print(color("  [PASS]", GREEN) + f" Session {session_num} block appended to solve_log.md")
 
     # 3. Write/update HANDOFF.md
     write_handoff_md(

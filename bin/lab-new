@@ -205,12 +205,19 @@ def main() -> int:
         print("WARNING: no --target provided, scope not checked. Pass --target <url> to enable scope validation.", file=sys.stderr)
 
     # Determine workspace path: cd-then-create mode or legacy global mode.
-    # If cwd contains AGENTS.md, we're in a program folder → create workspace relative to cwd.
-    # Otherwise, fall back to the old global findings/<type>/<name>/ path.
+    # T2-47: walk up from cwd to find AGENTS.md (like ctf-evidence does),
+    # so running lab-new from inside a challenge dir finds the program folder.
     cwd = Path.cwd()
-    if (cwd / "AGENTS.md").exists():
-        # cd-then-create: workspace = ./<workspace_subdir>/<name>/
-        work = cwd / cfg["workspace_subdir"] / args["name"]
+    program_root = None
+    search = cwd
+    while search != search.parent:
+        if (search / "AGENTS.md").exists():
+            program_root = search
+            break
+        search = search.parent
+    if program_root is not None:
+        # cd-then-create: workspace = <program_root>/<workspace_subdir>/<name>/
+        work = program_root / cfg["workspace_subdir"] / args["name"]
         ws_mode = "program"
     else:
         # Legacy: workspace = ~/security-lab/findings/<type>/<name>/

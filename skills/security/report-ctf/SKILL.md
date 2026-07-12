@@ -6,7 +6,7 @@ description: |
   the flag first, the human submits it, and only on "accepted" does
   the agent write the writeup. Captures: challenge metadata, target,
   vuln class, exploit chain, evidence, lessons. Writes to
-  ~/security-lab/findings/ctf/<challenge>/ and the Obsidian vault.
+  $HACKING_LAB/findings/ctf/<challenge>/ and the Obsidian vault.
   Use when: "write up this flag", "I found a flag", "document this
   finding" — but only after the human confirms the flag was accepted.
   Routes from ctf-workflow (or directly when invoked).
@@ -188,8 +188,8 @@ The vault writeup gets:
 ```bash
 # Save the winning request/response
 CHALLENGE="<name>"
-mkdir -p ~/security-lab/findings/ctf/$CHALLENGE 2>/dev/null || true
-cp ~/security-lab/findings/ctf/$CHALLENGE/web-attack/nuclei.json ~/security-lab/findings/ctf/$CHALLENGE/ 2>/dev/null || true
+mkdir -p $HACKING_LAB/findings/ctf/$CHALLENGE 2>/dev/null || true
+cp $HACKING_LAB/findings/ctf/$CHALLENGE/web-attack/nuclei.json $HACKING_LAB/findings/ctf/$CHALLENGE/ 2>/dev/null || true
 # In program mode, use the workspace-relative path instead:
 # cp "$WORKSPACE/web-attack/nuclei.json" "$WORKSPACE/" 2>/dev/null || true
 # Or capture a reproducible command with metadata

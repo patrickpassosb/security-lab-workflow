@@ -13,7 +13,7 @@ description: |
 
 ```bash
 HASH="$1"
-WORK=~/security-lab/findings/ctf/crack
+WORK=$HACKING_LAB/findings/ctf/crack
 mkdir -p $WORK
 
 # hashid / hashcat --identify (best for CTF)

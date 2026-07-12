@@ -69,7 +69,7 @@ the human — not a silent REJECT.
 
 ## Determining the engagement
 
-If you're working inside a workspace directory (e.g. `~/security-lab/findings/ctf/my-challenge/`),
+If you're working inside a workspace directory (e.g. `$HACKING_LAB/findings/ctf/my-challenge/`),
 read `engagement.txt` to get the engagement name, then pass it to `lab-scope`:
 
 ```bash

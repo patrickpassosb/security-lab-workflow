@@ -125,7 +125,7 @@ Before running recon, fuzzing, exploitation, cracking, or reverse-engineering ag
 # Backward-compatible way (still works):
 ~/security-lab/bin/ctf-new <challenge-name> --target <target-or-url>
 
-cd ~/security-lab/findings/ctf/<challenge-name>
+cd $HACKING_LAB/findings/ctf/<challenge-name>
 ```
 
 The workspace contains `solve_log.md`, `target.txt`, `engagement.txt`, `scope_snapshot.yaml`, `work/`, `evidence/`, and category output directories. Keep `solve_log.md` short and current. It is the handoff state for future agents and the source material for writeups.

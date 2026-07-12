@@ -137,6 +137,13 @@ if [ -n "$FILE_PATH" ]; then
   MODE="file"
   BASENAME="$(basename "$FILE_PATH")"
   OUTPUT_PATH="$BASE-$(sanitize "$BASENAME")"
+  # T2-20: warn if the file is outside the workspace (prevent copying /etc/shadow etc.)
+  WORK_ABS="$(cd "$WORK" && pwd)"
+  FILE_ABS="$(cd "$(dirname "$FILE_PATH")" && pwd)/$(basename "$FILE_PATH")"
+  case "$FILE_ABS" in
+    "$WORK_ABS"/*) : ;;  # inside workspace — OK
+    *) echo "[!] WARNING: --file path is outside the workspace ($FILE_PATH). Copying anyway, but this may include sensitive files." >&2 ;;
+  esac
   # T2-51: wrap cp in set +e so failure doesn't abort before metadata/audit
   set +e
   cp "$FILE_PATH" "$OUTPUT_PATH"

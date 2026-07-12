@@ -33,7 +33,7 @@ CHALLENGE="${2:-$(basename "$BIN")}"   # challenge name (falls back to binary ba
 # Create a proper workspace via lab-new (keys by challenge name, not basename):
 #   lab-new ctf "$CHALLENGE" --target "$BIN" --engagement <eng>
 # Then set WORK to the workspace:
-WORK=~/security-lab/findings/ctf/$CHALLENGE/binary
+WORK=$HACKING_LAB/findings/ctf/$CHALLENGE/binary
 mkdir -p "$WORK"
 
 # File type + arch
