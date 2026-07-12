@@ -29,7 +29,11 @@ from typing import Any
 
 import yaml
 
-LAB = Path(os.environ.get("HACKING_LAB", os.path.expanduser("~/security-lab")))
+# Import shared labutil helpers
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib"))
+import labutil  # noqa: E402
+
+LAB = labutil.LAB
 GLOBAL_SCOPE = LAB / "scope.yaml"
 ENGAGEMENTS_DIR = LAB / "engagements"
 AUDIT_LOG = LAB / "findings" / ".agent-audit.jsonl"
@@ -78,6 +82,11 @@ def load_engagement_scope(name: str) -> dict[str, Any] | None:
 
 
 def merge_scopes(global_scope: dict, engagement_scope: dict) -> dict:
+    """Merge global + engagement scopes.
+
+    Tracks global-denied and engagement-denied separately so check_target()
+    can apply the correct order (global denied → in_scope → engagement denied).
+    """
     merged = {"in_scope": [], "denied": [], "rate_limits": {}, "techniques_allowed": []}
 
     global_denied = global_scope.get("denied", [])
@@ -86,6 +95,9 @@ def merge_scopes(global_scope: dict, engagement_scope: dict) -> dict:
         merged["denied"].extend(global_denied)
     if isinstance(eng_denied, list):
         merged["denied"].extend(eng_denied)
+    # Track separately for ordered checking (T2-16)
+    merged["_global_denied"] = global_denied if isinstance(global_denied, list) else []
+    merged["_eng_denied"] = eng_denied if isinstance(eng_denied, list) else []
 
     eng_in_scope = engagement_scope.get("in_scope", [])
     if isinstance(eng_in_scope, list):
@@ -106,22 +118,50 @@ def merge_scopes(global_scope: dict, engagement_scope: dict) -> dict:
 
 
 def check_target(target: str, merged: dict) -> tuple[int, str]:
+    """Check a target against the merged scope.
+
+    Order (per AGENTS.md / scope SKILL docs):
+      1. Global denied → REJECT (exit 2)
+      2. Engagement in_scope → ALLOW (exit 0)  [overrides engagement denied]
+      3. Engagement denied → REJECT (exit 2)
+      4. Default-deny → UNKNOWN (exit 3 = ask human)
+    """
     host = extract_host(target)
     if not host:
         return 3, f"Could not extract host from {target}"
 
-    for item in merged["denied"]:
+    # Separate global denied from engagement denied. merge_scopes() puts
+    # global denied first, then engagement denied, in merged["denied"].
+    # We need to check global denied FIRST, then in_scope, then engagement denied.
+    global_denied = merged.get("_global_denied", [])
+    eng_denied = merged.get("_eng_denied", [])
+    # Fallback: if the split isn't pre-computed, treat all denied as global-first
+    # (this preserves the global-denied-always-wins behavior even without the split)
+    if not global_denied and not eng_denied:
+        global_denied = merged["denied"]
+
+    # 1. Global denied always rejects
+    for item in global_denied:
         pattern = item.get("pattern", "") if isinstance(item, dict) else str(item)
         reason = item.get("reason", "") if isinstance(item, dict) else ""
         if match_pattern(host, target, pattern):
-            return 2, f"DENIED: {host} matches denied pattern '{pattern}' ({reason})"
+            return 2, f"DENIED: {host} matches global denied pattern '{pattern}' ({reason})"
 
+    # 2. Engagement in-scope ALLOWS (overrides engagement denied)
     for item in merged["in_scope"]:
         pattern = item.get("pattern", "") if isinstance(item, dict) else str(item)
         note = item.get("note", "") if isinstance(item, dict) else ""
         if match_pattern(host, target, pattern):
             return 0, f"OK: {host} matches in-scope pattern '{pattern}' ({note})"
 
+    # 3. Engagement-specific denied rejects
+    for item in eng_denied:
+        pattern = item.get("pattern", "") if isinstance(item, dict) else str(item)
+        reason = item.get("reason", "") if isinstance(item, dict) else ""
+        if match_pattern(host, target, pattern):
+            return 2, f"DENIED: {host} matches engagement denied pattern '{pattern}' ({reason})"
+
+    # 4. Default-deny → UNKNOWN (exit 3 = ask human)
     return 3, f"UNKNOWN: {host} is not in scope; ask human before proceeding"
 
 
@@ -243,8 +283,6 @@ def main() -> int:
         elif args[i].startswith("--engagement="):
             engagement = args[i].split("=", 1)[1]
             i += 1
-        elif args[0] == "--engagement" and len(args) == 2:
-            return print_engagement_summary(args[1])
         elif args[i].startswith("-") and args[i] != "--list":
             print(f"Unknown option: {args[i]}")
             return 1
@@ -272,6 +310,10 @@ def main() -> int:
     if eng_scope is None:
         print(f"ERROR: engagement '{engagement}' not found in {ENGAGEMENTS_DIR}")
         return 1
+
+    # Validate engagement name matched a file (already safe since we loaded it).
+    # But validate any --engagement value before it's used in paths elsewhere.
+    labutil.require_valid_name(engagement, "engagement")
 
     global_scope = load_global_scope()
     merged = merge_scopes(global_scope, eng_scope)

@@ -21,14 +21,35 @@ fi
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # ─── Clone or use existing dir ──────────────────────────────────────────────
+# T2-26: pin to a release tag for supply-chain integrity. Override with
+# LAB_INSTALL_REF=main for dev installs.
+LAB_INSTALL_REF="${LAB_INSTALL_REF:-v0.1.0}"
 if [ ! -d "$INSTALL_DIR" ]; then
   if command -v git >/dev/null 2>&1; then
-    echo ">> Cloning security-lab-workflow to $INSTALL_DIR"
-    # If we're already inside a clone (script_dir is a git repo), copy it.
+    echo ">> Installing security-lab-workflow to $INSTALL_DIR"
+    # If we're already inside a git clone, use git clone --local (hardlinks objects,
+    # excludes working-tree junk like .env, .venv, __pycache__). T2-06: cp -R
+    # leaked .env (secrets), .git/, sandboxes/, wordlists/ (multi-GB).
     if [ -d "$SCRIPT_DIR/.git" ]; then
-      cp -R "$SCRIPT_DIR" "$INSTALL_DIR"
+      git clone --local --no-checkout "$SCRIPT_DIR" "$INSTALL_DIR" >/dev/null 2>&1 \
+        && (cd "$INSTALL_DIR" && git checkout HEAD -- . 2>/dev/null) \
+        || git clone --local "$SCRIPT_DIR" "$INSTALL_DIR"
     else
-      git clone https://github.com/security-lab-workflow/security-lab-workflow.git "$INSTALL_DIR"
+      # Non-git dir: rsync with excludes (or cp -R + cleanup if rsync missing)
+      if command -v rsync >/dev/null 2>&1; then
+        rsync -a \
+          --exclude='.env' --exclude='.git' --exclude='sandboxes/' \
+          --exclude='wordlists/' --exclude='.venv' --exclude='__pycache__/' \
+          --exclude='node_modules/' --exclude='.audit.jsonl' \
+          "$SCRIPT_DIR/" "$INSTALL_DIR/"
+      else
+        cp -R "$SCRIPT_DIR" "$INSTALL_DIR"
+        rm -rf "$INSTALL_DIR/.env" "$INSTALL_DIR/.git" "$INSTALL_DIR/sandboxes" \
+               "$INSTALL_DIR/wordlists" "$INSTALL_DIR/.venv" "$INSTALL_DIR/__pycache__" \
+               "$INSTALL_DIR/node_modules" "$INSTALL_DIR/.audit.jsonl" 2>/dev/null || true
+      fi
+      # Dead check removed: the rsync/cp above already handled the non-git case.
+      # (The previous LAB_INSTALL_OFFLINE check was dead code and tripped set -u.)
     fi
   else
     echo "git not found and target $INSTALL_DIR does not exist." >&2
@@ -51,7 +72,6 @@ if [ -d "$INSTALL_DIR/bin" ]; then
     name="$(basename "$script")"
     case "$name" in
       *.bak.*) continue ;;
-      __pycache__) continue ;;
     esac
     target="$LOCAL_BIN/$name"
     if [ -e "$target" ] && [ ! -L "$target" ]; then

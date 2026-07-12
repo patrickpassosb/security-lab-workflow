@@ -1,0 +1,44 @@
+# gitleaks config — custom rules for lab-specific env-var names + secrets.
+# Extends the default gitleaks rules. Run: gitleaks detect --source . --config .gitleaks.toml
+
+title = "security-lab custom rules"
+
+[extend]
+# Inherit the default rules (gitleaks ships them).
+useDefault = true
+
+# Custom rules for lab-specific secret patterns.
+[[rules]]
+id = "lab-env-secrets"
+description = "Lab env-var secrets (CAIDO_PAT, VOYAGE_API_KEY, etc.)"
+regex = '''(?i)(CAIDO_PAT|VOYAGE_API_KEY|GITHUB_TOKEN|SUPABASE_KEY|OPENAI_API_KEY)\s*[=:]\s*['"]?[A-Za-z0-9_\-]{16,}['"]?'''
+tags = ["key", "lab"]
+keywords = [
+    "CAIDO_PAT",
+    "VOYAGE_API_KEY",
+    "GITHUB_TOKEN",
+    "SUPABASE_KEY",
+    "OPENAI_API_KEY",
+]
+
+[[rules]]
+id = "lab-h1-token"
+description = "HackerOne API token"
+regex = '''h1_[A-Za-z0-9]{20,}'''
+tags = ["key", "bounty"]
+keywords = ["h1_"]
+
+[allowlist]
+description = "Allowlist for example/template files and .env.example"
+paths = [
+    '''.env\.example''',
+    '''engagements/example-.*\.yaml''',
+    '''templates/.*''',
+    '''docs/.*''',
+]
+# Placeholder values in examples are fine
+regexes = [
+    '''<your[_-]?(key|token|pat|secret|api[_-]?key)>''',
+    '''YOUR_KEY_HERE''',
+    '''changeme''',
+]

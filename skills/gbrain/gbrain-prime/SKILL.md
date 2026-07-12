@@ -61,12 +61,26 @@ Don't pretend there's context. Be honest.
 
 ## Configuration
 
-The gbrain source set is configured in `~/security-lab/AGENTS.md` and `${HOME}/.gstack/config.yaml`. To add a source:
+The gbrain source set is managed via the `gbrain sources` CLI. To add/list/remove sources:
 
 ```bash
-gbrain sources add <path> --name <name> --mode read-write|read-only|deny
-gbrain sync  # incremental
-gbrain sync --full  # rebuild (slow, ~30 min on big repos)
+# List registered sources
+gbrain sources list
+
+# Register a new source (id = short name, path = directory to index)
+gbrain sources add <id> --path <path>
+
+# Remove a source and its pages
+gbrain sources remove <id>
+
+# Sync a specific source (incremental)
+gbrain sync --source <id>
+
+# Sync all sources
+gbrain sync --all
+
+# Full rebuild (slow, ~30 min on big repos)
+gbrain sync --full
 ```
 
 ## Time budget

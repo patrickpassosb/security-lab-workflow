@@ -1,6 +1,6 @@
 # Examples
 
-> These are illustrative examples. Replace with your own engagement details. The engagement names (`ctf-example`, `bounty-example`, `cve-research`) and targets (`target.example.ctf`, `example.com`, `localhost`) are placeholders — no real targets are referenced.
+> These are illustrative examples. Replace with your own engagement details. The engagement names (`example-ctf`, `example-bounty`, `cve-research`) and targets (`target.example.ctf`, `example.com`, `localhost`) are placeholders — no real targets are referenced.
 
 ---
 
@@ -19,7 +19,7 @@ From inside the program folder, `lab-new` creates workspaces relative to your cu
 
 ## Sample CTF session
 
-**Engagement:** `ctf-example` (an example CTF)
+**Engagement:** `example-ctf` (an example CTF)
 **Target:** `target.example.ctf`
 
 ### 1. Check scope
@@ -27,15 +27,15 @@ From inside the program folder, `lab-new` creates workspaces relative to your cu
 Before any tool runs, verify the target is in scope for the engagement.
 
 ```bash
-lab-scope target.example.ctf --engagement ctf-example
+lab-scope target.example.ctf --engagement example-ctf
 # Exit 0 = OK. Exit 2 = DENIED. Exit 3 = UNKNOWN (ask human).
 ```
 
 ### 2. Create the workspace
 
 ```bash
-# Inside $LAB/ctfs/ctf-example/:
-lab-new ctf sample-challenge --target target.example.ctf --engagement ctf-example
+# Inside $LAB/ctfs/example-ctf/:
+lab-new ctf sample-challenge --target target.example.ctf --engagement example-ctf
 # Creates: ./challenges/sample-challenge/
 #   solve_log.md, target.txt, scope_snapshot.yaml, engagement.txt, work/, evidence/, recon/
 ```
@@ -93,21 +93,21 @@ lab-debrief   # (planned) runs gbrain-debrief + obsidian-debrief
 
 ## Sample bounty session
 
-**Engagement:** `bounty-example` (an example bug bounty program)
+**Engagement:** `example-bounty` (an example bug bounty program)
 **Target:** `example.com`
 
 ### 1. Check scope
 
 ```bash
-lab-scope example.com --engagement bounty-example
+lab-scope example.com --engagement example-bounty
 # Exit 0 = OK.
 ```
 
 ### 2. Create the workspace
 
 ```bash
-# Inside $LAB/bounties/bounty-example/:
-lab-new bounty example-finding --target example.com --engagement bounty-example
+# Inside $LAB/bounties/example-bounty/:
+lab-new bounty example-finding --target example.com --engagement example-bounty
 # Creates: ./findings/example-finding/
 #   bounty_log.md, target.txt, scope_snapshot.yaml, engagement.txt, work/, evidence/
 ```
@@ -228,7 +228,7 @@ scope check → workspace creation → preflight → attack → handoff → debr
 
 | Step | CTF | Bounty | CVE |
 |---|---|---|---|
-| Scope | `lab-scope <target> --engagement ctf-example` | `lab-scope <target> --engagement bounty-example` | `lab-scope localhost --engagement cve-research` |
+| Scope | `lab-scope <target> --engagement example-ctf` | `lab-scope <target> --engagement example-bounty` | `lab-scope localhost --engagement cve-research` |
 | Workspace | `lab-new ctf <challenge>` | `lab-new bounty <finding>` | `lab-new cve <project>` |
 | Preflight | `lab-preflight <challenge> --new --target <url>` | `lab-preflight <finding> --new --target <url>` | `lab-preflight <project> --new` |
 | Attack | `web-attack` / `binary-attack` / `crack` / `stego-forensics` | `bounty-attack` (manual-first) | `web-attack` / `binary-attack` + (planned) `lab-codereview` |
@@ -240,21 +240,21 @@ scope check → workspace creation → preflight → attack → handoff → debr
 ## Engagement folder structure (after creation)
 
 ```
-$LAB/ctfs/ctf-example/
+$LAB/ctfs/example-ctf/
 ├── AGENTS.md                     # CTF rules, OOS, flag-handoff protocol
 ├── CONTEXT.md                    # CTF context, platform notes
 └── challenges/
     └── sample-challenge/
         ├── solve_log.md
         ├── target.txt
-        ├── scope_snapshot.yaml   # snapshot of ctf-example.yaml
-        ├── engagement.txt         # "ctf-example"
+        ├── scope_snapshot.yaml   # snapshot of example-ctf.yaml
+        ├── engagement.txt         # "example-ctf"
         ├── work/
         │   └── exploit.py
         ├── evidence/
         └── recon/
 
-$LAB/bounties/bounty-example/
+$LAB/bounties/example-bounty/
 ├── AGENTS.md                     # Program rules, OOS, manual-only
 ├── CONTEXT.md                    # Program context, cross-feature testing guide
 ├── accounts/                     # (planned) multi-account state
@@ -262,8 +262,8 @@ $LAB/bounties/bounty-example/
     └── example-finding/
         ├── bounty_log.md
         ├── target.txt
-        ├── scope_snapshot.yaml   # snapshot of bounty-example.yaml
-        ├── engagement.txt         # "bounty-example"
+        ├── scope_snapshot.yaml   # snapshot of example-bounty.yaml
+        ├── engagement.txt         # "example-bounty"
         ├── work/
         │   └── exploit.py
         └── evidence/

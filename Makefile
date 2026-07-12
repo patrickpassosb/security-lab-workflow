@@ -1,6 +1,6 @@
 .PHONY: install lint test clean check-secrets help
 
-LAB ?= $(HOME)/hacking
+LAB ?= $(or $(HACKING_LAB),$(HOME)/security-lab)
 
 help:
 	@echo "security-lab-workflow Makefile"
@@ -16,10 +16,13 @@ help:
 install:
 	./install.sh "$(LAB)"
 
-# Find bash scripts: anything in bin/ that is not a .bak, not __pycache__,
-# and starts with a bash shebang or no extension. Also include install.sh.
-BIN_BASH_SCRIPTS := $(shell find bin -maxdepth 1 -type f ! -name '*.bak.*' 2>/dev/null)
-BIN_PY_SCRIPTS := $(shell find bin -maxdepth 1 -type f -name '*.py' 2>/dev/null)
+# Find bash scripts: anything in bin/ with a bash/sh shebang, plus install.sh.
+BIN_BASH_SCRIPTS := $(shell for f in bin/*; do \
+  [ -f "$$f" ] || continue; \
+  case "$$(basename $$f)" in *.bak.*) continue;; esac; \
+  head -n1 $$f 2>/dev/null | grep -Eq '^#!.*(bash|/sh)' || continue; \
+  echo "$$f"; \
+  done)
 
 lint:
 	@echo ">> shellcheck"
@@ -30,7 +33,7 @@ lint:
 	fi
 	@echo ">> ruff"
 	@if command -v ruff >/dev/null 2>&1; then \
-	  ruff check bin/ templates/ install.sh || exit 1; \
+	  ruff check bin/ templates/ || exit 1; \
 	else \
 	  echo "   ruff not installed — skipping (run: pipx install ruff)"; \
 	fi

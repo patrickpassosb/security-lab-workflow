@@ -22,10 +22,27 @@ Writes a structured note to the Obsidian vault at the end of a session. Pairs wi
 
 ## How to run
 
-### Method 1 — Bash (works even if Obsidian app isn't running)
+### Method 1 — Using the obsidian CLI (preferred; requires app running)
+
+```bash
+command -v obsidian >/dev/null 2>&1 || { echo "obsidian CLI not found; use the bash fallback below"; exit 1; }
+obsidian append file="Cybersecurity/Sessions/$(date +%Y-%m-%d).md" \
+  content="
+## $(date +%H:%M) — Session entry
+
+**What I worked on:** <...>
+**What I learned:** <...>
+**Open questions:** <...>
+**Next steps:** <...>
+"
+```
+
+### Method 2 — Bash fallback (works even if Obsidian app isn't running)
 
 ```bash
 VAULT="${VAULT_DIR:-$HOME/obsidian-vault}"
+# Fail fast if the vault doesn't exist.
+test -d "$VAULT" || { echo "VAULT_DIR not set and $HOME/obsidian-vault missing; set VAULT_DIR to your vault path"; exit 1; }
 TODAY=$(date +%Y-%m-%d)
 SESSION_NOTE="$VAULT/Cybersecurity/Sessions/$TODAY.md"
 
@@ -61,20 +78,6 @@ EOF
 
 # Open in Obsidian (if app is running)
 command -v obsidian && obsidian open file="Cybersecurity/Sessions/$TODAY.md" 2>/dev/null
-```
-
-### Method 2 — Using the obsidian CLI (if app is running)
-
-```bash
-obsidian append file="Cybersecurity/Sessions/$(date +%Y-%m-%d).md" \
-  content="
-## $(date +%H:%M) — Session entry
-
-**What I worked on:** <...>
-**What I learned:** <...>
-**Open questions:** <...>
-**Next steps:** <...>
-"
 ```
 
 ## Frontmatter pattern (recommended for the FIRST entry of the day)

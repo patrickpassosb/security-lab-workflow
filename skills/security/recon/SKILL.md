@@ -9,6 +9,8 @@ description: |
 
 # recon
 
+> **Path convention:** paths below use `$HACKING_LAB/findings/ctf/<challenge>/`. In **program mode** (`ctfs/<ctf-name>/challenges/<challenge>/`), use your workspace root instead. Set `WORK` to your workspace dir.
+
 ## Before you start
 
 1. **Scope check.** `ctf-workflow` already validated the target. If you came here directly, run `scope` first.
@@ -18,12 +20,12 @@ description: |
    ~/security-lab/bin/lab-new ctf "$CHALLENGE" --target "$TGT" --engagement <ctf-engagement>
    # Or backward-compatible:
    ~/security-lab/bin/ctf-new "$CHALLENGE" --target "$TGT" --category web
-   cd ~/security-lab/findings/ctf/$CHALLENGE
+   cd $HACKING_LAB/findings/ctf/$CHALLENGE
    ```
 3. **Create a per-target working directory if no challenge name exists.**
    ```bash
    TGT="example.com"
-   WORK=~/security-lab/findings/ctf/$TGT/recon
+   WORK=$HACKING_LAB/findings/ctf/$TGT/recon
    mkdir -p $WORK
    ```
 4. **All output is JSON.** Pipe through `jq` for analysis. Save to `$WORK/`.
@@ -34,8 +36,8 @@ Preferred workspace variables:
 ```bash
 CHALLENGE="challenge-name"
 TGT="target.example.ctf"
-ENG="ctf-example"    # engagement name (from engagement.txt or --engagement)
-WORK=~/security-lab/findings/ctf/$CHALLENGE/recon
+ENG="example-ctf"    # engagement name (from engagement.txt or --engagement)
+WORK=$HACKING_LAB/findings/ctf/$CHALLENGE/recon
 mkdir -p "$WORK"
 ```
 
@@ -43,11 +45,11 @@ mkdir -p "$WORK"
 
 ```bash
 TGT="$1"
-WORK=~/security-lab/findings/ctf/$TGT/recon
+WORK=$HACKING_LAB/findings/ctf/$CHALLENGE/recon
 
 # Subdomain enumeration (passive)
 subfinder -d "$TGT" -all -silent -json -o $WORK/subfinder.json 2>/dev/null &
-amass enum -passive -d "$TGT" -json $WORK/amass.json 2>/dev/null &
+amass enum -passive -d "$TGT" -oA $WORK/amass 2>/dev/null &
 wait
 
 # DNS resolution
@@ -74,7 +76,7 @@ cat $WORK/dnsx.json 2>/dev/null | jq -r '.host' | sort -u \
 
 # Crawl for endpoints (shallow, ~3 levels)
 cat $WORK/httpx.json 2>/dev/null | jq -r '.url' | head -100 \
-  | katana -silent -json -depth 3 -o $WORK/katana.json
+  | katana -silent -j -depth 3 -o $WORK/katana.json
 
 # Tech fingerprint with nuclei
 nuclei -l <(jq -r '.url' $WORK/httpx.json 2>/dev/null) \

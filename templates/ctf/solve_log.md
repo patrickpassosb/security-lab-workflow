@@ -8,6 +8,13 @@
 
 ## Hint Theory (MANDATORY — fill before any tool runs)
 
+<!--
+  Fill in EVERY bullet below BEFORE running any tool. lab-preflight gates
+  on this section: it strips HTML comments and counts non-empty lines.
+  If you leave the placeholders as plain text, the gate PASSES with no
+  real hypothesis — which defeats the #1 enforcement rule.
+  Replace each <...> placeholder and delete this comment block.
+-->
 - Challenge name: "{{CHALLENGE}}"
 - Description/hint: <from challenge page>
 - What the name hints at: <one sentence — what does the name suggest?>
@@ -15,6 +22,7 @@
 - Non-obvious surface hypothesis: <what's NOT the obvious path? (e.g., "INSERT not SELECT", "_connector not field value", "sync flow not search", "formula not cell value")>
 - Test order: (1) <hint-derived>, (2) <obvious>, (3) <fallback>
 - gbrain query: `gbrain search "<vuln class>"` — run before testing
+<!-- End Hint Theory placeholders — delete this comment block once filled. -->
 
 ## Known Facts
 
@@ -66,3 +74,5 @@ For every finding, record the primitive and the next unlock.
 - Winning primitive: n/a
 - Biggest blocker: n/a
 - Workflow improvement: n/a
+
+## Session Log

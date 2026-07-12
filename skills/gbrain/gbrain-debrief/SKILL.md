@@ -34,23 +34,37 @@ Ask yourself (or the user):
 
 ### Step 2 — Write to gbrain
 
+The real `gbrain put` CLI takes `<slug> [--stdin | < file.md]` and reads a full markdown document (with YAML frontmatter for type/tags). There is no `--title`, `--body`, or positional `--type`.
+
 ```bash
-# Pattern 1: gstack-style typed pages (recommended for structured knowledge)
-gbrain put --type gstack/learning --title "JWT confusion with RS256-to-HS256 key swap" --body "
+# Pattern 1: gstack-style typed page (recommended for structured knowledge)
+# The slug is a kebab-case identifier; frontmatter carries type + tags.
+# Use --stdin with a heredoc (the --content flag does NOT exist in the real CLI).
+cat <<'EOF' | gbrain put jwt-confusion-rs256-to-hs256-key-swap --stdin
+---
+type: gstack/learning
+tags: [jwt, ctf, web]
+---
+# JWT confusion with RS256-to-HS256 key swap
+
 - Date: $(date +%Y-%m-%d)
 - Context: CTF practice on vulhub target X
 - Insight: The server's RS256 public key is the HMAC secret when alg confusion succeeds
 - Worked: yes
 - Failed approaches: tried kid SQLi first, took 20 min
 - Reference: ~/security-lab/findings/ctf/X/exploit.py
-- Tags: jwt, ctf, web
-"
+EOF
 
 # Pattern 2: freeform note
-gbrain put --type gstack/note --title "Day 3 of CTF prep" --body "..."
+cat <<'EOF' | gbrain put day-3-ctf-prep --stdin
+---
+type: gstack/note
+---
+Day 3 of CTF prep — <freeform summary here>
+EOF
 ```
 
-The `--type` lets future queries filter: `gbrain search --type gstack/learning JWT` returns just learning pages about JWT.
+The `type` frontmatter lets future queries filter. Use `gbrain list --type gstack/learning` to list all learning pages.
 
 ### Step 3 — Sync the vault
 
@@ -81,7 +95,7 @@ gbrain search "JWT confusion" --limit 3
 
 ## Auto-debrief trigger
 
-If you set `auto_debrief: true` in `~/security-lab/AGENTS.md` (or your gstack config), the agent auto-runs debrief at session end. Otherwise, manually invoke.
+Auto-debrief is a planned feature (see ROADMAP.md). Today, the agent must manually invoke `gbrain-debrief` at session end. A future config option may trigger it automatically.
 
 ## Time budget
 

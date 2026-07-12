@@ -125,7 +125,7 @@ fi
 EVIDENCE_DIR="$WORK/evidence"
 mkdir -p "$EVIDENCE_DIR"
 
-STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
+STAMP="$(date -u +%Y%m%dT%H%M%SZ)-$$"
 SAFE_LABEL="$(sanitize "$LABEL")"
 BASE="$EVIDENCE_DIR/$STAMP-$SAFE_LABEL"
 EXIT_CODE=0
@@ -137,7 +137,21 @@ if [ -n "$FILE_PATH" ]; then
   MODE="file"
   BASENAME="$(basename "$FILE_PATH")"
   OUTPUT_PATH="$BASE-$(sanitize "$BASENAME")"
+  # T2-20: warn if the file is outside the workspace (prevent copying /etc/shadow etc.)
+  WORK_ABS="$(cd "$WORK" && pwd)"
+  FILE_ABS="$(cd "$(dirname "$FILE_PATH")" && pwd)/$(basename "$FILE_PATH")"
+  case "$FILE_ABS" in
+    "$WORK_ABS"/*) : ;;  # inside workspace — OK
+    *) echo "[!] WARNING: --file path is outside the workspace ($FILE_PATH). Copying anyway, but this may include sensitive files." >&2 ;;
+  esac
+  # T2-51: wrap cp in set +e so failure doesn't abort before metadata/audit
+  set +e
   cp "$FILE_PATH" "$OUTPUT_PATH"
+  EXIT_CODE=$?
+  set -e
+  if [ $EXIT_CODE -ne 0 ]; then
+    echo "[!] cp failed (exit $EXIT_CODE): $FILE_PATH -> $OUTPUT_PATH" >&2
+  fi
 elif [ "$#" -gt 0 ]; then
   MODE="command"
   OUTPUT_PATH="$BASE.out"
@@ -183,8 +197,21 @@ TARGET=""
 [ -f "$WORK/target.txt" ] && TARGET="$(tr -d '\r' < "$WORK/target.txt" | head -n 1)"
 ENGAGEMENT=""
 [ -f "$WORK/engagement.txt" ] && ENGAGEMENT="$(tr -d '\r' < "$WORK/engagement.txt" | head -n 1)"
-printf '{"ts":"%s","agent":"%s","action":"ctf-evidence","challenge":"%s","target":"%s","engagement":"%s","label":"%s","exit":%s}\n' \
-  "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$(whoami)" "$CHALLENGE" "$TARGET" "$ENGAGEMENT" "$LABEL" "$EXIT_CODE" \
+# T2-08: use python json.dumps instead of printf to avoid JSON injection
+python3 -c 'import json,sys,os
+from datetime import datetime, timezone
+entry = {
+    "ts": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    "agent": os.environ.get("USER", os.environ.get("LOGNAME", "agent")),
+    "action": "ctf-evidence",
+    "challenge": sys.argv[1],
+    "target": sys.argv[2],
+    "engagement": sys.argv[3],
+    "label": sys.argv[4],
+    "exit": int(sys.argv[5]),
+}
+print(json.dumps(entry, ensure_ascii=False))
+' "$CHALLENGE" "$TARGET" "$ENGAGEMENT" "$LABEL" "$EXIT_CODE" \
   >> "$LAB/findings/.agent-audit.jsonl"
 
 echo "[+] evidence: $OUTPUT_PATH"

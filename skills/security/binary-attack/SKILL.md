@@ -12,9 +12,9 @@ description: |
 ## Pre-flight (always)
 
 ```bash
-# 1. pwndbg loaded in gdb
-echo "source ~/tools/pwndbg/gdbinit.py" > /tmp/gdbtest.gdb
-gdb -batch -x /tmp/gdbtest.gdb -ex "info functions pwndbg" -ex quit 2>&1 | head -3
+# 1. Detect which gdb extension is loaded (pwndbg or gef)
+#    ~/.gdbinit sources it automatically. Probe to confirm:
+gdb -batch -ex "quit" 2>&1 | grep -iE "pwndbg|gef" | head -1 || echo "WARN: no gdb extension detected"
 
 # 2. Ghidra headless available
 command -v ghidra-analyze || echo "WARN: ghidra-analyze not in PATH"
@@ -28,8 +28,13 @@ python3 -c "import angr; print('angr', angr.__version__)" 2>&1
 
 ```bash
 BIN="$1"
-mkdir -p ~/security-lab/findings/ctf/$(basename $BIN)/binary
-WORK=~/security-lab/findings/ctf/$(basename $BIN)/binary
+CHALLENGE="${2:-$(basename "$BIN")}"   # challenge name (falls back to binary basename)
+
+# Create a proper workspace via lab-new (keys by challenge name, not basename):
+#   lab-new ctf "$CHALLENGE" --target "$BIN" --engagement <eng>
+# Then set WORK to the workspace:
+WORK=$HACKING_LAB/findings/ctf/$CHALLENGE/binary
+mkdir -p "$WORK"
 
 # File type + arch
 file "$BIN" | tee $WORK/triage.txt
@@ -69,14 +74,14 @@ Look for:
 ## Step 3 — Decompile (ghidra headless)
 
 ```bash
-# Create a Ghidra project
-PROJECT="$WORK/ghidra-project"
-mkdir -p "$PROJECT"
-ghidra-analyze Import "$BIN" \
-  -postScript AnalyzeHeadless.java \
-  -deleteProject \
-  -project "$PROJECT" \
+# Create a Ghidra project (correct analyzeHeadless syntax)
+PROJECT_DIR="$WORK/ghidra-project"
+PROJECT_NAME="anal"
+mkdir -p "$PROJECT_DIR"
+ghidra-analyze "$PROJECT_DIR" "$PROJECT_NAME" \
   -import "$BIN" 2>&1 | tail -20
+# To run a postscript: -postScript <ScriptName> (compiled, in GhidraScript path)
+# To delete the project after: add -deleteProject flag
 ```
 
 For an interactive look, use `ghidraRun` (if you have a display) or the `ghidra-mcp` server.
@@ -141,15 +146,36 @@ else:
 
 Run with: `python3 $WORK/exploit.py "$BIN"` (local) or `python3 $WORK/exploit.py "$BIN" host port` (remote).
 
-## Step 7 — Capture the flag
+## Step 7 — Capture the flag and HAND OFF
 
 When the binary prints the flag, copy it to:
 ```bash
-FLAG=$(python3 $WORK/exploit.py "$BIN" 2>&1 | grep -oE "flag\{[^}]+\}")
+FLAG=$(python3 $WORK/exploit.py "$BIN" 2>&1 | grep -oE "(flag|CTF|picoCTF|HTB)\{[^}]+\}")
 echo "$FLAG" > $WORK/flag.txt
 ```
 
-Then route to `report-ctf` for the writeup.
+### Flag handoff (MANDATORY — see AGENTS.md #6 + ctf-workflow)
+
+Output the boxed FLAG CANDIDATE block and STOP. Do NOT write the writeup, do
+NOT submit the flag. The human submits; the agent writes the writeup only
+after the human says "accepted".
+
+```
+╔════════════════════════════════════════╗
+║          FLAG CANDIDATE                ║
+╠════════════════════════════════════════╣
+║  <paste the flag here>                 ║
+║                                        ║
+║  Confidence: <high/medium/low>         ║
+║  Source: binary-attack on <binary>     ║
+║  Evidence: $WORK/flag.txt              ║
+╠════════════════════════════════════════╣
+║  Submit and tell me: accepted/rejected  ║
+╚════════════════════════════════════════╝
+```
+
+Then STOP. Wait for the human's verdict. Only on "accepted" do you route
+to `report-ctf` for the writeup.
 
 ## Common pitfalls
 

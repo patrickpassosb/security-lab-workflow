@@ -8,7 +8,7 @@ An **agent-driven security research toolkit**. It bundles the workflows, scripts
 
 The primary user is **an agent, not a human**. Tools, skills, and workflows are optimized for agent consumption: the human directs, the agent executes. Every artifact (scripts, skills, templates, docs) is designed to be machine-readable first.
 
-The lab is **installable** (one-command `install.sh`), **config-driven** (`.env` for `$LAB`, `$VAULT_DIR`, `$CAIDO_CLI`, etc.), and **default-deny** (nothing runs against a target until scope is verified).
+The lab is **installable** (one-command `install.sh`), **config-driven** (`.env` for `$HACKING_LAB`, `$VAULT_DIR`, `$CAIDO_CLI`, etc.), and **default-deny** (nothing runs against a target until scope is verified).
 
 ## The multi-engagement system
 
@@ -27,7 +27,7 @@ See [MULTI_ENGAGEMENT.md](MULTI_ENGAGEMENT.md) for the full multi-engagement des
 Neutral layout — replace placeholders with your own engagement names.
 
 ```
-$LAB/
+$HACKING_LAB/
 ├── ctfs/                           # CTF home folders
 │   └── <ctf-name>/                 # Self-contained: AGENTS.md + CONTEXT.md + challenges/
 ├── bounties/                       # Bug bounty home folders
@@ -110,7 +110,7 @@ See [PLUGINS.md](PLUGINS.md) for how to enable the gbrain and Obsidian plugins.
 
 ## The bin/ scripts
 
-Global, shared scripts that implement the workflow. All read env vars (`$LAB`, `$VAULT_DIR`, `$CAIDO_CLI`) — never hardcoded personal paths.
+Global, shared scripts that implement the workflow. All read env vars (`$HACKING_LAB`, `$VAULT_DIR`, `$CAIDO_CLI`) — never hardcoded personal paths.
 
 | Script | What it does |
 |---|---|
@@ -132,7 +132,7 @@ Global, shared scripts that implement the workflow. All read env vars (`$LAB`, `
 | `caido-cli` | Caido CLI wrapper (uses `$CAIDO_CLI`) |
 | `caido-mode` | Caido SDK integration (search, replay, export) |
 | `setup-caido-mode` | Caido PAT setup (interactive, never stored) |
-| `jwt-tool` | JWT analysis wrapper (uses `$LAB/tools/jwt_tool`) |
+| `jwt-tool` | JWT analysis wrapper (uses `$HACKING_LAB/tools/jwt_tool`) |
 
 ## The templates system
 
@@ -158,7 +158,7 @@ LAB="$HOME/security-lab"
 VAULT_DIR="$HOME/obsidian-vault"
 CAIDO_CLI=""                    # path to caido-cli binary
 CAIDO_MODE_DIR="$HOME/.agents/skills/caido-mode"
-JWT_TOOL_DIR="$LAB/tools/jwt_tool"
+JWT_TOOL_DIR="$HACKING_LAB/tools/jwt_tool"
 VOYAGE_API_KEY=""               # for embeddings (opt-in, gbrain only)
 GITHUB_USERNAME=""              # for gh CLI
 ```
@@ -169,7 +169,7 @@ Copy the example, fill in real values. Never committed.
 
 | Variable | What it points to |
 |---|---|
-| `$LAB` | The lab root directory |
+| `$HACKING_LAB` | The lab root directory |
 | `$VAULT_DIR` | The Obsidian vault directory (opt-in) |
 | `$CAIDO_CLI` | Path to the Caido CLI binary |
 | `$CAIDO_MODE_DIR` | Path to the caido-mode skill |
@@ -179,7 +179,7 @@ Copy the example, fill in real values. Never committed.
 
 ## The audit log
 
-Every tool invocation against a target is logged to `$LAB/findings/.agent-audit.jsonl` (gitignored). One JSON line per command:
+Every tool invocation against a target is logged to `$HACKING_LAB/findings/.agent-audit.jsonl` (gitignored). One JSON line per command:
 
 ```json
 {"ts":"...","agent":"...","cmd":"...","target":"...","engagement":"...","exit":0}

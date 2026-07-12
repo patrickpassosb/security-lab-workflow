@@ -9,7 +9,7 @@ Runs the full first-pass in one command:
   5. Directory scan (ffuf, small wordlist, rate-limited)
   6. CVE scan (nuclei CVE templates)
   7. GraphQL detection (graphw00f)
-  8. OOB listener check (interactsh, if running)
+  8. GraphQL endpoint testing (step_graphql)
 
 Outputs a structured JSON report + markdown summary.
 Saves all artifacts under the current workspace.
@@ -36,8 +36,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-LAB = Path(os.environ.get("HACKING_LAB", os.path.expanduser("~/security-lab")))
-AUDIT_LOG = LAB / ".audit.jsonl"
+# Import shared labutil helpers
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib"))
+import labutil  # noqa: E402
+
+LAB = labutil.LAB
+AUDIT_LOG = LAB / "findings" / ".agent-audit.jsonl"
+AUDIT_LOG.parent.mkdir(parents=True, exist_ok=True)
 
 # Tool paths
 TOOLS = {
@@ -77,18 +82,8 @@ def run(cmd: list[str], timeout: int = 120, capture: bool = True) -> tuple[int, 
 
 
 def audit(action: str, target: str, engagement: str, detail: str = "") -> None:
-    entry = {
-        "ts": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-        "action": action,
-        "target": target,
-        "engagement": engagement,
-        "detail": detail,
-    }
-    try:
-        with open(AUDIT_LOG, "a", encoding="utf-8") as f:
-            f.write(json.dumps(entry) + "\n")
-    except Exception:
-        pass
+    """Write to the audit log via the canonical labutil.audit() (T2-43)."""
+    labutil.audit(action, target=target, engagement=engagement, detail=detail)
 
 
 def step_httpx(url: str, outdir: Path) -> dict[str, Any]:
@@ -120,15 +115,36 @@ def step_httpx(url: str, outdir: Path) -> dict[str, Any]:
     result: dict[str, Any] = {"step": "httpx", "exit": code, "file": str(outpath)}
     if outpath.exists():
         try:
-            data = json.loads(outpath.read_text())
-            result["status"] = data.get("status_code")
-            result["title"] = data.get("title", "")
-            result["tech"] = data.get("tech", [])
-            result["location"] = data.get("location", "")
-            result["server"] = data.get("server", "")
-            log(f"  -> status={result['status']} title='{result['title']}' tech={result['tech']}")
-        except Exception:
-            result["error"] = "Failed to parse httpx output"
+            # httpx with multiple URLs writes JSONL (one JSON object per line),
+            # not a single JSON object. Parse line-by-line (T2-18).
+            data: dict[str, Any] = {}
+            for line in outpath.read_text(encoding="utf-8").splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    obj = json.loads(line)
+                    # Prefer HTTPS: only overwrite an existing result with
+                    # another HTTPS result. Keep the first result if it's
+                    # already HTTPS. Don't let a later HTTP row overwrite
+                    # an earlier HTTPS row just because it has status_code.
+                    if not data:
+                        data.update(obj)
+                    elif obj.get("scheme") == "https" and data.get("scheme") != "https":
+                        data.update(obj)
+                except json.JSONDecodeError:
+                    continue
+            if data:
+                result["status"] = data.get("status_code")
+                result["title"] = data.get("title", "")
+                result["tech"] = data.get("tech", [])
+                result["location"] = data.get("location", "")
+                result["server"] = data.get("server", "")
+                log(f"  -> status={result['status']} title='{result['title']}' tech={result['tech']}")
+            else:
+                result["error"] = "No parseable httpx output"
+        except Exception as e:
+            result["error"] = f"Failed to parse httpx output: {e}"
     else:
         result["error"] = stderr or "No output"
         log(f"  -> ERROR: {result['error']}")
@@ -147,13 +163,13 @@ def step_nuclei_tech(url: str, outdir: Path) -> dict[str, Any]:
     )
     findings = []
     if outpath.exists():
-        for line in outpath.read_text().splitlines():
+        for line in outpath.read_text(encoding="utf-8", errors="replace").splitlines():
             if line.strip():
                 try:
                     d = json.loads(line)
                     findings.append({"template": d.get("template-id", ""), "matched": d.get("matcher-name", "")})
-                except Exception:
-                    pass
+                except json.JSONDecodeError:
+                    pass  # skip unparseable lines (nuclei sometimes writes partial)
     log(f"  -> {len(findings)} tech detections")
     return {"step": "nuclei_tech", "exit": code, "findings": findings, "file": str(outpath)}
 
@@ -257,8 +273,11 @@ def step_secretfinder(jsdir: Path, outdir: Path) -> dict[str, Any]:
             )
             if stdout:
                 for line in stdout.splitlines():
-                    if line.strip() and "No" not in line[:5]:
-                        secrets.append(line.strip())
+                    stripped = line.strip()
+                    # A-17: match the exact "No secrets found" string instead of
+                    # a prefix match on "No" (which dropped "Notion token: xxx").
+                    if stripped and stripped != "No secrets found" and not stripped.startswith("No secrets"):
+                        secrets.append(stripped)
 
     # Also run gitleaks on the JS dir
     gitleaks_out = outdir / "gitleaks-js.json"
@@ -419,7 +438,7 @@ def generate_report(url: str, results: list[dict], outdir: Path) -> Path:
 def main() -> int:
     if len(sys.argv) < 2 or sys.argv[1] in ("-h", "--help"):
         print(__doc__)
-        return 1
+        return 0
 
     url = sys.argv[1]
     engagement = ""
@@ -450,7 +469,17 @@ def main() -> int:
     if not engagement:
         eng_file = Path.cwd() / "engagement.txt"
         if eng_file.exists():
-            engagement = eng_file.read_text().strip()
+            engagement = eng_file.read_text(encoding="utf-8").strip()
+
+    # Validate URL scheme (T2-05: prevent SSRF via file://, gopher://, etc.)
+    if not labutil.is_safe_url(url):
+        log(f"ERROR: URL must be http(s) and not a link-local/loopback/metadata target: {url}")
+        return 2
+
+    # Require engagement or warn (T2-04: no-engagement scope bypass)
+    if not engagement:
+        log("WARNING: no engagement specified. Checking against global denied list only.")
+        log("         Pass --engagement <name> or have engagement.txt in the workspace.")
 
     # Determine output dirs
     cwd = Path.cwd()
@@ -481,6 +510,17 @@ def main() -> int:
                 log("UNKNOWN: target not in scope — aborting (add to engagement scope file or use --force-scope)")
                 return 3
             log("WARNING: target not in scope — proceeding (--force-scope)")
+    else:
+        # T2-04: no engagement → check against global denied list at minimum
+        log(f"Global scope check: {url}")
+        scope = subprocess.run(
+            [str(LAB / "bin" / "lab-scope"), url],
+            capture_output=True, text=True,
+        )
+        print(f"  {scope.stdout.strip()}")
+        if scope.returncode == 2:
+            log("DENIED by global scope — aborting")
+            return 2
 
     audit("lab-firstpass", url, engagement, "started")
 

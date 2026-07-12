@@ -10,6 +10,8 @@ description: |
 
 # web-attack
 
+> **Path convention:** the paths below use the legacy `$HACKING_LAB/findings/ctf/<challenge>/` form. In **program mode** (`ctfs/<ctf-name>/challenges/<challenge>/`), replace `$HACKING_LAB/findings/ctf/<challenge>/` with your workspace root (the dir containing `solve_log.md`). Set `WORK` to your workspace and use `$WORK/recon/`, `$WORK/web-attack/` instead.
+
 ## Before you start
 
 1. **Scope check** (via `ctf-workflow`).
@@ -122,8 +124,8 @@ High-value chains:
 ## Step 1 — WAF detection (do this BEFORE everything else)
 
 ```bash
-URLS=$(jq -r '.url' ~/security-lab/findings/ctf/$TGT/recon/httpx.json)
-echo "$URLS" | wafw00f -o ~/security-lab/findings/ctf/$TGT/web-attack/wafw00f.json
+URLS=$(jq -r '.url' $HACKING_LAB/findings/ctf/$TGT/recon/httpx.json)
+wafw00f -i <(echo "$URLS") -o $HACKING_LAB/findings/ctf/$TGT/web-attack/wafw00f.json
 ```
 
 If a WAF is detected, **reduce rate limits and tune payloads** (Step 7).
@@ -132,7 +134,7 @@ If a WAF is detected, **reduce rate limits and tune payloads** (Step 7).
 
 ```bash
 URLS=$(jq -r '. | select(.status_code==200) | .url' \
-  ~/security-lab/findings/ctf/$TGT/recon/httpx.json)
+  $HACKING_LAB/findings/ctf/$TGT/recon/httpx.json)
 
 # Full CVE + tech + exposure scan, JSON output
 nuclei -l <(echo "$URLS") \
@@ -145,7 +147,7 @@ nuclei -l <(echo "$URLS") \
   -severity critical,high,medium \
   -j -silent \
   -rate-limit 25 -bulk-size 25 -c 25 \
-  -o ~/security-lab/findings/ctf/$TGT/web-attack/nuclei.json
+  -o $HACKING_LAB/findings/ctf/$TGT/web-attack/nuclei.json
 ```
 
 **Time budget:** 5-15 min depending on target size. Adjust `-c` (concurrency) down if WAF detected.
@@ -159,11 +161,11 @@ Do not call public CVE/EPSS/KEV APIs from the lab during CTF prep unless the hum
 jq -r '
   [.info.severity, .template_id, (.info.name // "no-name"), (.matched_at // .host // .url)]
   | @tsv
-' ~/security-lab/findings/ctf/$TGT/web-attack/nuclei.json \
+' $HACKING_LAB/findings/ctf/$TGT/web-attack/nuclei.json \
   | sort \
-  > ~/security-lab/findings/ctf/$TGT/web-attack/triage.tsv
+  > $HACKING_LAB/findings/ctf/$TGT/web-attack/triage.tsv
 
-head -20 ~/security-lab/findings/ctf/$TGT/web-attack/triage.tsv
+head -20 $HACKING_LAB/findings/ctf/$TGT/web-attack/triage.tsv
 ```
 
 ## Step 4 — Directory + parameter fuzzing
@@ -189,14 +191,14 @@ ffuf -u "https://$TGT/FUZZ" \
   -w ~/security-lab/wordlists/SecLists/Discovery/Web-Content/raft-small-words.txt \
   -mc 200,301,302,401,403 \
   -t 50 -p "0.05-0.2" \
-  -o ~/security-lab/findings/ctf/$TGT/web-attack/ffuf-dirs.json \
+  -o $HACKING_LAB/findings/ctf/$TGT/web-attack/ffuf-dirs.json \
   -of json -s
 
 # Recursive (slower, deeper)
 feroxbuster -u "https://$TGT" \
   -w ~/security-lab/wordlists/SecLists/Discovery/Web-Content/raft-medium-directories.txt \
-  -t 50 -d 5 \
-  -o ~/security-lab/findings/ctf/$TGT/web-attack/feroxbuster.json
+  -t 50 -d 5 --json \
+  -o $HACKING_LAB/findings/ctf/$TGT/web-attack/feroxbuster.json
 ```
 
 **Time budget:** 5-20 min total.
@@ -208,13 +210,13 @@ feroxbuster -u "https://$TGT" \
 nuclei -l <(echo "$URLS") \
   -t ~/security-lab/wordlists/nuclei-templates/http/vulnerabilities/ \
   -tags sqli \
-  -j -silent -o ~/security-lab/findings/ctf/$TGT/web-attack/nuclei-sqli.json
+  -j -silent -o $HACKING_LAB/findings/ctf/$TGT/web-attack/nuclei-sqli.json
 
 # If JWTs in headers
 for url in $URLS; do
   jwt=$(curl -s "$url" | grep -oE "eyJ[A-Za-z0-9_-]+\.eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+" | head -1)
   if [ -n "$jwt" ]; then
-    jwt-tool "$jwt" -T -v > ~/security-lab/findings/ctf/$TGT/web-attack/jwt-$url.txt
+    jwt-tool "$jwt" -T -v > $HACKING_LAB/findings/ctf/$TGT/web-attack/jwt-$url.txt
   fi
 done
 ```
@@ -257,7 +259,7 @@ For each WAF, look up bypass techniques in `~/security-lab/wordlists/PayloadsAll
 ## Step 8 — Cross-tool dedup + final surface
 
 ```bash
-cd ~/security-lab/findings/ctf/$TGT/web-attack
+cd $HACKING_LAB/findings/ctf/$TGT/web-attack
 # Dedupe findings by (type, target, param)
 jq -s 'add | unique_by({type: .["type"]?, target: (.matched_at // .url // .host), param: (.["matched-at"] // .param) | tostring})' \
   *.json > deduped.json
@@ -270,7 +272,7 @@ jq -r '. | "[\(.info.severity)] \(.info.name) - \(.matched_at // .url)"' deduped
 ## Result cache (skip if recent)
 
 ```bash
-CACHE=~/security-lab/findings/ctf/$TGT/web-attack/.last-run
+CACHE=$HACKING_LAB/findings/ctf/$TGT/web-attack/.last-run
 test -f $CACHE && [ $(find $CACHE -mmin -1440) ] && { echo "skipping — ran <24h ago"; exit 0; }
 ```
 
@@ -292,7 +294,7 @@ Pivot when:
 
 - 8 commands produce no new fact.
 - The same error happens 3 times.
-- 20-30 minutes pass without a useful primitive.
+- 25-35 minutes pass without a useful primitive (WARN at 25, CRIT at 35, per lab-pivot-watch).
 - The path needs broad brute force without candidate count, runtime estimate, and oracle.
 
 Mark the current hypothesis `STUCK` in `solve_log.md` before switching surfaces.

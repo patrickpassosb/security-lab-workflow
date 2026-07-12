@@ -48,14 +48,17 @@ have() { command -v "$1" >/dev/null 2>&1; }
 install_hint() {
   tool="$1"
   case "$tool" in
-    nuclei) echo "go install github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest" ;;
-    httpx) echo "go install github.com/projectdiscovery/httpx/cmd/httpx@latest" ;;
-    ffuf) echo "go install github.com/ffuf/ffuf/v2@latest" ;;
-    feroxbuster) echo "cargo install feroxbuster" ;;
+    nuclei) echo "go install github.com/projectdiscovery/nuclei/v3/cmd/nuclei@v3.3.5" ;;
+    httpx) echo "go install github.com/projectdiscovery/httpx/cmd/httpx@v1.6.9" ;;
+    ffuf) echo "go install github.com/ffuf/ffuf/v2@v2.1.0" ;;
+    feroxbuster) echo "cargo install feroxbuster --locked" ;;
     jwt-tool) echo "uv tool install jwt-tool" ;;
     wafw00f) echo "uv tool install wafw00f" ;;
     ROPgadget) echo "uv tool install ROPGadget" ;;
+    ropper) echo "uv tool install ropper" ;;
     zsteg) echo "gem install --user-install zsteg" ;;
+    hashid) echo "uv tool install hashid" ;;
+    vol) echo "pip install volatility3" ;;
     *) echo "sudo dnf install -y $tool" ;;
   esac
 }
@@ -72,8 +75,11 @@ try_install() {
     feroxbuster)
       have cargo && bash -lc "$hint" || true
       ;;
-    jwt-tool|wafw00f|ROPgadget)
+    jwt-tool|wafw00f|ROPgadget|ropper|hashid)
       have uv && bash -lc "$hint" || true
+      ;;
+    vol)
+      have pip3 && bash -lc "$hint" || true
       ;;
     zsteg)
       have gem && bash -lc "$hint" || true
@@ -99,7 +105,15 @@ check_cmd() {
   tool="$1"
   label="${2:-$tool}"
   if have "$tool"; then
-    ok "$label"
+    # T2-35: verify the tool actually runs (catches broken wrappers/symlinks).
+    # For symlinks, also verify the target exists (catches dangling symlinks).
+    if [ -L "$(command -v "$tool")" ] && [ ! -e "$(command -v "$tool")" ]; then
+      warn "$label broken symlink: $(command -v "$tool")"
+    elif "$tool" --help >/dev/null 2>&1 || "$tool" -h >/dev/null 2>&1; then
+      ok "$label"
+    else
+      warn "$label present but --help failed (broken wrapper?)"
+    fi
   else
     hint="$(install_hint "$tool")"
     warn "$label missing; install hint: $hint"
@@ -162,14 +176,20 @@ check_pwn() {
   done
   have pwn && ok "pwntools (pwn)" || warn "pwntools missing; install hint: uv tool install pwntools"
   check_python_import pwnlib "python pwnlib"
+  # T2-35: add missing pwn tools (angr, ropper were referenced by skills but not checked)
+  check_python_import angr "angr (symbolic execution)"
+  check_cmd ropper "ropper (ROP)"
   check_cmd ghidra-analyze "Ghidra headless"
 }
 
 check_forensics() {
   echo "## forensics/stego"
-  for tool in binwalk exiftool zsteg steghide tshark foremost xxd; do
+  # T2-35/T2-56: add sox, qpdf, olevba, hashid, volatility which skills reference
+  for tool in binwalk exiftool zsteg steghide tshark foremost xxd sox qpdf hashid; do
     check_cmd "$tool"
   done
+  check_python_import oletools "oletools (olevba)"
+  check_cmd vol "Volatility 3"
 }
 
 echo "=================================================="

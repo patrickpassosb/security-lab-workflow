@@ -13,7 +13,7 @@ description: |
 
 ```bash
 HASH="$1"
-WORK=~/security-lab/findings/ctf/crack
+WORK=$HACKING_LAB/findings/ctf/crack
 mkdir -p $WORK
 
 # hashid / hashcat --identify (best for CTF)
@@ -49,7 +49,19 @@ Common hash lengths:
 ```bash
 # Default wordlists (in order of speed-to-find)
 # 1. rockyou (most common, fastest for easy CTF flags)
-hashcat -m 0 -a 0 "$HASH" ~/security-lab/wordlists/SecLists/Passwords/Leaked-Databases/rockyou.txt.tar.gz 2>/dev/null
+# T2-57: rockyou.txt is shipped as a .tar.gz — decompress first.
+# Check both possible locations (top-level wordlists/ and SecLists/).
+ROCKYOU=~/security-lab/wordlists/rockyou.txt
+if [ ! -f "$ROCKYOU" ]; then
+  # Try top-level first, then SecLists
+  if [ -f ~/security-lab/wordlists/rockyou.txt.tar.gz ]; then
+    tar -xzf ~/security-lab/wordlists/rockyou.txt.tar.gz -C ~/security-lab/wordlists/ 2>/dev/null
+  elif [ -f ~/security-lab/wordlists/SecLists/Passwords/Leaked-Databases/rockyou.txt.tar.gz ]; then
+    tar -xzf ~/security-lab/wordlists/SecLists/Passwords/Leaked-Databases/rockyou.txt.tar.gz \
+      -C ~/security-lab/wordlists/ 2>/dev/null
+  fi
+fi
+hashcat -m 0 -a 0 "$HASH" "$ROCKYOU" 2>/dev/null
 
 # If rockyou is the priority, download separately (NOT in SecLists):
 test -f ~/security-lab/wordlists/rockyou.txt || \
@@ -57,11 +69,16 @@ test -f ~/security-lab/wordlists/rockyou.txt || \
     -o ~/security-lab/wordlists/rockyou.txt
 
 # 2. Common-words (if rockyou fails)
-hashcat -m 0 -a 0 "$HASH" ~/security-lab/wordlists/SecLists/Passwords/Common-Credentials/10-million-password-list-top-1000000.txt
+hashcat -m 0 -a 0 "$HASH" ~/security-lab/wordlists/SecLists/Passwords/xato-net-10-million-passwords-1000000.txt
 
 # 3. With mutations (rules)
-hashcat -m 0 -a 0 "$HASH" ~/security-lab/wordlists/SecLists/Passwords/Common-Credentials/10-million-password-list-top-1000000.txt \
-  -r ~/security-lab/wordlists/SecLists/Rules/best64.rule
+# Note: best64.rule is bundled with hashcat. Use the system path if installed:
+#   - Fedora/RHEL: /usr/share/hashcat/rules/best64.rule
+#   - Or download from https://github.com/hashcat/hashcat/raw/master/rules/best64.rule
+RULES=/usr/share/hashcat/rules/best64.rule
+[ -f "$RULES" ] || RULES=~/security-lab/wordlists/best64.rule
+hashcat -m 0 -a 0 "$HASH" ~/security-lab/wordlists/SecLists/Passwords/xato-net-10-million-passwords-1000000.txt \
+  -r "$RULES"
 
 # 4. Pure brute force (last resort, GPU)
 hashcat -m 0 -a 3 "$HASH" ?a?a?a?a?a?a?a?a  # 8 chars, all printable
@@ -95,6 +112,26 @@ if [ -n "$CRACKED" ]; then
   echo "{\"hash\":\"$HASH\",\"plain\":\"$CRACKED\",\"type\":\"md5\"}" >> $WORK/results.json
 fi
 ```
+
+### Flag handoff (MANDATORY when the cracked value IS the flag)
+
+If the cracked plaintext is (or contains) the flag, hand it off boxed and STOP:
+
+```
+╔════════════════════════════════════════╗
+║          FLAG CANDIDATE                ║
+╠════════════════════════════════════════╣
+║  <paste the cracked flag here>         ║
+║                                        ║
+║  Confidence: <high/medium/low>         ║
+║  Source: hashcat cracked <hash>        ║
+║  Evidence: $WORK/results.txt           ║
+╠════════════════════════════════════════╣
+║  Submit and tell me: accepted/rejected  ║
+╚════════════════════════════════════════╝
+```
+
+Then STOP. Wait for the human's verdict before writing the writeup.
 
 ## Common pitfalls
 

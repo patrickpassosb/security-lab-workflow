@@ -31,7 +31,14 @@ masscan, or any tool that sends large volumes of automated requests.
 
 ### 1a. Map the attack surface
 
-- **Caido is your primary tool.** Browse the app normally — capture every request.
+- **Caido is the preferred proxy tool.** Browse the app normally — capture every request.
+  Verify Caido is running first: `curl -sf -o /dev/null --max-time 2 http://127.0.0.1:8080/ && echo OK || echo "Caido not running"`.
+  - Setup: set `CAIDO_CLI` in `.env` (path to the Caido CLI binary). Start Caido, point your browser proxy at `127.0.0.1:8080`.
+- **If Caido is not available**, fall back to:
+  - **Browser DevTools** (Network tab) — capture requests, copy as cURL.
+  - **`work/exploit.py`** — for deliberate, single requests with auth/session handling (see the template).
+  - **`curl` with `-H` headers** — for simple read-only probes.
+  - Manual capture is slower than Caido but works for every target.
 - Note all API routes from browsing (`/api/v3/*`, `api.example.com/*`, etc.)
 - Download JS bundles from pages you visit
 - Analyze JS (file processing, NOT scanning):

@@ -13,7 +13,7 @@ description: |
 
 ```bash
 FILE="$1"
-WORK=~/security-lab/findings/ctf/forensics/$(basename $FILE)
+WORK=$HACKING_LAB/findings/ctf/forensics/$(basename $FILE)
 mkdir -p $WORK
 
 # What is it really?
@@ -34,7 +34,8 @@ sha256sum "$FILE" | tee $WORK/sha256.txt
 # zsteg: LSB stego, multiple bit planes
 zsteg "$FILE" | tee $WORK/zsteg.txt
 zsteg -a "$FILE" 2>/dev/null | head -30  # all methods, slow
-zsteg "$FILE" --extract "specific_method:out.bin"  # extract
+# Extract a specific channel: use -E NAME (e.g. 1b,rgb,lsb) and redirect stdout
+zsteg "$FILE" -E "1b,rgb,lsb" > $WORK/out.bin 2>/dev/null
 ```
 
 ### JPG / WAV → steghide
@@ -99,19 +100,42 @@ olevba "$FILE" 2>&1 | tee $WORK/olevba.txt
 test -f /usr/bin/autopsy || test -f /usr/bin/sleuthkit
 fls "$FILE"  # list files in image
 
-# Memory dump (if given a .raw or .vmem)
-volatility -f "$FILE" imageinfo
-volatility -f "$FILE" --profile=Win7SP1x64 pslist
+# Memory dump (if given a .raw or .vmem) — Volatility 3 syntax
+vol -f "$FILE" windows.info
+vol -f "$FILE" windows.pslist
+vol -f "$FILE" windows.pstree
 ```
 
 ## Capture and report
 
 ```bash
-FLAG=$(strings $WORK/extracted.* 2>/dev/null | grep -oE "flag\{[^}]+\}" | head -1)
+FLAG=$(strings $WORK/extracted.* 2>/dev/null | grep -oE "(flag|CTF|picoCTF|HTB)\{[^}]+\}" | head -1)
 if [ -n "$FLAG" ]; then
   echo "$FLAG" > $WORK/flag.txt
 fi
 ```
+
+### Flag handoff (MANDATORY — see AGENTS.md #6 + ctf-workflow)
+
+When you find a flag candidate, you MUST hand it off boxed and STOP. Do NOT
+write the writeup, do NOT submit it. The human submits; the agent writes the
+writeup only after the human says "accepted".
+
+```
+╔════════════════════════════════════════╗
+║          FLAG CANDIDATE                ║
+╠════════════════════════════════════════╣
+║  <paste the flag here>                 ║
+║                                        ║
+║  Confidence: <high/medium/low>         ║
+║  Source: stego-forensics on <file>     ║
+║  Evidence: evidence/<file>             ║
+╠════════════════════════════════════════╣
+║  Submit and tell me: accepted/rejected  ║
+╚════════════════════════════════════════╝
+```
+
+Then STOP. Wait for the human's verdict before doing anything else.
 
 ## Common pitfalls
 

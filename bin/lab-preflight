@@ -40,9 +40,13 @@ import subprocess
 import datetime
 from pathlib import Path
 
+# Import shared labutil helpers
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib"))
+import labutil  # noqa: E402
+
 DEFAULT_CTF_HOME = ""  # must be passed via --ctf-home or auto-detected from cwd
 PIVOT_WATCH_SCRIPT = os.environ.get("HACKING_LAB", os.path.expanduser("~/security-lab")) + "/bin/lab-pivot-watch"
-PIVOT_WATCH_PID = "/tmp/lab-pivot-watch.pid"
+PIVOT_WATCH_PID = str(labutil.LAB / ".pivot-watch.pid")
 
 # ANSI colors
 RED = "\033[31m"
@@ -165,8 +169,9 @@ def check_pivot_gate(ctf_home, challenge_name):
         return "pass", "no .pivot-alerts (pivot-watch may not have run yet)"
 
     content = alerts_file.read_text(errors='replace')
+    # A-19: word-boundary match to avoid sqli matching sqli-1 (substring false positive)
     crit_lines = [l for l in content.split('\n')
-                  if 'CRIT' in l and challenge_name in l]
+                  if 'CRIT' in l and re.search(r'\b' + re.escape(challenge_name) + r'\b', l)]
 
     if not crit_lines:
         return "pass", "no CRIT alerts for this challenge"
@@ -214,9 +219,23 @@ def check_hint_theory_gate(challenge_dir, is_new, challenge_name):
 | primitive | evidence | unlocks | next action | status |
 |---|---|---|---|---|
 
+## Tool Installs
+
+## Eval
+
 ## Session Log
 """
-        solve_log.write_text(skeleton)
+        # Use O_CREAT|O_EXCL so only one writer wins (T2-14). If two concurrent
+        # --new runs race, the loser gets a clean "already exists" error instead
+        # of clobbering a filled-in Hint Theory.
+        try:
+            fd = os.open(str(solve_log), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write(skeleton)
+        except FileExistsError:
+            return "fail", "solve_log.md already exists — don't use --new"
+        except OSError as e:
+            return "fail", f"could not create solve_log.md: {e}"
         return "fail", f"created skeleton solve_log.md — write ## Hint Theory, then re-run preflight"
 
     if not solve_log.exists():
@@ -281,8 +300,9 @@ def print_pivot_alerts(ctf_home, challenge_name):
     if not alerts_file.exists():
         return
     content = alerts_file.read_text(errors='replace')
+    # A-19: word-boundary match (same fix as check_pivot_gate)
     crit_lines = [l for l in content.split('\n')
-                  if 'CRIT' in l and challenge_name in l]
+                  if 'CRIT' in l and re.search(r'\b' + re.escape(challenge_name) + r'\b', l)]
     if not crit_lines:
         return
     print(color("\n  PIVOT ALERTS (challenge is past pivot threshold):", RED))
@@ -313,6 +333,9 @@ Exit 1 = one or more gates failed — fix and re-run
                         help='Acknowledge that you have read the Failed Paths section')
 
     args = parser.parse_args()
+
+    # Validate challenge name (path-traversal guard, T2-01)
+    labutil.require_valid_name(args.challenge, "challenge")
 
     # Resolve ctf_home: explicit flag > cwd detection > fail
     ctf_home_str = args.ctf_home

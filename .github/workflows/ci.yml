@@ -8,13 +8,20 @@ on:
 
 permissions:
   contents: read
+  security-events: write  # T2-23: for upload-sarif to code scanning
+
+# T2-23: cancel old runs on the same branch
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   shellcheck:
     name: shellcheck (bash scripts)
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
       - name: Install shellcheck
         run: |
           sudo apt-get update
@@ -28,7 +35,6 @@ jobs:
             [ -f "$f" ] || continue
             case "$(basename "$f")" in
               *.bak.*) continue ;;
-              __pycache__) continue ;;
             esac
             head -n1 "$f" 2>/dev/null | grep -Eq '^#!.*(bash|/sh)' || continue
             scripts="$scripts:$f"
@@ -50,13 +56,14 @@ jobs:
   ruff:
     name: ruff (python scripts)
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+      - uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b  # v5.3.0
         with:
           python-version: '3.11'
       - name: Install ruff
-        run: pip install ruff
+        run: pip install -r requirements.txt
       - name: Ruff check
         # Only lint actual Python files. install.sh and the extensionless
         # bin/ scripts are bash — ruff parses them as Python and throws a wall
@@ -66,8 +73,9 @@ jobs:
   gitleaks:
     name: gitleaks (secrets scan)
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
         with:
           fetch-depth: 0
       - name: Install gitleaks
@@ -90,8 +98,13 @@ jobs:
             --log-level=info
       - name: Upload SARIF report
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882  # v4.4.3
         with:
           name: gitleaks-results.sarif
           path: results.sarif
           if-no-files-found: ignore
+      - name: Upload SARIF to GitHub code scanning  # T2-23
+        if: always()
+        uses: github/codeql-action/upload-sarif@f09c1c0a94de965c15400f5634aa42fac8fb8f88  # v3.27.5
+        with:
+          sarif_file: results.sarif

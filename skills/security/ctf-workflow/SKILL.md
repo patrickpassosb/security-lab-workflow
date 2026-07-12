@@ -14,8 +14,8 @@ description: |
 
 ## Multi-engagement system
 
-The lab supports parallel engagements. CTF engagements have scope files in
-`~/security-lab/engagements/ctf-<name>.yaml`. The global `~/security-lab/scope.yaml`
+The lab supports parallel engagements. Engagement scope files live in
+`~/security-lab/engagements/<name>.yaml`. The global `~/security-lab/scope.yaml`
 contains only the universal denied list (gov/mil/edu) + default rate limits.
 
 **Scope check:** use `lab-scope <target> --engagement <name>`.
@@ -125,7 +125,7 @@ Before running recon, fuzzing, exploitation, cracking, or reverse-engineering ag
 # Backward-compatible way (still works):
 ~/security-lab/bin/ctf-new <challenge-name> --target <target-or-url>
 
-cd ~/security-lab/findings/ctf/<challenge-name>
+cd $HACKING_LAB/findings/ctf/<challenge-name>
 ```
 
 The workspace contains `solve_log.md`, `target.txt`, `engagement.txt`, `scope_snapshot.yaml`, `work/`, `evidence/`, and category output directories. Keep `solve_log.md` short and current. It is the handoff state for future agents and the source material for writeups.
@@ -354,11 +354,15 @@ solve_log.md, and proceed to manual testing of the most promising leads.
 ## Additional tools
 
 ```bash
-# HTTP request smuggling:
-smuggler -u <url>
+# HTTP request smuggling (install first if missing):
+#   git clone https://github.com/defparam/smuggler.git ~/security-lab/tools/smuggler
+command -v smuggler >/dev/null 2>&1 && smuggler -u <url> \
+  || python3 ~/security-lab/tools/smuggler/smuggler.py -u <url>
 
-# CORS detection:
-corsy -u <url>
+# CORS detection (install first if missing):
+#   git clone https://github.com/s0md3v/Corsy.git ~/security-lab/tools/Corsy
+command -v corsy >/dev/null 2>&1 && corsy -u <url> \
+  || python3 ~/security-lab/tools/Corsy/corsy.py -u <url>
 
 # Browser automation (XSS bot triggering, screenshots):
 python3 -c "from playwright.sync_api import sync_playwright; p=sync_playwright().start(); b=p.chromium.launch(); pg=b.new_page(); pg.goto('<url>'); pg.screenshot(path='evidence/screenshot.png'); b.close(); p.stop()"
@@ -483,7 +487,7 @@ Pivot earlier when:
 
 - 8 commands produce no new fact.
 - The same error happens 3 times.
-- 20-30 minutes pass without a useful primitive.
+- 25-35 minutes pass without a useful primitive (WARN at 25, CRIT at 35, per lab-pivot-watch).
 - A path needs broad brute force without candidate count, runtime estimate, and oracle.
 
 When pivoting, update `solve_log.md` under `Failed Paths / Do Not Repeat` and mark the hypothesis `STUCK`.

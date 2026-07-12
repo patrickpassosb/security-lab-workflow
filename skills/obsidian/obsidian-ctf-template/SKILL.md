@@ -25,18 +25,32 @@ Cybersecurity/CTFs/<CTF-name>/
 │   ├── Deserialization.md
 │   ├── XSS.md
 │   ├── IDOR.md
-│   └── File Upload.md
+│   └── FileUpload.md
 ├── 03 - Tool Cheatsheets.md
 └── 99 - Writeups/   (folder, populated during the CTF)
 ```
 
 ## How to run
 
-### Method 1 — Bash (works even if Obsidian app isn't running)
+### Method 1 — Using the obsidian CLI (preferred; requires app running)
+
+```bash
+# The obsidian CLI is the canonical path. Verify it's available and the app is running:
+command -v obsidian >/dev/null 2>&1 || { echo "obsidian CLI not found; install it or use the bash fallback below"; exit 1; }
+
+CTF_NAME="$1"  # e.g. "Example CTF 2026"
+obsidian create path="Cybersecurity/CTFs/$CTF_NAME/00 - Daily Journal.md" \
+  content="# Daily Journal — $CTF_NAME"
+# (Repeat for each file: 01 - Methodology.md, 02 - Playbooks/*.md, 03 - Tool Cheatsheets.md)
+```
+
+### Method 2 — Bash fallback (works even if Obsidian app isn't running)
 
 ```bash
 CTF_NAME="$1"  # e.g. "Example CTF 2026"
 VAULT="${VAULT_DIR:-$HOME/obsidian-vault}"
+# Fail fast if the vault doesn't exist — don't silently write to a disconnected parallel vault.
+test -d "$VAULT" || { echo "VAULT_DIR not set and $HOME/obsidian-vault missing; set VAULT_DIR to your vault path"; exit 1; }
 CTF_DIR="$VAULT/Cybersecurity/CTFs/$CTF_NAME"
 
 mkdir -p "$CTF_DIR/02 - Playbooks" "$CTF_DIR/99 - Writeups"
@@ -74,7 +88,7 @@ tags: [ctf, methodology]
 EOF
 
 # Playbook templates (one per vuln class)
-for vuln in JWT SQLi SSRF SSTI Deserialization XSS IDOR "File Upload"; do
+for vuln in JWT SQLi SSRF SSTI Deserialization XSS IDOR FileUpload; do
   cat > "$CTF_DIR/02 - Playbooks/$vuln.md" <<EOF
 ---
 ctf: "$CTF_NAME"
@@ -95,7 +109,7 @@ tags: [ctf, playbook, $vuln]
 
 ## Tools
 
-- \`nuclei -t ~/security-lab/wordlists/nuclei-templates/vulnerabilities/\`
+- \`nuclei -t ~/security-lab/wordlists/nuclei-templates/http/vulnerabilities/\`
 - <other tools>
 
 ## Bypass techniques
@@ -151,15 +165,6 @@ jwt-tool "\$JWT" -X k -pk public.pem  # alg confusion
 EOF
 
 echo "Created CTF folder at $CTF_DIR"
-```
-
-### Method 2 — Using the obsidian CLI (if app is running)
-
-```bash
-# This is more idiomatic but requires the Obsidian app
-obsidian create path="Cybersecurity/CTFs/$CTF_NAME/00 - Daily Journal.md" \
-  content="# Daily Journal — $CTF_NAME"
-# (Repeat for each file)
 ```
 
 ## Result

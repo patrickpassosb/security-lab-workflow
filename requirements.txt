@@ -1,0 +1,22 @@
+# Python dependencies for security-lab-workflow.
+# Pinned + hashed for reproducibility. Install with:
+#   pip install --require-hashes -r requirements.txt
+#
+# Update with: pip-compile --generate-hashes requirements.in
+# Then verify hashes against the PyPI release before committing.
+
+# Linting (CI)
+ruff==0.6.9
+#    hash: sha256:xxx  # add after first pip-compile
+
+# Runtime deps for bin/ scripts
+pyyaml==6.0.2
+#    hash: sha256:xxx  # add after first pip-compile
+
+requests==2.32.3
+#    hash: sha256:xxx  # add after first pip-compile
+
+# Note: --require-hashes requires ALL deps to have hashes. After the first
+# pip-compile --generate-hashes, replace the placeholder hashes above with
+# the real ones. Until then, install WITHOUT --require-hashes:
+#   pip install -r requirements.txt

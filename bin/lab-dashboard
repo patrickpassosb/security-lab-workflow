@@ -23,7 +23,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-LAB = Path(os.environ.get("HACKING_LAB", os.path.expanduser("~/security-lab")))
+# Import shared labutil helpers
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib"))
+import labutil  # noqa: E402
+
+LAB = labutil.LAB
 CTFS_DIR = LAB / "ctfs"
 
 
@@ -65,8 +69,8 @@ def parse_solve_log(path: Path) -> dict[str, Any]:
         if time_match:
             info["time_spent"] = time_match.group(1).strip()
 
-    # Flag
-    flag_match = re.search(r'flag\{[^}]+\}|CTF\{[^}]+\}', text)
+    # Flag (T2-45: unified regex matching flag{}, CTF{}, picoCTF{}, HTB{})
+    flag_match = re.search(r'(?:flag|CTF|picoCTF|HTB)\{[^}]+\}', text)
     if flag_match:
         info["flag"] = flag_match.group(0)
 
@@ -136,7 +140,7 @@ def main() -> int:
     while True:
         # Clear screen for watch mode
         if watch:
-            os.system("clear" if os.name != "nt" else "cls")
+            print("\033[2J\033[H")
 
         print(f"CTF Challenge Dashboard — {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
         print("=" * 110)
@@ -144,6 +148,8 @@ def main() -> int:
         all_challenges: list[tuple[Path, dict]] = []
 
         if specific:
+            # Validate 'specific' to prevent path traversal (T2-02)
+            labutil.require_valid_name(specific, "ctf folder name")
             ctf_folder = CTFS_DIR / specific
             if not ctf_folder.exists():
                 print(f"CTF folder not found: {ctf_folder}")

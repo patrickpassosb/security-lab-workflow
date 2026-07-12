@@ -32,6 +32,8 @@ The Obsidian vault decays if not maintained. Stale notes, broken wikilinks, and 
 
 ```bash
 VAULT="${VAULT_DIR:-$HOME/obsidian-vault}"
+# Fail fast if the vault doesn't exist.
+test -d "$VAULT" || { echo "VAULT_DIR not set and $HOME/obsidian-vault missing; set VAULT_DIR to your vault path"; exit 1; }
 
 # 1. Find stale notes (>90 days, no inbound links)
 echo "=== Stale notes ==="
