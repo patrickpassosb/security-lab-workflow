@@ -33,29 +33,92 @@ from typing import Any
 
 import requests
 
-# ─── Config (from env vars) ────────────────────────────────────────────────────
+# ─── Config (from env vars, read lazily) ───────────────────────────────────────
+# These are read at *call time* (not import time) so that the calling template
+# (bounty/exploit.py, cve/poc.py) can set os.environ.setdefault() BEFORE calling
+# run_probe() and have the defaults take effect.
 
-BASE = os.environ.get("TARGET_URL", "http://127.0.0.1:8000").rstrip("/")
-ENDPOINT = os.environ.get("TARGET_ENDPOINT", "/")
-METHOD = os.environ.get("HTTP_METHOD", "GET").upper()
-PARAM_NAME = os.environ.get("PARAM_NAME", "q")
-PAYLOAD_VALUE = os.environ.get("PAYLOAD_VALUE", "probe")
-PAYLOAD_ENCODING = os.environ.get("PAYLOAD_ENCODING", "plain").lower()
-SEND_AS = os.environ.get("SEND_AS", "params").lower()  # params | data | json | raw
-RESPONSE_BASENAME = os.environ.get("RESPONSE_BASENAME", "response")
-TIMEOUT = float(os.environ.get("TARGET_TIMEOUT", "10"))
-HEADER_JSON = os.environ.get("HEADER_JSON", "{}").strip() or "{}"
-COOKIE = os.environ.get("COOKIE", "").strip()
-USER_AGENT = os.environ.get("USER_AGENT", "security-lab-probe/1.0")
+def _env(key: str, default: str = "") -> str:
+    return os.environ.get(key, default)
+
+
+def _get_base() -> str:
+    return _env("TARGET_URL", "http://127.0.0.1:8000").rstrip("/")
+
+
+def _get_response_basename() -> str:
+    return _env("RESPONSE_BASENAME", "response")
+
+
+def _get_user_agent() -> str:
+    return _env("USER_AGENT", "security-lab-probe/1.0")
+
+
+def _get_method() -> str:
+    return _env("HTTP_METHOD", "GET").upper()
+
+
+def _get_timeout() -> float:
+    return float(_env("TARGET_TIMEOUT", "10"))
+
+
+def _get_header_json() -> str:
+    return _env("HEADER_JSON", "{}").strip() or "{}"
+
+
+def _get_cookie() -> str:
+    return _env("COOKIE", "").strip()
+
+
+def _get_send_as() -> str:
+    return _env("SEND_AS", "params").lower()
+
+
+def _get_param_name() -> str:
+    return _env("PARAM_NAME", "q")
+
+
+def _get_payload_value() -> str:
+    return _env("PAYLOAD_VALUE", "probe")
+
+
+def _get_payload_encoding() -> str:
+    return _env("PAYLOAD_ENCODING", "plain").lower()
 
 
 # ─── Workspace helpers ─────────────────────────────────────────────────────────
 
 def workspace_root() -> Path:
-    """Resolve the workspace root (parent of work/ dir, or cwd)."""
-    # If we're being imported from a copy in work/, the parent of work/ is the workspace.
-    # But __file__ points to the _lib module, not the copy. So check the caller's dir.
-    # Fallback: cwd.
+    """Resolve the workspace root.
+
+    The original templates used Path(__file__).parent to find the workspace
+    from the copied script (work/exploit.py → parent = workspace). Since this
+    module lives in templates/_lib/, __file__ here points to the wrong place.
+    Instead we resolve from the CALLER's __file__ (the copied exploit.py/poc.py
+    in work/), falling back to cwd.
+    """
+    import inspect
+
+    # Try the caller's frame to get its __file__
+    frame = inspect.currentframe()
+    caller_file = None
+    while frame:
+        f_back = frame.f_back
+        if f_back and f_back.f_globals.get("__name__") != "http_probe":
+            caller_file = f_back.f_globals.get("__file__")
+            break
+        frame = f_back
+
+    if caller_file:
+        script_dir = Path(caller_file).resolve().parent
+        # If the script is in a work/ dir, the workspace is its parent
+        if script_dir.name == "work":
+            return script_dir.parent
+        # If the script's dir has evidence/ or solve_log.md, it's the workspace
+        if (script_dir / "evidence").exists() or (script_dir / "solve_log.md").exists():
+            return script_dir
+
+    # Fallback: cwd (works when run from the workspace root)
     cwd = Path.cwd()
     if (cwd / "work").is_dir() and (cwd / "evidence").is_dir():
         return cwd
@@ -88,15 +151,15 @@ def encode_payload(value: str, mode: str) -> str:
 def load_headers() -> dict[str, str]:
     """Build the request headers from HEADER_JSON + COOKIE env vars."""
     try:
-        parsed: Any = json.loads(HEADER_JSON)
+        parsed: Any = json.loads(_get_header_json())
     except json.JSONDecodeError as exc:
         raise SystemExit(f"HEADER_JSON must be valid JSON: {exc}") from exc
     if not isinstance(parsed, dict):
         raise SystemExit("HEADER_JSON must decode to a JSON object")
     headers = {str(key): str(value) for key, value in parsed.items()}
-    headers.setdefault("User-Agent", USER_AGENT)
-    if COOKIE:
-        headers["Cookie"] = COOKIE
+    headers.setdefault("User-Agent", _get_user_agent())
+    if _get_cookie():
+        headers["Cookie"] = _get_cookie()
     return headers
 
 
@@ -106,17 +169,19 @@ def build_request_kwargs(payload: str) -> dict[str, Any]:
     """Build kwargs for session.request() based on SEND_AS mode."""
     kwargs: dict[str, Any] = {
         "headers": load_headers(),
-        "timeout": TIMEOUT,
+        "timeout": _get_timeout(),
         "allow_redirects": False,
     }
-    if SEND_AS == "json":
-        kwargs["json"] = {PARAM_NAME: payload}
-    elif SEND_AS == "data":
-        kwargs["data"] = {PARAM_NAME: payload}
-    elif SEND_AS == "raw":
+    send_as = _get_send_as()
+    param_name = _get_param_name()
+    if send_as == "json":
+        kwargs["json"] = {param_name: payload}
+    elif send_as == "data":
+        kwargs["data"] = {param_name: payload}
+    elif send_as == "raw":
         kwargs["data"] = payload.encode()
     else:
-        kwargs["params"] = {PARAM_NAME: payload}
+        kwargs["params"] = {param_name: payload}
     return kwargs
 
 
@@ -125,7 +190,9 @@ def build_request_kwargs(payload: str) -> dict[str, Any]:
 def save_response(response: requests.Response, payload: str) -> None:
     """Save raw response, base64 response, and metadata under evidence/."""
     stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
-    safe_base = "".join(ch if ch.isalnum() or ch in "._-" else "_" for ch in RESPONSE_BASENAME)[:80]
+    safe_base = "".join(
+        ch if ch.isalnum() or ch in "._-" else "_" for ch in _get_response_basename()
+    )[:80]
     base = evidence_dir() / f"{stamp}-{safe_base}"
     raw_path = base.with_suffix(".bin")
     b64_path = base.with_suffix(".b64.txt")
@@ -138,13 +205,13 @@ def save_response(response: requests.Response, payload: str) -> None:
         json.dumps(
             {
                 "ts": stamp,
-                "method": METHOD,
+                "method": _get_method(),
                 "url": response.url,
                 "status_code": response.status_code,
                 "response_length": len(response.content),
-                "payload_encoding": PAYLOAD_ENCODING,
-                "send_as": SEND_AS,
-                "param_name": PARAM_NAME,
+                "payload_encoding": _get_payload_encoding(),
+                "send_as": _get_send_as(),
+                "param_name": _get_param_name(),
                 "payload_preview": payload[:120],
                 "saved_raw": str(raw_path),
                 "saved_base64": str(b64_path),
@@ -195,15 +262,21 @@ def load_session(session: requests.Session) -> None:
 # ─── Main runner ─────────────────────────────────────────────────────────────────
 
 def run_probe(*, save_session_flag: bool = False, load_session_flag: bool = False) -> int:
-    """Run the probe. CTF template passes save/load flags; others use defaults."""
+    """Run the probe. CTF template passes save/load flags; others use defaults.
+
+    Reads env vars at call time (not import time) so the calling template
+    can set os.environ.setdefault() before calling this.
+    """
     session = requests.Session()
 
     if load_session_flag:
         load_session(session)
 
-    payload = encode_payload(PAYLOAD_VALUE, PAYLOAD_ENCODING)
-    url = BASE + (ENDPOINT if ENDPOINT.startswith("/") else f"/{ENDPOINT}")
-    response = session.request(METHOD, url, **build_request_kwargs(payload))
+    payload = encode_payload(_get_payload_value(), _get_payload_encoding())
+    base = _get_base()
+    endpoint = _env("TARGET_ENDPOINT", "/")
+    url = base + (endpoint if endpoint.startswith("/") else f"/{endpoint}")
+    response = session.request(_get_method(), url, **build_request_kwargs(payload))
     save_response(response, payload)
 
     if save_session_flag:

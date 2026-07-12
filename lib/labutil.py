@@ -248,11 +248,13 @@ def minimal_env(*, keep: tuple[str, ...] = ()) -> dict[str, str]:
 # ─── URL scheme validation (T2-05, T2-03) ─────────────────────────────────────
 
 _BLOCKED_SCHEMES = {"file", "gopher", "dict", "ftp", "sftp", "tftp", "jar", "netdoc"}
+# Block link-local (AWS metadata 169.254.x.x) and 0.0.0.0, but NOT loopback
+# (127.0.0.1 / ::1) — local CTF/CVE practice targets are legitimate and
+# explicitly allowed by engagement scope files. The scope check (lab-scope)
+# is the right gate for loopback authorization.
 _BLOCKED_PREFIXES = (
-    "169.254.",  # link-local (AWS metadata)
-    "127.",      # loopback
+    "169.254.",  # link-local (AWS metadata, SSRF-only)
     "0.0.0.0",
-    "::1",
     "fc00:",     # IPv6 ULA
     "fe80:",     # IPv6 link-local
 )

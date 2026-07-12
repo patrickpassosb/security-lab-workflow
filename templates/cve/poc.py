@@ -22,6 +22,11 @@ import os
 import sys
 from pathlib import Path
 
+# Set CVE-specific defaults BEFORE importing http_probe, so the helper
+# reads them at call time (http_probe uses lazy env getters).
+os.environ.setdefault("USER_AGENT", "security-lab-cve-poc/1.0")
+os.environ.setdefault("RESPONSE_BASENAME", "poc-response")
+
 # Import shared probe helpers from templates/_lib/
 _LIB_PATHS = [
     # from templates/cve/
@@ -41,10 +46,6 @@ try:
 except ImportError:
     print(f"ERROR: could not import http_probe. Tried: {_LIB_PATHS}", file=sys.stderr)
     raise
-
-# CVE-specific defaults
-os.environ.setdefault("USER_AGENT", "security-lab-cve-poc/1.0")
-os.environ.setdefault("RESPONSE_BASENAME", "poc-response")
 
 
 def main() -> int:

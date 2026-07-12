@@ -39,7 +39,8 @@ The real `gbrain put` CLI takes `<slug> [--stdin | < file.md]` and reads a full 
 ```bash
 # Pattern 1: gstack-style typed page (recommended for structured knowledge)
 # The slug is a kebab-case identifier; frontmatter carries type + tags.
-gbrain put jwt-confusion-rs256-to-hs256-key-swap --content "$(cat <<'EOF'
+# Use --stdin with a heredoc (the --content flag does NOT exist in the real CLI).
+cat <<'EOF' | gbrain put jwt-confusion-rs256-to-hs256-key-swap --stdin
 ---
 type: gstack/learning
 tags: [jwt, ctf, web]
@@ -53,16 +54,14 @@ tags: [jwt, ctf, web]
 - Failed approaches: tried kid SQLi first, took 20 min
 - Reference: ~/security-lab/findings/ctf/X/exploit.py
 EOF
-)"
 
 # Pattern 2: freeform note
-gbrain put day-3-ctf-prep --content "$(cat <<'EOF'
+cat <<'EOF' | gbrain put day-3-ctf-prep --stdin
 ---
 type: gstack/note
 ---
 Day 3 of CTF prep — <freeform summary here>
 EOF
-)"
 ```
 
 The `type` frontmatter lets future queries filter. Use `gbrain list --type gstack/learning` to list all learning pages.

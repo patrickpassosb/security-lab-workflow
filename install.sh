@@ -48,10 +48,8 @@ if [ ! -d "$INSTALL_DIR" ]; then
                "$INSTALL_DIR/wordlists" "$INSTALL_DIR/.venv" "$INSTALL_DIR/__pycache__" \
                "$INSTALL_DIR/node_modules" "$INSTALL_DIR/.audit.jsonl" 2>/dev/null || true
       fi
-      # Fresh clone from the public repo (no local-copy risk)
-      if [ ! -d "$INSTALL_DIR/.git" ] && [ -z "$LAB_INSTALL_OFFLINE" ]; then
-        : # keep the copied dir
-      fi
+      # Dead check removed: the rsync/cp above already handled the non-git case.
+      # (The previous LAB_INSTALL_OFFLINE check was dead code and tripped set -u.)
     fi
   else
     echo "git not found and target $INSTALL_DIR does not exist." >&2

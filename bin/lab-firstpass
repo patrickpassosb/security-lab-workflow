@@ -124,9 +124,13 @@ def step_httpx(url: str, outdir: Path) -> dict[str, Any]:
                     continue
                 try:
                     obj = json.loads(line)
-                    # Merge: later lines (HTTPS) override earlier (HTTP) if both exist.
-                    # Prefer HTTPS results when available.
-                    if not data or obj.get("scheme") == "https" or obj.get("status_code"):
+                    # Prefer HTTPS: only overwrite an existing result with
+                    # another HTTPS result. Keep the first result if it's
+                    # already HTTPS. Don't let a later HTTP row overwrite
+                    # an earlier HTTPS row just because it has status_code.
+                    if not data:
+                        data.update(obj)
+                    elif obj.get("scheme") == "https" and data.get("scheme") != "https":
                         data.update(obj)
                 except json.JSONDecodeError:
                     continue

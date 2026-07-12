@@ -49,13 +49,19 @@ Common hash lengths:
 ```bash
 # Default wordlists (in order of speed-to-find)
 # 1. rockyou (most common, fastest for easy CTF flags)
-# T2-57: rockyou.txt is shipped as rockyou.txt.tar.gz — decompress first:
-if [ ! -f ~/security-lab/wordlists/rockyou.txt ] && [ -f ~/security-lab/wordlists/rockyou.txt.tar.gz ]; then
-  tar -xzf ~/security-lab/wordlists/rockyou.txt.tar.gz -C ~/security-lab/wordlists/ 2>/dev/null || \
-    tar -xzf ~/security-lab/wordlists/SecLists/Passwords/Leaked-Databases/rockyou.txt.tar.gz -C ~/security-lab/wordlists/ 2>/dev/null || true
+# T2-57: rockyou.txt is shipped as a .tar.gz — decompress first.
+# Check both possible locations (top-level wordlists/ and SecLists/).
+ROCKYOU=~/security-lab/wordlists/rockyou.txt
+if [ ! -f "$ROCKYOU" ]; then
+  # Try top-level first, then SecLists
+  if [ -f ~/security-lab/wordlists/rockyou.txt.tar.gz ]; then
+    tar -xzf ~/security-lab/wordlists/rockyou.txt.tar.gz -C ~/security-lab/wordlists/ 2>/dev/null
+  elif [ -f ~/security-lab/wordlists/SecLists/Passwords/Leaked-Databases/rockyou.txt.tar.gz ]; then
+    tar -xzf ~/security-lab/wordlists/SecLists/Passwords/Leaked-Databases/rockyou.txt.tar.gz \
+      -C ~/security-lab/wordlists/ 2>/dev/null
+  fi
 fi
-hashcat -m 0 -a 0 "$HASH" ~/security-lab/wordlists/rockyou.txt 2>/dev/null || \
-  hashcat -m 0 -a 0 "$HASH" ~/security-lab/wordlists/SecLists/Passwords/Leaked-Databases/rockyou.txt.tar.gz 2>/dev/null
+hashcat -m 0 -a 0 "$HASH" "$ROCKYOU" 2>/dev/null
 
 # If rockyou is the priority, download separately (NOT in SecLists):
 test -f ~/security-lab/wordlists/rockyou.txt || \

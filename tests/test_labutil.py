@@ -154,8 +154,10 @@ class TestIsSafeUrl:
     def test_aws_metadata_blocked(self):
         assert not labutil.is_safe_url("http://169.254.169.254/latest/meta-data/")
 
-    def test_loopback_blocked(self):
-        assert not labutil.is_safe_url("http://127.0.0.1:8080/")
+    def test_loopback_allowed(self):
+        # Loopback is allowed for local CTF/CVE practice targets; the scope
+        # check (lab-scope) is the right gate for loopback authorization.
+        assert labutil.is_safe_url("http://127.0.0.1:8080/")
 
     def test_empty_blocked(self):
         assert not labutil.is_safe_url("")
