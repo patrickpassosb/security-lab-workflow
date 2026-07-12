@@ -125,7 +125,7 @@ fi
 EVIDENCE_DIR="$WORK/evidence"
 mkdir -p "$EVIDENCE_DIR"
 
-STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
+STAMP="$(date -u +%Y%m%dT%H%M%SZ)-$$"
 SAFE_LABEL="$(sanitize "$LABEL")"
 BASE="$EVIDENCE_DIR/$STAMP-$SAFE_LABEL"
 EXIT_CODE=0

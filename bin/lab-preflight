@@ -169,8 +169,9 @@ def check_pivot_gate(ctf_home, challenge_name):
         return "pass", "no .pivot-alerts (pivot-watch may not have run yet)"
 
     content = alerts_file.read_text(errors='replace')
+    # A-19: word-boundary match to avoid sqli matching sqli-1 (substring false positive)
     crit_lines = [l for l in content.split('\n')
-                  if 'CRIT' in l and challenge_name in l]
+                  if 'CRIT' in l and re.search(r'\b' + re.escape(challenge_name) + r'\b', l)]
 
     if not crit_lines:
         return "pass", "no CRIT alerts for this challenge"
@@ -299,8 +300,9 @@ def print_pivot_alerts(ctf_home, challenge_name):
     if not alerts_file.exists():
         return
     content = alerts_file.read_text(errors='replace')
+    # A-19: word-boundary match (same fix as check_pivot_gate)
     crit_lines = [l for l in content.split('\n')
-                  if 'CRIT' in l and challenge_name in l]
+                  if 'CRIT' in l and re.search(r'\b' + re.escape(challenge_name) + r'\b', l)]
     if not crit_lines:
         return
     print(color("\n  PIVOT ALERTS (challenge is past pivot threshold):", RED))

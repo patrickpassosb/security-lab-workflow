@@ -159,13 +159,13 @@ def step_nuclei_tech(url: str, outdir: Path) -> dict[str, Any]:
     )
     findings = []
     if outpath.exists():
-        for line in outpath.read_text().splitlines():
+        for line in outpath.read_text(encoding="utf-8", errors="replace").splitlines():
             if line.strip():
                 try:
                     d = json.loads(line)
                     findings.append({"template": d.get("template-id", ""), "matched": d.get("matcher-name", "")})
-                except Exception:
-                    pass
+                except json.JSONDecodeError:
+                    pass  # skip unparseable lines (nuclei sometimes writes partial)
     log(f"  -> {len(findings)} tech detections")
     return {"step": "nuclei_tech", "exit": code, "findings": findings, "file": str(outpath)}
 
@@ -269,8 +269,11 @@ def step_secretfinder(jsdir: Path, outdir: Path) -> dict[str, Any]:
             )
             if stdout:
                 for line in stdout.splitlines():
-                    if line.strip() and "No" not in line[:5]:
-                        secrets.append(line.strip())
+                    stripped = line.strip()
+                    # A-17: match the exact "No secrets found" string instead of
+                    # a prefix match on "No" (which dropped "Notion token: xxx").
+                    if stripped and stripped != "No secrets found" and not stripped.startswith("No secrets"):
+                        secrets.append(stripped)
 
     # Also run gitleaks on the JS dir
     gitleaks_out = outdir / "gitleaks-js.json"
@@ -431,7 +434,7 @@ def generate_report(url: str, results: list[dict], outdir: Path) -> Path:
 def main() -> int:
     if len(sys.argv) < 2 or sys.argv[1] in ("-h", "--help"):
         print(__doc__)
-        return 1
+        return 0
 
     url = sys.argv[1]
     engagement = ""

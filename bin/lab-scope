@@ -283,8 +283,6 @@ def main() -> int:
         elif args[i].startswith("--engagement="):
             engagement = args[i].split("=", 1)[1]
             i += 1
-        elif args[0] == "--engagement" and len(args) == 2:
-            return print_engagement_summary(args[1])
         elif args[i].startswith("-") and args[i] != "--list":
             print(f"Unknown option: {args[i]}")
             return 1
