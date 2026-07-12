@@ -1,0 +1,32 @@
+# ruff config for security-lab-workflow
+# Docs: https://docs.astral.sh/ruff/configuration/
+
+target-version = "py311"
+line-length = 100
+extend-exclude = [
+    "sandboxes/",
+    "wordlists/",
+    ".venv/",
+    "node_modules/",
+]
+
+[lint]
+# Enable rule groups:
+# E  - pycodestyle errors
+# W  - pycodestyle warnings
+# F  - pyflakes (unused imports, undefined names)
+# I  - isort (import sorting)
+# B  - flake8-bugbear (likely-bugs + design issues)
+# UP - pyupgrade (modernize syntax)
+# SIM - flake8-simplify
+select = ["E", "W", "F", "I", "B", "UP", "SIM"]
+
+# Per-file ignores: the extensionless bin/ scripts use sys.path hacks to import
+# lib/labutil.py — that's intentional, not a lint error.
+[lint.per-file-ignores]
+"bin/*" = ["E402"]  # module-level import not at top (sys.path.insert first)
+"lib/*" = ["E402"]
+
+[format]
+# Don't auto-format on lint; just check. Use `ruff format` explicitly.
+indent-style = "space"

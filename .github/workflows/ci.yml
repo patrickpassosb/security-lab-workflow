@@ -55,7 +55,7 @@ jobs:
         with:
           python-version: '3.11'
       - name: Install ruff
-        run: pip install ruff
+        run: pip install -r requirements.txt
       - name: Ruff check
         # Only lint actual Python files. install.sh and the extensionless
         # bin/ scripts are bash — ruff parses them as Python and throws a wall
