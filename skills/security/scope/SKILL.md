@@ -37,6 +37,8 @@ lab-scope --list
 
 ```python
 # Pseudocode — implemented in ~/security-lab/bin/lab-scope
+# Order: global denied → REJECT, engagement in_scope → ALLOW,
+#        engagement denied → REJECT, default-deny → UNKNOWN (ask human)
 def is_in_scope(target, engagement):
     global = load("~/security-lab/scope.yaml")
     eng = load(f"~/security-lab/engagements/{engagement}.yaml")
@@ -44,21 +46,26 @@ def is_in_scope(target, engagement):
     # 1. Global denied always rejects (gov/mil/edu — non-negotiable)
     for pat in global.denied:
         if matches(target, pat.pattern):
-            return False, f"GLOBAL DENIED: {pat.reason}"
+            return REJECT, f"GLOBAL DENIED: {pat.reason}"
 
-    # 2. Engagement-specific denied rejects (merged with global)
-    for pat in eng.denied:
-        if matches(target, pat.pattern):
-            return False, f"DENIED: {pat.reason}"
-
-    # 3. Engagement in-scope allows
+    # 2. Engagement in-scope ALLOWS (overrides engagement denied)
     for pat in eng.in_scope:
         if matches(target, pat.pattern):
-            return True, f"OK: {pat.note}"
+            return ALLOW, f"OK: {pat.note}"
 
-    # 4. Default-deny
-    return False, "NOT in scope; ask human before proceeding"
+    # 3. Engagement-specific denied rejects
+    for pat in eng.denied:
+        if matches(target, pat.pattern):
+            return REJECT, f"DENIED: {pat.reason}"
+
+    # 4. Default-deny → UNKNOWN (exit 3 = ask human), NOT a hard reject
+    return UNKNOWN, "NOT in scope; ask human before proceeding"
 ```
+
+**Key order:** in-scope is checked BEFORE engagement denied (so a target
+matching BOTH in_scope and a denied pattern is ALLOWED). Global denied
+always wins. The default (no match) returns UNKNOWN (exit 3), prompting
+the human — not a silent REJECT.
 
 ## Determining the engagement
 

@@ -27,10 +27,15 @@ import signal
 import json
 from pathlib import Path
 
+# Import shared labutil helpers
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib"))
+import labutil  # noqa: E402
+
 DEFAULT_CTF_HOME = ""  # must be passed via --ctf-home or auto-detected from cwd
 DEFAULT_WARN_MIN = 25
 DEFAULT_CRIT_MIN = 35
-PID_FILE = "/tmp/lab-pivot-watch.pid"
+# T2-09: move PID from /tmp (predictable, symlink-attackable) to $LAB
+PID_FILE = str(labutil.LAB / ".pivot-watch.pid")
 ALERTS_FILE = ".pivot-alerts"
 
 def parse_solve_log_start(path):
@@ -54,7 +59,7 @@ def parse_solve_log_start(path):
 def get_challenge_status(path):
     """Check if a challenge is SOLVED or still active."""
     try:
-        content = path.read_text(errors='replace')
+        content = path.read_text(encoding="utf-8", errors="replace")
         # Check Status field
         if re.search(r'\*\*Status:\*\*\s*(solved|SOLVED|completed|COMPLETED)', content):
             return 'solved'
@@ -63,11 +68,13 @@ def get_challenge_status(path):
         # Check Eval section for "Solved: yes"
         if re.search(r'(?i)^\s*-\s*Solved:\s*yes', content, re.MULTILINE):
             return 'solved'
-        # Check for flag in the content
-        if re.search(r'(?i)flag\{[^}]+\}', content):
+        # T2-45: unify flag regex with lab-dashboard (CTF{}, picoCTF{}, HTB{} too)
+        if re.search(r'(?i)(flag|CTF|picoCTF|HTB)\{[^}]+\}', content):
             return 'solved'
         return 'active'
-    except Exception:
+    except Exception as e:
+        # T2-43: don't silently swallow — log so the user knows
+        print(f"[lab-pivot-watch] WARNING: could not read {path}: {e}", file=sys.stderr)
         return 'unknown'
 
 def get_last_update_time(path):
@@ -130,14 +137,16 @@ def write_alert(ctf_home, level, challenge, elapsed_min, idle_min):
 def mark_hypothesis_stuck(solve_log_path):
     """Try to mark the top ACTIVE hypothesis as STUCK in the solve_log."""
     try:
-        content = solve_log_path.read_text(errors='replace')
+        content = solve_log_path.read_text(encoding="utf-8", errors="replace")
         # Replace the first ACTIVE hypothesis status with STUCK
         updated = re.sub(r'(\|\s*\w+\s*\|[^|]*\|[^|]*\|[^|]*\|[^|]*\|\s*)ACTIVE',
                          r'\1STUCK-PIVOT', content, count=1)
         if updated != content:
-            solve_log_path.write_text(updated)
-    except Exception:
-        pass  # Don't crash if we can't update the solve_log
+            # T2-12/T2-42: atomic write with encoding
+            labutil.atomic_write(solve_log_path, updated)
+    except Exception as e:
+        # T2-43: don't silently swallow
+        print(f"[lab-pivot-watch] WARNING: could not mark hypothesis stuck in {solve_log_path}: {e}", file=sys.stderr)
 
 def run_once(ctf_home, warn_min, crit_min):
     """Run a single scan and write alerts."""
@@ -248,26 +257,46 @@ def main():
 
     args = parser.parse_args()
 
+    # T2-46: auto-detect ctf_home from cwd (walk up to find AGENTS.md or challenges/)
+    ctf_home = args.ctf_home
+    if not ctf_home:
+        cwd = Path.cwd()
+        # If cwd contains a challenges/ dir, it's the ctf home
+        if (cwd / "challenges").is_dir():
+            ctf_home = str(cwd)
+        else:
+            # Walk up to find a program folder (has AGENTS.md) with challenges/
+            search = cwd
+            while search != search.parent:
+                if (search / "AGENTS.md").exists() and (search / "challenges").is_dir():
+                    ctf_home = str(search)
+                    break
+                search = search.parent
+    if not ctf_home and (args.start or args.once or args.status):
+        print("[lab-pivot-watch] ERROR: could not determine CTF home. Pass --ctf-home or run from a program folder.", file=sys.stderr)
+        if args.start or args.once:
+            sys.exit(1)
+
     if args.stop:
         stop_daemon()
         return
 
     if args.status:
-        show_status(args.ctf_home, args.warn, args.crit)
+        show_status(ctf_home, args.warn, args.crit)
         return
 
     if args.once:
-        alerts = run_once(args.ctf_home, args.warn, args.crit)
+        alerts = run_once(ctf_home, args.warn, args.crit)
         if not alerts:
             print("No pivot alerts.")
         return
 
     if args.start:
-        run_daemon(args.ctf_home, args.warn, args.crit, args.interval)
+        run_daemon(ctf_home, args.warn, args.crit, args.interval)
         return
 
     # Default: show status
-    show_status(args.ctf_home, args.warn, args.crit)
+    show_status(ctf_home, args.warn, args.crit)
 
 if __name__ == '__main__':
     main()

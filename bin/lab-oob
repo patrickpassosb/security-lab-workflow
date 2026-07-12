@@ -37,7 +37,10 @@ from pathlib import Path
 from typing import Any
 
 LAB = Path(os.environ.get("HACKING_LAB", os.path.expanduser("~/security-lab")))
-STATE_FILE = Path("/tmp/lab-oob-state.json")
+# T2-09: move state from /tmp (predictable, world-writable, symlink-attackable)
+# to $LAB/.oob-state.json with 0o600 permissions (contains callback URL — sensitive).
+STATE_FILE = LAB / ".oob-state.json"
+OUTPUT_LOG = LAB / ".oob-output.log"
 EVIDENCE_DIR = Path.cwd() / "evidence"
 
 
@@ -53,12 +56,43 @@ def load_state() -> dict[str, Any]:
 
 
 def save_state(state: dict[str, Any]) -> None:
-    STATE_FILE.write_text(json.dumps(state, indent=2), encoding="utf-8")
+    # T2-09: use O_CREAT|O_EXCL on first write to prevent symlink attacks.
+    # Then write with 0o600 (contains callback URL — sensitive).
+    state_json = json.dumps(state, indent=2)
+    try:
+        if not STATE_FILE.exists():
+            fd = os.open(str(STATE_FILE), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write(state_json)
+        else:
+            STATE_FILE.write_text(state_json, encoding="utf-8")
+            os.chmod(STATE_FILE, 0o600)
+    except OSError as e:
+        log(f"ERROR: could not save state: {e}")
 
 
 def clear_state() -> None:
     if STATE_FILE.exists():
         STATE_FILE.unlink()
+
+
+def _pid_alive_and_matches(pid: int, expected_name: str = "interactsh-client") -> bool:
+    """T2-10: verify a PID is still alive AND is the expected process.
+
+    Prevents killing an arbitrary process via a forged state file.
+    """
+    try:
+        import psutil
+        p = psutil.Process(pid)
+        return expected_name in " ".join(p.cmdline())
+    except Exception:
+        # psutil not available — fall back to /proc check (Linux only)
+        try:
+            with open(f"/proc/{pid}/cmdline", "r") as f:
+                cmdline = f.read()
+            return expected_name in cmdline
+        except (FileNotFoundError, PermissionError, OSError):
+            return False
 
 
 def start_listener() -> int:
@@ -70,8 +104,8 @@ def start_listener() -> int:
         return 0
 
     log("Starting interactsh listener...")
-    # Start interactsh-client in background, output to log file
-    log_file = Path("/tmp/lab-oob-output.log")
+    # Start interactsh-client in background, output to log file (T2-09: under $LAB)
+    log_file = OUTPUT_LOG
     log_handle = open(log_file, "w", buffering=1)
     proc = subprocess.Popen(
         ["interactsh-client", "-v"],
@@ -216,7 +250,7 @@ def check_once() -> int:
     if not state.get("pid"):
         print("No listener running")
         return 1
-    log_file = Path(state.get("log_file", "/tmp/lab-oob-output.log"))
+    log_file = Path(state.get("log_file", str(OUTPUT_LOG)))
     url = state.get("url", "")
     if log_file.exists():
         content = log_file.read_text()
@@ -234,6 +268,13 @@ def stop_listener() -> int:
     pid = state.get("pid")
     if not pid:
         log("No listener running.")
+        clear_state()
+        return 0
+
+    # T2-10: validate the PID is still the expected process before killing.
+    # Prevents arbitrary process kill via a forged state file.
+    if not _pid_alive_and_matches(pid, "interactsh"):
+        log(f"PID {pid} is not interactsh or is no longer running — clearing stale state.")
         clear_state()
         return 0
 

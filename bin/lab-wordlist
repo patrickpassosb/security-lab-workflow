@@ -27,7 +27,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlparse
 
-LAB = Path(os.environ.get("HACKING_LAB", os.path.expanduser("~/security-lab")))
+# Import shared labutil helpers
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib"))
+import labutil  # noqa: E402
+
+LAB = labutil.LAB
 
 
 def log(msg: str) -> None:
@@ -81,6 +85,41 @@ def main() -> int:
             output_path = sys.argv[i + 1]
         elif arg.startswith("--output="):
             output_path = arg.split("=", 1)[1]
+        elif arg == "--engagement" and i + 1 < len(sys.argv):
+            os.environ["WORDLIST_ENGAGEMENT"] = sys.argv[i + 1]
+        elif arg.startswith("--engagement="):
+            os.environ["WORDLIST_ENGAGEMENT"] = arg.split("=", 1)[1]
+
+    # Validate URL scheme (T2-03: prevent SSRF via file://, gopher://, etc.)
+    if not labutil.is_safe_url(url):
+        log(f"ERROR: URL must be http(s) and not a link-local/loopback/metadata target: {url}")
+        return 2
+
+    # Scope check (T2-03: lab-wordlist had NO scope check)
+    engagement = os.environ.get("WORDLIST_ENGAGEMENT", "")
+    if not engagement:
+        eng_file = Path.cwd() / "engagement.txt"
+        if eng_file.exists():
+            engagement = eng_file.read_text(encoding="utf-8").strip()
+    if engagement:
+        labutil.require_valid_name(engagement, "engagement")
+        log(f"Scope check: {url} (engagement: {engagement})")
+        code, _, stderr = labutil.run(
+            [str(LAB / "bin" / "lab-scope"), url, "--engagement", engagement],
+            timeout=15,
+        )
+        if code == 2:
+            log("DENIED — aborting")
+            return 2
+        if code == 3:
+            log("UNKNOWN: target not in scope — aborting (add to engagement scope file)")
+            return 3
+    else:
+        log("WARNING: no engagement specified. Checking against global denied list only.")
+        code, _, _ = labutil.run([str(LAB / "bin" / "lab-scope"), url], timeout=15)
+        if code == 2:
+            log("DENIED by global scope — aborting")
+            return 2
 
     # Determine output path
     if not output_path:

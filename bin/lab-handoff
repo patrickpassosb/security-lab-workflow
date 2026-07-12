@@ -31,8 +31,12 @@ import datetime
 import json
 from pathlib import Path
 
+# Import shared labutil helpers
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib"))
+import labutil  # noqa: E402
+
 DEFAULT_CTF_HOME = ""  # must be passed via --ctf-home or cd into a program folder
-LAB = Path(os.environ.get("HACKING_LAB", os.path.expanduser("~/security-lab")))
+LAB = labutil.LAB
 
 # ANSI colors
 RED = "\033[31m"
@@ -97,10 +101,10 @@ def append_session_block(solve_log_path, session_num, status, summary,
         block += "\n"
     
     block += "---\n"
-    
+
     content = solve_log_path.read_text(errors='replace')
     content += block
-    solve_log_path.write_text(content)
+    labutil.atomic_write(solve_log_path, content)
 
 def update_failed_paths(solve_log_path, new_dead_ends):
     """Add new dead-end entries to the Failed Paths / Do Not Repeat section."""
@@ -112,7 +116,11 @@ def update_failed_paths(solve_log_path, new_dead_ends):
     # Find the Failed Paths section
     fp_pattern = r'^(##\s+Failed\s+Paths\s*/\s*Do\s+Not\s+Repeat\s*)$'
     if not re.search(fp_pattern, content, re.MULTILINE):
-        # Section doesn't exist — create it
+        # Section doesn't exist — create it at the end
+        ts = datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%d')
+        new_entries = "\n".join(f"- [{ts}] {entry}" for entry in new_dead_ends)
+        content += f"\n## Failed Paths / Do Not Repeat\n\n{new_entries}\n"
+        labutil.atomic_write(solve_log_path, content)
         return
     
     # Build the new entries
@@ -130,8 +138,8 @@ def update_failed_paths(solve_log_path, new_dead_ends):
             # Insert new entries at position j
             lines.insert(j, new_entries)
             break
-    
-    solve_log_path.write_text('\n'.join(lines))
+
+    labutil.atomic_write(solve_log_path, '\n'.join(lines))
 
 def write_handoff_md(challenge_dir, challenge_name, status, summary, 
                      flag, next_test, read_next, missing_primitive):
@@ -170,26 +178,17 @@ def write_handoff_md(challenge_dir, challenge_name, status, summary,
         block += "\n"
     
     block += "**Before attacking:** run `lab-preflight {name}` — it will show you the Failed Paths.\n".format(name=challenge_name)
-    
+
     content += block
-    handoff_path.write_text(content)
+    labutil.atomic_write(handoff_path, content)
 
 def log_audit(challenge_name, action, detail):
-    """Log to the audit log."""
-    audit_path = str(LAB / "findings" / ".agent-audit.jsonl")
-    ts = datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
-    entry = {
-        "ts": ts,
-        "agent": os.environ.get("USER", "unknown"),
-        "action": action,
-        "challenge": challenge_name,
-        "detail": detail,
-    }
-    try:
-        with open(audit_path, 'a') as f:
-            f.write(json.dumps(entry) + "\n")
-    except Exception:
-        pass  # Don't fail the handoff if audit log is unwritable
+    """Log to the audit log using the canonical labutil.audit() schema."""
+    labutil.audit(
+        action,
+        challenge=challenge_name,
+        detail=detail,
+    )
 
 def main():
     parser = argparse.ArgumentParser(
@@ -213,7 +212,8 @@ Examples:
     parser.add_argument('--solved', action='store_true', help='Challenge was solved')
     parser.add_argument('--stuck', action='store_true', help='Stuck — missing primitive')
     parser.add_argument('--pivoting', action='store_true', help='Pivoting to another challenge')
-    parser.add_argument('--flag', help='Flag value (with --solved)')
+    parser.add_argument('--accepted-flag', dest='flag', help='Accepted flag value (with --solved). Renamed from --flag to disambiguate from the pre-acceptance FLAG CANDIDATE handoff protocol.')
+    parser.add_argument('--flag', dest='flag', help=argparse.SUPPRESS)  # backward compat
     parser.add_argument('--summary', help='One-line summary of the session')
     parser.add_argument('--next', help='Next best test for the next agent')
     parser.add_argument('--missing', help='Description of the missing primitive (with --stuck)')
@@ -222,6 +222,9 @@ Examples:
     parser.add_argument('--read-next', nargs='*', default=[], help='Files/items the next agent should read first')
 
     args = parser.parse_args()
+
+    # Validate challenge name (path-traversal guard, T2-01)
+    labutil.require_valid_name(args.challenge, "challenge")
 
     # Determine status
     if args.solved:

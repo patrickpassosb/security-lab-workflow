@@ -41,7 +41,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-LAB = Path(os.environ.get("HACKING_LAB", os.path.expanduser("~/security-lab")))
+# Import shared labutil helpers
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib"))
+import labutil  # noqa: E402
+
+LAB = labutil.LAB
 FINDINGS_ROOT = LAB / "findings"
 ENGAGEMENTS_DIR = LAB / "engagements"
 TEMPLATES_DIR = LAB / "templates"
@@ -196,6 +200,9 @@ def main() -> int:
             print("Target not in scope. Add it to the engagement scope file or confirm with human.", file=sys.stderr)
             return 3
         scope_checked = "yes"
+    elif args["type"] in ("ctf", "bounty"):
+        # T2-19: warn when no --target on ctf/bounty (scope not checked)
+        print("WARNING: no --target provided, scope not checked. Pass --target <url> to enable scope validation.", file=sys.stderr)
 
     # Determine workspace path: cd-then-create mode or legacy global mode.
     # If cwd contains AGENTS.md, we're in a program folder → create workspace relative to cwd.
@@ -298,17 +305,15 @@ def main() -> int:
                 )
 
     FINDINGS_ROOT.mkdir(parents=True, exist_ok=True)
-    audit_path = FINDINGS_ROOT / ".agent-audit.jsonl"
-    audit_entry = '{"ts":"%s","agent":"%s","action":"lab-new","type":"%s","name":"%s","target":"%s","engagement":"%s","exit":0}\n' % (
-        date_utc,
-        os.environ.get("USER", "agent"),
-        args["type"],
-        args["name"],
-        target,
-        engagement,
+    # T2-07: use labutil.audit (json.dumps, safe) instead of %-formatting
+    labutil.audit(
+        "lab-new",
+        target=target,
+        engagement=engagement,
+        exit_code=0,
+        type=args["type"],
+        name=args["name"],
     )
-    with open(audit_path, "a", encoding="utf-8") as f:
-        f.write(audit_entry)
 
     print(f"\n[+] Workspace: {work}")
     print(f"[+] Mode: {ws_mode}")

@@ -112,15 +112,30 @@ class TestCheckTarget:
         assert code == 3
         assert "UNKNOWN" in msg
 
-    def test_denied_wins_over_in_scope(self):
+    def test_in_scope_wins_over_engagement_denied(self):
         # Per T2-16 recommended fix: global denied → REJECT, in_scope → ALLOW,
-        # engagement denied → REJECT. Here we test denied-present → REJECT.
+        # engagement denied → REJECT. So in_scope beats engagement denied.
         merged = self._merged(
             in_scope=[{"pattern": "example.com"}],
             denied=[{"pattern": "example.com", "reason": "blocked"}],
         )
+        # _global_denied and _eng_denied aren't set by _merged helper; the
+        # fallback in check_target treats merged["denied"] as global-first.
+        # So denied wins. To test the in_scope-wins path, split the denied:
+        merged["_eng_denied"] = merged["denied"]
+        merged["_global_denied"] = []
         code, msg = lab_scope.check_target("http://example.com", merged)
-        assert code == 2  # denied wins
+        assert code == 0  # in_scope wins over engagement denied
+
+    def test_global_denied_always_wins(self):
+        merged = self._merged(
+            in_scope=[{"pattern": "example.com"}],
+            denied=[{"pattern": "example.com", "reason": "global block"}],
+        )
+        merged["_global_denied"] = merged["denied"]
+        merged["_eng_denied"] = []
+        code, msg = lab_scope.check_target("http://example.com", merged)
+        assert code == 2  # global denied always rejects
 
     def test_empty_host(self):
         merged = self._merged()
