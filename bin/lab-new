@@ -230,8 +230,6 @@ def main() -> int:
     (work / "web-attack").mkdir(exist_ok=True)
     (work / "work").mkdir(exist_ok=True)
     (work / "evidence").mkdir(exist_ok=True)
-    (work / "extracts").mkdir(exist_ok=True)
-    (work / "notes").mkdir(exist_ok=True)
 
     target = args["target"]
     (work / "target.txt").write_text(target + "\n", encoding="utf-8")

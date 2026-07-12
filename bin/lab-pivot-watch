@@ -187,13 +187,23 @@ def run_daemon(ctf_home, warn_min, crit_min, interval=300):
     signal.signal(signal.SIGINT, cleanup)
 
     while True:
-        alerts = run_once(ctf_home, warn_min, crit_min)
-        if not alerts:
-            # Only print "all clear" if there are active challenges
-            challenges = scan_challenges(ctf_home)
-            if challenges:
-                print(f"[{datetime.datetime.now(datetime.timezone.utc).strftime('%H:%M:%S')}] "
-                      f"{len(challenges)} active challenges, no pivot alerts", flush=True)
+        # A-20: run_once already calls scan_challenges; reuse the result
+        # instead of calling scan_challenges again for the "all clear" message.
+        challenges = scan_challenges(ctf_home)
+        alerts = []
+        for chal in challenges:
+            if chal['elapsed_min'] >= crit_min:
+                alert = write_alert(ctf_home, 'CRIT', chal['name'],
+                                  chal['elapsed_min'], chal['idle_min'])
+                alerts.append(alert)
+                mark_hypothesis_stuck(Path(chal['solve_log']))
+            elif chal['elapsed_min'] >= warn_min:
+                alert = write_alert(ctf_home, 'WARN', chal['name'],
+                                  chal['elapsed_min'], chal['idle_min'])
+                alerts.append(alert)
+        if not alerts and challenges:
+            print(f"[{datetime.datetime.now(datetime.timezone.utc).strftime('%H:%M:%S')}] "
+                  f"{len(challenges)} active challenges, no pivot alerts", flush=True)
         time.sleep(interval)
 
 def stop_daemon():

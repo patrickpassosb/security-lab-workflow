@@ -91,8 +91,10 @@ python3 -c 'import z3' >/dev/null 2>&1 && ok "python z3" || warn "python z3 (not
 
 echo
 echo "## Docker images"
-docker images --format '{{.Repository}}:{{.Tag}}' 2>/dev/null | grep -E "vulnerables/web-dvwa|bkimminich/juice-shop" > /tmp/docker-images.txt
-test -s /tmp/docker-images.txt && ok "DVWA + Juice Shop images present" || warn "DVWA / Juice Shop images not yet pulled"
+DOCKER_IMAGES_TMP="${TMPDIR:-/tmp}/lab-docker-images.txt"
+docker images --format '{{.Repository}}:{{.Tag}}' 2>/dev/null | grep -E "vulnerables/web-dvwa|bkimminich/juice-shop" > "$DOCKER_IMAGES_TMP"
+test -s "$DOCKER_IMAGES_TMP" && ok "DVWA + Juice Shop images present" || warn "DVWA / Juice Shop images not yet pulled"
+rm -f "$DOCKER_IMAGES_TMP" 2>/dev/null
 
 echo
 echo "## Memory layer (gbrain)"

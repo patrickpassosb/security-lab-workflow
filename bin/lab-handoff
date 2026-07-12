@@ -249,9 +249,9 @@ Examples:
     parser.add_argument('--summary', help='One-line summary of the session')
     parser.add_argument('--next', help='Next best test for the next agent')
     parser.add_argument('--missing', help='Description of the missing primitive (with --stuck)')
-    parser.add_argument('--tested', nargs='*', default=[], help='List of things tested this session')
-    parser.add_argument('--failed', nargs='*', default=[], help='New dead ends to add to Failed Paths')
-    parser.add_argument('--read-next', nargs='*', default=[], help='Files/items the next agent should read first')
+    parser.add_argument('--tested', nargs='*', default=None, help='List of things tested this session')
+    parser.add_argument('--failed', nargs='*', default=None, help='New dead ends to add to Failed Paths')
+    parser.add_argument('--read-next', nargs='*', default=None, help='Files/items the next agent should read first')
 
     args = parser.parse_args()
 

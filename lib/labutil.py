@@ -23,13 +23,14 @@ All audit writes go to:  $HACKING_LAB/findings/.agent-audit.jsonl
 
 from __future__ import annotations
 
+import contextlib
 import fcntl
 import json
 import os
 import re
 import subprocess
 import sys
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -56,7 +57,7 @@ def color(text: str, c: str) -> str:
 
 def log(msg: str) -> None:
     """Print a UTC-timestamped log line to stderr."""
-    ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    ts = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
     print(f"[{ts}] {msg}", file=sys.stderr)
 
 
@@ -127,9 +128,7 @@ def validate_name(name: str) -> bool:
         return False
     if not _NAME_RE.match(name):
         return False
-    if ".." in name or "/" in name or "\\" in name:
-        return False
-    return True
+    return ".." not in name and "/" not in name and "\\" not in name
 
 
 def require_valid_name(name: str, kind: str = "name") -> None:
@@ -173,10 +172,8 @@ def atomic_append_jsonl(path: Path, entry: dict[str, Any]) -> None:
             f.flush()
             os.fsync(f.fileno())
         finally:
-            try:
+            with contextlib.suppress(OSError):
                 fcntl.flock(f.fileno(), fcntl.LOCK_UN)
-            except OSError:
-                pass
 
 
 # ─── Audit log (canonical schema) ────────────────────────────────────────────
@@ -201,7 +198,7 @@ def audit(
     break the main workflow.
     """
     entry: dict[str, Any] = {
-        "ts": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "ts": datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "agent": os.environ.get("USER", os.environ.get("LOGNAME", "agent")),
         "action": action,
     }

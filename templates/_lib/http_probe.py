@@ -12,8 +12,14 @@ Each template imports from here and adds type-specific features:
 
 Import via (from a template in work/):
     import sys, os
-    sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "templates", "_lib"))
-    from http_probe import workspace_root, evidence_dir, encode_payload, load_headers, build_request_kwargs, save_response
+    sys.path.insert(
+        0,
+        os.path.join(os.path.dirname(__file__), "..", "..", "templates", "_lib"),
+    )
+    from http_probe import (  # noqa: E402
+        workspace_root, evidence_dir, encode_payload,
+        load_headers, build_request_kwargs, save_response,
+    )
 """
 
 from __future__ import annotations
@@ -21,7 +27,7 @@ from __future__ import annotations
 import base64
 import json
 import os
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -47,7 +53,6 @@ USER_AGENT = os.environ.get("USER_AGENT", "security-lab-probe/1.0")
 
 def workspace_root() -> Path:
     """Resolve the workspace root (parent of work/ dir, or cwd)."""
-    script_dir = Path(__file__).resolve().parent
     # If we're being imported from a copy in work/, the parent of work/ is the workspace.
     # But __file__ points to the _lib module, not the copy. So check the caller's dir.
     # Fallback: cwd.
@@ -99,7 +104,11 @@ def load_headers() -> dict[str, str]:
 
 def build_request_kwargs(payload: str) -> dict[str, Any]:
     """Build kwargs for session.request() based on SEND_AS mode."""
-    kwargs: dict[str, Any] = {"headers": load_headers(), "timeout": TIMEOUT, "allow_redirects": False}
+    kwargs: dict[str, Any] = {
+        "headers": load_headers(),
+        "timeout": TIMEOUT,
+        "allow_redirects": False,
+    }
     if SEND_AS == "json":
         kwargs["json"] = {PARAM_NAME: payload}
     elif SEND_AS == "data":
@@ -115,7 +124,7 @@ def build_request_kwargs(payload: str) -> dict[str, Any]:
 
 def save_response(response: requests.Response, payload: str) -> None:
     """Save raw response, base64 response, and metadata under evidence/."""
-    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
     safe_base = "".join(ch if ch.isalnum() or ch in "._-" else "_" for ch in RESPONSE_BASENAME)[:80]
     base = evidence_dir() / f"{stamp}-{safe_base}"
     raw_path = base.with_suffix(".bin")

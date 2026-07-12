@@ -1,9 +1,7 @@
 """Tests for lib/labutil.py — the shared helpers module."""
 
 import json
-import os
 import sys
-import tempfile
 from pathlib import Path
 
 import pytest
@@ -14,7 +12,6 @@ LIB = HERE.parent / "lib"
 sys.path.insert(0, str(LIB))
 
 import labutil  # noqa: E402
-
 
 # ─── validate_name ────────────────────────────────────────────────────────────
 
