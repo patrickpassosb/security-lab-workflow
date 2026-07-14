@@ -1,17 +1,19 @@
 #!/usr/bin/env python3
-"""lab-handoff — mechanical session-end context capture for CTF challenges.
+"""lab-handoff — mechanical session-end context capture for all engagement types.
 
-Run this before pivoting away from a challenge or stopping a session. It
+Run this before pivoting away from a challenge/finding or stopping a session. It
 captures what was tested, what failed, and what the next agent should try.
 This makes cross-session handoff mechanical rather than depending on the
 agent remembering to do it.
 
-The #1 failure mode in CTFs is agents not reading prior
-session context and repeating dead ends 10 times. lab-handoff fixes the
-supply side: it ensures the context is actually written.
+The #1 failure mode is agents not reading prior session context and repeating
+dead ends 10 times. lab-handoff fixes the supply side: it ensures the context
+is actually written.
+
+Supports: CTF (solve_log.md), bounty (bounty_log.md), CVE (cve_log.md).
 
 Actions:
-  1. Append a ### Session N block to solve_log.md with structured template
+  1. Append a ### Session N block to the log file with structured template
   2. Update Failed Paths / Do Not Repeat with new dead ends
   3. Write/update HANDOFF.md with TL;DR for the next agent
 
@@ -174,7 +176,7 @@ def update_failed_paths(solve_log_path, new_dead_ends):
     labutil.atomic_write(solve_log_path, content)
 
 def write_handoff_md(challenge_dir, challenge_name, status, summary, 
-                     flag, next_test, read_next, missing_primitive):
+                     flag, next_test, read_next, missing_primitive, engagement_type="ctf"):
     """Write or update HANDOFF.md with TL;DR for the next agent."""
     handoff_path = challenge_dir / "HANDOFF.md"
     ts = datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
@@ -209,7 +211,12 @@ def write_handoff_md(challenge_dir, challenge_name, status, summary,
             block += f"- {item}\n"
         block += "\n"
     
-    block += "**Before attacking:** run `lab-preflight {name}` — it will show you the Failed Paths.\n".format(name=challenge_name)
+    if engagement_type == "ctf":
+        block += "**Before attacking:** run `lab-preflight {name}` — it will show you the Failed Paths.\n".format(name=challenge_name)
+    elif engagement_type == "bounty":
+        block += "**Before testing:** re-read the program's AGENTS.md and check the Failed Paths in the bounty log.\n"
+    elif engagement_type == "cve":
+        block += "**Before testing:** re-read the CVE project's AGENTS.md and check the Failed Paths in the cve log.\n"
 
     content += block
     labutil.atomic_write(handoff_path, content)
@@ -351,15 +358,36 @@ Examples:
 
     # Create log file if it doesn't exist (bounty/CVE workspaces may not have one yet)
     if not solve_log_path.exists():
-        log_filename = solve_log_path.name
-        solve_log_path.write_text(f"# {args.challenge} — Session Log\n\n## Known Facts\n\n## Hypotheses\n\n## Failed Paths / Do Not Repeat\n\n- None yet.\n\n## Evidence\n\n## Next Best Test\n\n", encoding="utf-8")
-        print(color(f"  [INFO]", YELLOW) + f" Created {log_filename} (was missing)")
+        # Use the proper template per engagement type
+        template_map = {
+            "ctf": ("ctf", "solve_log.md"),
+            "bounty": ("bounty", "bounty_log.md"),
+            "cve": ("cve", "cve_log.md"),
+        }
+        tmpl_subdir, tmpl_name = template_map.get(engagement_type, ("ctf", "solve_log.md"))
+        tmpl_path = LAB / "templates" / tmpl_subdir / tmpl_name
+        if tmpl_path.exists():
+            template_content = tmpl_path.read_text(encoding="utf-8")
+            # Basic placeholder substitution
+            template_content = template_content.replace("{{PROGRAM}}", args.challenge)
+            template_content = template_content.replace("{{CHALLENGE}}", args.challenge)
+            template_content = template_content.replace("{{TARGET}}", "")
+            template_content = template_content.replace("{{DATE}}", datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))
+        else:
+            template_content = f"# {args.challenge} — Session Log\n\n## Known Facts\n\n## Hypotheses\n\n## Failed Paths / Do Not Repeat\n\n- None yet.\n\n## Evidence\n\n## Next Best Test\n\n"
+        labutil.atomic_write(solve_log_path, template_content)
+        print(color(f"  [INFO]", YELLOW) + f" Created {solve_log_path.name} (was missing)")
 
     content = solve_log_path.read_text(errors='replace')
     session_num = count_sessions(content) + 1
 
     print(color(f"\n  lab-handoff — {args.challenge} (session {session_num}, {status}, {engagement_type})", BOLD))
     print(color(f"  {'=' * 50}", BOLD))
+
+    # Warn if --flag is used with non-CTF engagement
+    if args.flag and engagement_type != "ctf":
+        print(color(f"  [WARN]", YELLOW) + f" --flag is CTF-only, ignoring for {engagement_type} engagement")
+        args.flag = None
 
     # 1. Append session block (T2-13: pure — returns block, no write)
     session_block = append_session_block(
@@ -378,12 +406,12 @@ Examples:
 
     # Single atomic write (T2-13: no two-write TOCTOU)
     labutil.atomic_write(solve_log_path, content)
-    print(color("  [PASS]", GREEN) + f" Session {session_num} block appended to solve_log.md")
+    print(color("  [PASS]", GREEN) + f" Session {session_num} block appended to {solve_log_path.name}")
 
     # 3. Write/update HANDOFF.md
     write_handoff_md(
         challenge_dir, args.challenge, status, args.summary,
-        args.flag, args.next, args.read_next, args.missing
+        args.flag, args.next, args.read_next, args.missing, engagement_type
     )
     print(color("  [PASS]", GREEN) + " HANDOFF.md updated with TL;DR for next agent")
 

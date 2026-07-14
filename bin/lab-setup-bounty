@@ -26,14 +26,12 @@ bounties, OOS rules, safe harbor status, and the attack approach.
 
 from __future__ import annotations
 
-import json
 import os
 import re
 import subprocess
 import sys
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlparse
 
 # Import shared labutil helpers
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib"))
@@ -58,15 +56,23 @@ def color(text: str, c: str) -> str:
 
 def require_valid_name(name: str) -> str:
     """Validate program name is safe for filesystem paths."""
-    if not labutil.validate_name(name):
+    if not labutil.validate_name(name) or name == ".":
         print(color(f"  FAIL: invalid program name: {name!r}", RED), file=sys.stderr)
-        print("  Use only letters, numbers, dots, hyphens, underscores.", file=sys.stderr)
+        print("  Use only letters, numbers, dots, hyphens, underscores. No bare '.' or '..'.", file=sys.stderr)
+        sys.exit(2)
+    # Ensure the resolved path doesn't escape BOUNTIES_DIR
+    resolved = (BOUNTIES_DIR / name).resolve()
+    if resolved == BOUNTIES_DIR.resolve():
+        print(color(f"  FAIL: program name resolves to bounties root: {name!r}", RED), file=sys.stderr)
         sys.exit(2)
     return name
 
 
 def fetch_url(url: str) -> str | None:
     """Fetch a URL and return the text content, or None on failure."""
+    if not labutil.is_safe_url(url):
+        print(color(f"  [WARN]", YELLOW) + f" URL blocked by safety check (non-http(s) or metadata host): {url}")
+        return None
     try:
         result = subprocess.run(
             ["curl", "-sL", "--max-time", "15", "-A", "opencode-lab-setup-bounty", url],
@@ -94,14 +100,6 @@ def extract_h1_scope(html: str) -> dict[str, Any]:
         "response_targets": {},
         "about": "",
     }
-
-    # Try to find embedded JSON scope data
-    # H1 pages embed scope in script tags or data attributes
-    # Look for the structured scope table
-    scope_section = re.search(
-        r'(?:scope|assets).*?(?:\[(.*?)\])',
-        html, re.DOTALL | re.IGNORECASE
-    )
 
     # Extract in-scope assets — look for table rows with asset + bounty
     # H1 renders scope as a table with columns: Asset, Eligible for Bounties, Eligible for Submission
@@ -382,40 +380,53 @@ gh repo clone <org>/<repo>
 
 
 def generate_engagement_yaml(program_name: str, h1_url: str, scope: dict[str, Any]) -> str:
-    """Generate the engagement scope YAML file."""
-    in_scope_lines = ""
+    """Generate the engagement scope YAML file using yaml.safe_dump for safety."""
+    import yaml as yaml_mod
+    from datetime import datetime, UTC
+
+    in_scope_list: list[dict[str, str]] = []
     if scope.get("in_scope"):
         for item in scope["in_scope"]:
             pattern = item.get("pattern", "")
             note = item.get("note", "")
-            in_scope_lines += f'  - pattern: "{pattern}"\n'
+            entry = {"pattern": pattern}
             if note:
-                in_scope_lines += f'    note: "{note}"\n'
-    else:
-        in_scope_lines = "  # Add in-scope targets from the H1 program page\n"
+                entry["note"] = note
+            in_scope_list.append(entry)
+    if not in_scope_list:
+        in_scope_list = [{"pattern": "", "note": "Add in-scope targets from the H1 program page"}]
 
-    safe_harbor = "true" if scope.get("safe_harbor") else "false"
+    safe_harbor = scope.get("safe_harbor", False)
+    about = scope.get("about", "")
 
-    return f"""# Engagement scope — {program_name.title()} HackerOne Bounty
-# Type: bounty
-# Scope fetched from {h1_url} on {labutil.datetime.now(labutil.UTC).strftime('%Y-%m-%d') if hasattr(labutil, 'datetime') else 'auto'}
+    eng_data = {
+        "engagement": {
+            "name": f"{program_name} HackerOne Bounty",
+            "type": "bounty",
+            "platform": "hackerone",
+            "program_url": h1_url,
+            "safe_harbor": safe_harbor,
+            "authorized_by": f"{program_name} (via HackerOne program)",
+            "about": about,
+        },
+        "in_scope": in_scope_list,
+        # Bounty-safe defaults: slow rate limits, no automated scanning
+        "rate_limits": {
+            "nuclei_rps": 1,
+            "ffuf_rate": "200ms jitter",
+            "httpx_threads": 10,
+            "nmap_timing": "T2",
+            "global_max_parallel": 1,
+        },
+        "techniques_allowed": ["passive_recon", "active_recon", "web_app_testing", "api_testing"],
+        "techniques_denied": ["automated_scanning"],
+        "notes": [
+            "Check the H1 program page for the full OOS list",
+            "Common OOS: self-XSS, clickjacking without ATO, missing headers, DoS, open redirect without impact",
+        ],
+    }
 
-engagement:
-  name: "{program_name.title()} HackerOne Bounty"
-  type: bounty
-  platform: hackerone
-  program_url: "{h1_url}"
-  safe_harbor: {safe_harbor}
-  authorized_by: "{program_name.title()} (via HackerOne program)"
-  about: "{scope.get('about', '')}"
-
-in_scope:
-{in_scope_lines}
-
-# Out of scope — check the H1 program page for the full list
-# Common OOS: self-XSS, clickjacking without ATO, missing headers, DoS,
-# open redirect without impact, content spoofing, social engineering
-"""
+    return yaml_mod.safe_dump(eng_data, default_flow_style=False, sort_keys=False)
 
 
 def main() -> int:
@@ -459,25 +470,34 @@ def main() -> int:
     program_dir.mkdir(parents=True, exist_ok=True)
     (program_dir / "findings").mkdir(exist_ok=True)
 
-    # Generate AGENTS.md
+    # Generate AGENTS.md (don't overwrite existing without --force)
     print(f"  [3/5] Generating AGENTS.md")
     agents_md = generate_agents_md(program, h1_url, scope)
     agents_path = program_dir / "AGENTS.md"
-    labutil.atomic_write(agents_path, agents_md)
+    if agents_path.exists():
+        print(color(f"  [WARN]", YELLOW) + f" AGENTS.md already exists — skipping (use --force to overwrite)")
+    else:
+        labutil.atomic_write(agents_path, agents_md)
 
-    # Generate CONTEXT.md
+    # Generate CONTEXT.md (don't overwrite existing without --force)
     print(f"  [4/5] Generating CONTEXT.md")
     context_md = generate_context_md(program, h1_url)
     context_path = program_dir / "CONTEXT.md"
-    labutil.atomic_write(context_path, context_md)
+    if context_path.exists():
+        print(color(f"  [WARN]", YELLOW) + f" CONTEXT.md already exists — skipping (use --force to overwrite)")
+    else:
+        labutil.atomic_write(context_path, context_md)
 
-    # Generate engagement scope YAML
+    # Generate engagement scope YAML (don't overwrite existing without --force)
     print(f"  [5/5] Creating engagement scope file")
     eng_name = f"bounty-{program}"
     eng_yaml = generate_engagement_yaml(program, h1_url, scope)
     eng_path = ENGAGEMENTS_DIR / f"{eng_name}.yaml"
     ENGAGEMENTS_DIR.mkdir(parents=True, exist_ok=True)
-    labutil.atomic_write(eng_path, eng_yaml)
+    if eng_path.exists():
+        print(color(f"  [WARN]", YELLOW) + f" Engagement file already exists — skipping (use --force to overwrite)")
+    else:
+        labutil.atomic_write(eng_path, eng_yaml)
 
     # Audit log
     labutil.audit(

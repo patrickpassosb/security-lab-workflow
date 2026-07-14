@@ -44,15 +44,18 @@ def color(text: str, c: str) -> str:
 
 
 def gbrain_search(query: str, limit: int = 5) -> list[dict[str, Any]]:
-    """Search gbrain and return results."""
+    """Search gbrain and return results. Only returns results on success (returncode 0)."""
     try:
         result = subprocess.run(
             ["gbrain", "search", query, "--limit", str(limit)],
             capture_output=True, text=True, timeout=30,
         )
         if result.returncode == 0 and result.stdout.strip():
-            # gbrain search returns text results; try to parse or return raw
-            return [{"query": query, "raw": result.stdout[:500]}]
+            # Check if it's real results (not just headers or "No results")
+            output = result.stdout.strip()
+            if "No results" in output or len(output) < 20:
+                return []
+            return [{"query": query, "raw": output[:500]}]
     except (subprocess.TimeoutExpired, FileNotFoundError):
         pass
     return []
@@ -92,8 +95,8 @@ def find_prior_findings(program: str) -> list[Path]:
         return findings
     findings_dir = program_dir / "findings"
     if findings_dir.is_dir():
-        for f in findings_dir.iterdir():
-            if f.is_dir() and (f / "report_h1.md").exists() or (f / "bounty_log.md").exists():
+        for f in sorted(findings_dir.iterdir()):
+            if f.is_dir() and ((f / "report_h1.md").exists() or (f / "bounty_log.md").exists()):
                 findings.append(f)
     return findings
 
@@ -140,16 +143,20 @@ def generate_threat_model(program: str, target_domain: str | None) -> str:
 
 def seed_gbrain(program: str, target_domain: str | None) -> None:
     """Seed gbrain with a basic target profile if nothing exists."""
-    slug = f"sota-{program}-threat-model"
+    slug = "sota-" + re.sub(r"[^a-z0-9-]", "-", program.lower()) + "-threat-model"
     threat_model = generate_threat_model(program, target_domain)
+    # gbrain put requires --content with YAML frontmatter
+    content = f"---\ntitle: SOTA Threat Model: {program}\ntype: gstack/note\n---\n{threat_model}"
     try:
-        subprocess.run(
-            ["gbrain", "put", slug, "--type", "gstack/note",
-             "--title", f"SOTA Threat Model: {program}",
-             "--body", threat_model],
-            capture_output=True, text=True, timeout=15,
+        result = subprocess.run(
+            ["gbrain", "put", slug, "--content", content],
+            capture_output=True, text=True, timeout=30,
         )
-        print(color(f"  [PASS]", GREEN) + f" Seeded gbrain with threat model (slug={slug})")
+        if result.returncode == 0:
+            print(color(f"  [PASS]", GREEN) + f" Seeded gbrain with threat model (slug={slug})")
+        else:
+            err = result.stderr[:100] if result.stderr else "unknown error"
+            print(color(f"  [WARN]", YELLOW) + f" gbrain put failed (exit={result.returncode}): {err}")
     except (subprocess.TimeoutExpired, FileNotFoundError):
         print(color(f"  [WARN]", YELLOW) + " Could not seed gbrain (not installed?)")
 

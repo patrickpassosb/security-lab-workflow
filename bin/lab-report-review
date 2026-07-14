@@ -8,7 +8,7 @@ checklist with specific fix guidance.
 Usage:
     lab-report-review <finding-name>          # find report in bounty workspace
     lab-report-review --report path/to/report # review a specific file
-    lab-report-review --report path --poem path/to/poc.mjs  # also check PoC
+    lab-report-review --report path --poc path/to/poc.mjs  # also check PoC
 
 Exit codes:
     0 = all checks PASS
@@ -127,10 +127,13 @@ def review_report(report_path: Path, poc_path: Path | None = None) -> list[Check
     target_match = re.search(r"\*\*Target:\*\*\s*(.+)", content)
     if asset_match or target_match:
         asset = (asset_match or target_match).group(1).strip()
-        if "api.notion.com" in asset and "privesc" in content.lower() and "authorization" in content.lower() and "intact" in content.lower():
+        # Generic check: if report says authz holds but asset is an API host, warn
+        has_authz_holds = bool(re.search(r"authorization\s+(?:remains\s+)?intact|authz\s+holds|server-side\s+auth", content, re.IGNORECASE))
+        has_privesc_scope = bool(re.search(r"privesc|privilege\s+esc", content, re.IGNORECASE))
+        if has_authz_holds and has_privesc_scope:
             results.append(CheckResult("Scope correctness", "WARN",
-                f"Asset={asset} but report says authz holds — api.notion.com scope is 'privesc beyond token scope'",
-                "If the bug doesn't provide privesc, file under the GitHub repos asset instead"))
+                f"Asset={asset} but report says authz holds and mentions privesc",
+                "If the bug doesn't provide privesc, file under the appropriate non-API asset (e.g. GitHub repos)"))
         else:
             results.append(CheckResult("Scope correctness", "PASS",
                 f"Asset={asset}"))
@@ -174,8 +177,30 @@ def review_report(report_path: Path, poc_path: Path | None = None) -> list[Check
         results.append(CheckResult("PoC correctness", "PASS",
             "No common PoC issues detected"))
 
+    # Check for hardcoded tokens in PoC
+    if poc_content:
+        token_patterns = [
+            (r'(?:secret|ntn_|sk-|Bearer\s+eyJ)[A-Za-z0-9_\-]{10,}', "integration/API token"),
+            (r'-----BEGIN\s+(?:RSA\s+)?PRIVATE\s+KEY-----', "private key"),
+        ]
+        found_tokens = []
+        for pattern, label in token_patterns:
+            if re.search(pattern, poc_content):
+                # Exclude obvious test/fake tokens
+                if not re.search(pattern + r'[a-z]{4,}', poc_content, re.IGNORECASE):
+                    pass  # short fake token, probably OK
+                else:
+                    found_tokens.append(label)
+        if found_tokens:
+            results.append(CheckResult("Hardcoded tokens", "FAIL",
+                f"PoC may contain hardcoded {', '.join(found_tokens)}",
+                "Use environment variables for all secrets"))
+        else:
+            results.append(CheckResult("Hardcoded tokens", "PASS",
+                "No obvious hardcoded tokens in PoC"))
+
     # --- 4. Body schema compatibility ---
-    if "destructive" in content.lower() or "delete" in content.lower() and "redirect" in content.lower():
+    if ("destructive" in content.lower() or ("delete" in content.lower() and "redirect" in content.lower())) and "non-destructive" not in content.lower():
         has_mock_confirmed = bool(re.search(r"mock-confirmed|not.*executed.*live|not.*performed", content, re.IGNORECASE))
         if not has_mock_confirmed:
             results.append(CheckResult("Destructive mapping qualification", "WARN",
@@ -204,8 +229,10 @@ def review_report(report_path: Path, poc_path: Path | None = None) -> list[Check
             "Add affected versions (check git tags: git tag --contains <commit>)"))
 
     # --- 6. Timeline accuracy ---
-    timeline_match = re.search(r"Reported\s+via\s+HackerOne", content, re.IGNORECASE)
-    if timeline_match:
+    # Check for "Reported via HackerOne" but NOT when negated ("not reported via")
+    timeline_reported = re.search(r"Reported\s+via\s+HackerOne", content, re.IGNORECASE)
+    timeline_negated = re.search(r"not\s+Reported\s+via\s+HackerOne", content, re.IGNORECASE)
+    if timeline_reported and not timeline_negated:
         results.append(CheckResult("Timeline accuracy", "FAIL",
             "Timeline says 'Reported via HackerOne' — has it been submitted?",
             "If not yet submitted, change to 'Discovered and validated'"))
@@ -220,7 +247,8 @@ def review_report(report_path: Path, poc_path: Path | None = None) -> list[Check
                 "Add a Disclosure Timeline section with 'Discovered and validated'"))
 
     # --- 7. Attachments ---
-    local_refs = re.findall(r"(?:evidence|extracts|work)/[^\s)]+\.(?:out|md|mjs|js|py|json)", content)
+    # Match local paths like evidence/..., extracts/..., work/... but NOT URLs containing those words
+    local_refs = re.findall(r"(?:^|\s|\(|`)(?:evidence|extracts|work)/[^\s)`]+\.(?:out|md|mjs|js|py|json)", content, re.MULTILINE)
     if local_refs:
         results.append(CheckResult("Attachments", "FAIL",
             f"Report references {len(local_refs)} local file path(s): {local_refs[0][:50]}...",
@@ -255,12 +283,13 @@ def review_report(report_path: Path, poc_path: Path | None = None) -> list[Check
             "Not applicable (no deputy scenario claimed)"))
 
     # --- 10. API version ---
-    api_version = re.search(r"2022-06-28", content)
-    has_correct_version = bool(re.search(r"2025-09-03|SDK.*default.*API.*version", content, re.IGNORECASE))
-    if api_version and not has_correct_version:
+    # Check if report mentions an older API version for curl while SDK uses a newer default
+    old_version_match = re.search(r"2022-\d{2}-\d{2}", content)
+    new_version_match = re.search(r"2025-\d{2}-\d{2}|SDK.*default.*API.*version", content, re.IGNORECASE)
+    if old_version_match and not new_version_match:
         results.append(CheckResult("API version", "WARN",
-            "Report mentions API version 2022-06-28 (curl version) — SDK default is 2025-09-03",
-            "State the SDK's default API version (2025-09-03) and note 2022-06-28 was only for curl"))
+            f"Report mentions older API version ({old_version_match.group(0)}) — check if SDK default is newer",
+            "State the SDK's default API version and note the older version was only for curl"))
     else:
         results.append(CheckResult("API version", "PASS",
             "API version correct or not applicable"))

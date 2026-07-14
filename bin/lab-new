@@ -182,6 +182,9 @@ def main() -> int:
         print(f"ERROR: --engagement is required for type '{args['type']}'", file=sys.stderr)
         return 2
 
+    # Validate engagement name (path-traversal guard, prevents YAML injection)
+    labutil.require_valid_name(engagement, "engagement")
+
     eng_scope_path = ENGAGEMENTS_DIR / f"{engagement}.yaml"
     if not eng_scope_path.exists():
         # Auto-create a minimal engagement scope file if it doesn't exist

@@ -90,7 +90,7 @@ if check_tool "secretfinder" "$LOCAL_BIN/secretfinder" 2>/dev/null; then
 else
     cd "$TOOLS_DIR"
     if [[ ! -d SecretFinder ]]; then
-        git clone --depth 1 https://github.com/detectify/secretfinder.git 2>/dev/null || {
+        git clone --depth 1 https://github.com/m4ll0k/SecretFinder.git 2>/dev/null || {
             echo "  [WARN] Could not clone SecretFinder"
         }
     fi
