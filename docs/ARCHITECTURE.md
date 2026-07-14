@@ -77,6 +77,82 @@ When an agent checks a target against an engagement, the scope checker merges:
 
 Every scope check is logged to the audit log with the engagement name.
 
+## HackerOne reporting tool
+
+Bounty findings are reported through a **local-only, human-gated** workflow.
+No command in the reporting tool makes a network request or subprocess call;
+final submission is always a human action in the HackerOne UI.
+
+### Commands
+
+`bin/lab-h1-report` is the global reporting CLI. It has four subcommands and
+**no `submit`**:
+
+| Command | What it does |
+|---|---|
+| `check [workspace]` | Read-only validation of `report_h1.md` (frontmatter schema, body sections, engagement match, structured asset eligibility, live-target scope, testing assertions, attachment safety, secret scanning). Exit 0 = valid, 2 = validation failure, 1 = usage/fs/parse error. |
+| `prepare [workspace]` | Run `check` internally, then stage an immutable submission package under `submission/prepared-<UTC>/` with `report_h1.md`, `report.md` (frontmatter-stripped body), `attachments/`, and `manifest.json` (SHA-256 + size for every file). Refuses to overwrite an existing package. |
+| `record-submission [workspace] --package <path|id> --h1-id <num> --url <url> --submitted-at <ts> [--submitted-by <id>]` | Record a one-time immutable local receipt in `<package>/record.json`. Validates the package manifest, numeric report ID, HackerOne URL, and timezone-aware timestamp. Never contacts HackerOne. |
+| `status [workspace]` | Read-only. Prints report metadata, latest prepared package, manifest integrity (re-hashes files on disk), source drift since `prepare`, and the recorded HackerOne report ID/URL. |
+
+### Library and source of truth
+
+- `lib/h1report.py` — the reusable parser/validator/stager library. No network,
+  no subprocess. Uses `yaml.safe_load` only (never `eval`/`exec`/unsafe loaders).
+- `report_h1.md` — the editable single source of truth. YAML frontmatter
+  (schema `security-lab/hackerone-report/v1`) holds machine-readable metadata;
+  the Markdown body holds the exact HackerOne `## Description` and `## Impact`
+  content. The tool never modifies `report_h1.md`; submission metadata lives
+  only in `record.json` inside the prepared package.
+
+### Immutability invariants
+
+- Prepared packages are never overwritten. `prepare` builds in a temporary
+  sibling directory and atomically renames it into place; an existing final
+  package path is refused.
+- `record.json` is created exactly once via `O_EXCL`. A second
+  `record-submission` against the same package fails rather than overwriting.
+- Source evidence files are never altered or deleted by the tool.
+
+### Security invariants
+
+- **Symlink resistance:** source and attachment files are opened with
+  `O_NOFOLLOW` where the platform supports it, and regular-file status is
+  verified with `fstat`. No check-then-copy sequence that allows a symlink race.
+- **Path-traversal guards:** normalized relative paths only. Absolute paths,
+  `..`, backslashes, null bytes, and symlinks are rejected.
+- **Attachment secret scanning:** high-confidence detectors for private keys,
+  recognized key prefixes, and `Authorization: Bearer` tokens. Matched secrets
+  report only file + line + detector name — never the secret value. Blocked
+  extensions include `.env`, `.pem`, `.key`, `.p12`, `.pfx`, `.token`,
+  `.session`, `.db`, `.sqlite`, `.database`, `HANDOFF.md`, and audit logs.
+  Binary files are not scanned as text; the manifest records that binary
+  scanning was skipped.
+- **No network, no subprocess:** `check`, `prepare`, `record-submission`, and
+  `status` never make network requests or spawn subprocesses. They are local
+  file-processing tools only.
+- **Audit events:** `h1-report-check`, `h1-report-prepare`, `h1-report-status`,
+  `h1-report-record-submission` via `labutil.audit()`. Detail fields carry
+  counts, package ids, and report ids only — never report body content,
+  attachment content, or secret values.
+
+### Human submission gate
+
+Agents draft, validate, and prepare. **Humans submit.** Agents record. There
+is no `submit` command and no HackerOne API call anywhere in the tool. The
+human submits through the HackerOne UI, then provides the accepted report ID
+and URL back to the agent, who records it with `record-submission`.
+
+### Shared scope primitives
+
+`lib/h1report.py` reuses the scope helpers in `lib/labutil.py` — the same
+primitives `bin/lab-scope` uses — so scope semantics (global denied list,
+engagement `in_scope`/`denied` patterns, default-deny) have one source of
+truth. Report validation prefers immutable workspace scope snapshots
+(`<workspace>/engagement_scope_snapshot.yaml`, then `<workspace>/scope_snapshot.yaml`)
+and falls back to the current global files with a warning when a snapshot is
+absent.
+
 ## The skill system
 
 Skills are the agent API. Each skill is a `SKILL.md` file that documents a workflow: when to use it, how to run it, what tools it dispatches to, and what output to expect. Agents invoke skills by name; the skill instructs the agent what to do.

@@ -23,6 +23,44 @@ in_scope:
 # Engagement-specific denials (merged with global scope.yaml denied list).
 denied: []
 
+# Structured HackerOne assets. Separate from host-pattern `in_scope` because
+# HackerOne assets may represent repositories, mobile apps, downloadable
+# executables, or broad public artifacts. `asset_id` in a report_h1.md must
+# match one `assets[].id` exactly, and `asset_name` must match the asset's
+# `display_name` exactly. `asset_type` is platform metadata, not a hostname
+# validation rule; existing `in_scope` and `denied` lists continue to govern
+# live targets.
+assets:
+  - id: frontend
+    display_name: Frontend / marketing site
+    asset_type: URL
+    patterns:
+      - example.com
+    finding_types:
+      - live_web
+    eligible_for_submission: true
+    eligible_for_bounty: true
+
+  - id: api
+    display_name: Public API
+    asset_type: API
+    patterns:
+      - api.example.com
+    finding_types:
+      - live_web
+    eligible_for_submission: true
+    eligible_for_bounty: true
+
+  - id: example-github-public-artifacts
+    display_name: GitHub Repositories or other public artifacts owned by Example
+    asset_type: OTHER
+    patterns:
+      - github.com/example/*
+    finding_types:
+      - source_code
+    eligible_for_submission: true
+    eligible_for_bounty: true
+
 # Rate limits — bounty = slow, careful, production.
 rate_limits:
   nuclei_rps: 5

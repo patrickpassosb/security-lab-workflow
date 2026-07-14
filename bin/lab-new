@@ -236,6 +236,8 @@ def main() -> int:
     (work / "web-attack").mkdir(exist_ok=True)
     (work / "work").mkdir(exist_ok=True)
     (work / "evidence").mkdir(exist_ok=True)
+    if args["type"] == "bounty":
+        (work / "submission").mkdir(exist_ok=True)
 
     target = args["target"]
     (work / "target.txt").write_text(target + "\n", encoding="utf-8")
@@ -246,6 +248,16 @@ def main() -> int:
         shutil.copy2(eng_scope_path, work / "engagement_scope_snapshot.yaml")
 
     (work / "engagement.txt").write_text(engagement + "\n", encoding="utf-8")
+
+    # Load the engagement scope to prefill program/program_url in bounty reports.
+    # Fall back to the engagement name / empty string if the fields are absent.
+    eng_scope_data = labutil.load_yaml_file(eng_scope_path) or {}
+    eng_block = eng_scope_data.get("engagement", {}) if isinstance(eng_scope_data, dict) else {}
+    program_name = ""
+    program_url = ""
+    if isinstance(eng_block, dict):
+        program_name = eng_block.get("name", "") or engagement
+        program_url = eng_block.get("program_url", "") or ""
 
     date_utc = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     category = args["category"] or cfg["default_category"]
@@ -262,9 +274,9 @@ def main() -> int:
             "CTF_NAME": engagement,
             "DATE": date_utc,
             "SCOPE_CHECKED": scope_checked,
-            "PROGRAM": args["name"],
+            "PROGRAM": program_name or args["name"],
             "PLATFORM": "hackerone",
-            "PROGRAM_URL": "",
+            "PROGRAM_URL": program_url,
             "ENGAGEMENT": engagement,
             "PROJECT": args["name"],
             "REPO": "",
@@ -315,7 +327,18 @@ def main() -> int:
                     "AFFECTED_VERSIONS": "",
                     "CVE_ID": "",
                     "CVSS_SCORE": "",
-                    "PROGRAM_URL": "",
+                    "PROGRAM_URL": program_url,
+                    # Bounty report_h1.md frontmatter prefilling. The template
+                    # has `live_targets:\n  {{INITIAL_LIVE_TARGET}}` so we can
+                    # inject either a `- <url>` entry or `[]` via simple replace.
+                    # Unknown fields (asset_id, asset_name, weakness, severity,
+                    # finding_type, attachments, testing) are left as the
+                    # explicit-invalid placeholders from the template so a
+                    # fresh workspace FAILS `lab-h1-report check` until the
+                    # author fills them in.
+                    "INITIAL_LIVE_TARGET": (
+                        f"- {target}" if args["type"] == "bounty" and target else "[]"
+                    ),
                 }
                 fill_template(writeup_template, writeup_dest, writeup_replacements)
             else:

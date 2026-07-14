@@ -154,6 +154,68 @@ lab-debrief
 
 ---
 
+## HackerOne report workflow example
+
+A realistic end-to-end report session for a fictional finding. Every
+`lab-h1-report` command is local-only — no command contacts HackerOne. The
+human submits through the HackerOne UI; the agent only drafts, validates,
+stages, and records.
+
+```bash
+# 1. Create a bounty workspace (lab-new fills known frontmatter fields:
+#    engagement, platform, program, program_url, title, and an initial
+#    live_target when --target is given).
+lab-new bounty ssrf-in-fetch --target https://api.example.com --engagement bounty-example
+cd ~/security-lab/bounties/example/findings/ssrf-in-fetch/
+
+# 2. Fill report_h1.md: set asset_id, asset_name (must match a structured
+#    asset in the engagement snapshot exactly), weakness, severity
+#    (rating/score/vector), finding_type, the testing assertions, and write
+#    the Description (Summary / Steps to reproduce / Remediation) and Impact
+#    body. Add attachment candidates to evidence/ and list them in the
+#    frontmatter attachments array.
+
+# 3. Validate (read-only, no network)
+lab-h1-report check
+# PASS
+
+# 4. Stage the submission package (immutable, hashed attachments)
+lab-h1-report prepare
+# SUMMARY: prepared=1 attachments=2 scope_snapshots=1 package=prepared-20260713T210000Z
+# PACKAGE: submission/prepared-20260713T210000Z/
+
+# 5. HUMAN submits via the HackerOne UI: copy report.md, upload the staged
+#    attachments from submission/prepared-20260713T210000Z/attachments/.
+#    Human returns: report ID 1234567, URL https://hackerone.com/reports/1234567
+
+# 6. Record the submission (one-time immutable receipt; no network)
+lab-h1-report record-submission \
+  --package prepared-20260713T210000Z \
+  --h1-id 1234567 \
+  --url https://hackerone.com/reports/1234567 \
+  --submitted-at 2026-07-13T21:30:00Z
+# RECORDED: submission/prepared-20260713T210000Z/record.json
+# REPORT_ID: 1234567
+
+# 7. Verify integrity + drift + recorded submission
+lab-h1-report status
+# report: .../report_h1.md
+# title: SSRF in PDF fetch endpoint
+# package: submission/prepared-20260713T210000Z/
+# integrity: OK
+# source_drifted: false
+# record: submission/prepared-20260713T210000Z/record.json
+# h1_report_id: 1234567
+# h1_url: https://hackerone.com/reports/1234567
+```
+
+The human-submission gate is the key invariant: agents draft, validate, and
+prepare; humans submit; agents record. No `lab-h1-report` command makes a
+network request or subprocess call, and `record-submission` only records what
+the human already did — it never contacts HackerOne.
+
+---
+
 ## Sample CVE research session
 
 **Engagement:** `cve-research` (generic CVE research template)

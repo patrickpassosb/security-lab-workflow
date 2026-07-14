@@ -91,6 +91,33 @@ agent finds flag → capture evidence (1 cmd) → output boxed FLAG CANDIDATE �
 
 See the `ctf-workflow` and `report-ctf` skills for the full protocol.
 
+## HackerOne reporting workflow (bounty)
+
+Bounty findings use a local-only, human-gated reporting flow. The tool never
+contacts HackerOne. The workflow is:
+
+```
+check -> prepare -> human submits -> record-submission -> status
+```
+
+- Agents draft the report in `report_h1.md` (YAML frontmatter schema
+  `security-lab/hackerone-report/v1` + `## Description` / `## Impact` body).
+- `lab-h1-report check [workspace]` validates the report (read-only, no network).
+- `lab-h1-report prepare [workspace]` stages an immutable submission package
+  with attachment hashes. Packages are never overwritten.
+- **Agents MUST NOT submit a report.** There is no `submit` command. Final
+  submission is a human action in the HackerOne UI. The human returns the
+  accepted HackerOne report ID and URL.
+- `lab-h1-report record-submission [workspace] --package <path|id> --h1-id <num> --url <url> --submitted-at <ts> [--submitted-by <id>]`
+  records a one-time immutable local receipt. It only records a completed human
+  action; it never contacts HackerOne.
+- `lab-h1-report status [workspace]` verifies package integrity, detects source
+  drift, and confirms the recorded submission.
+
+All four commands are local-only (no network, no subprocess). See
+`lab-h1-report --help` and `templates/bounty/report_h1.md`. `report_h1.md` is
+the single source of truth — do not duplicate report content in `bounty_log.md`.
+
 ## Never
 
 1. **Never exfiltrate outside the lab.** No outbound to public hosts except: Voyage API (embeddings), Supabase (if you opt in later), Caido (proxy only). For bounty engagements, you operate under the program's safe harbor — but still no data exfiltration beyond what proves the bug.

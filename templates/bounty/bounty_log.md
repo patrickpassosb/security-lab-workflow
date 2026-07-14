@@ -41,27 +41,7 @@
 
 ## Report Draft (HackerOne)
 
-### Summary
-
-(1-2 sentences: what the bug is and its impact)
-
-### Impact
-
-(What can an attacker do? Who is affected? What data/systems are compromised?)
-
-### Steps to Reproduce
-
-1. ...
-2. ...
-3. ...
-
-### Proof of Concept
-
-(Reference to evidence files, not raw pasted output)
-
-### Remediation
-
-(Suggested fix)
+Report drafting happens in `report_h1.md` — see that file. Use `lab-h1-report check` to validate.
 
 ## Tool Installs
 

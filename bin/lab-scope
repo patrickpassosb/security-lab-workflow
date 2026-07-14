@@ -17,21 +17,22 @@ Exit codes:
 
 from __future__ import annotations
 
-import fnmatch
 import json
-import os
-import re
 import sys
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from urllib.parse import urlparse
 from typing import Any
 
 import yaml
 
-# Import shared labutil helpers
+# Import shared labutil helpers (scope primitives now live here too).
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib"))
 import labutil  # noqa: E402
+
+# Re-export the shared primitives so existing callers/tests that do
+# `lab_scope.extract_host(...)` keep working.
+extract_host = labutil.extract_host
+match_pattern = labutil.match_pattern
 
 LAB = labutil.LAB
 GLOBAL_SCOPE = LAB / "scope.yaml"
@@ -46,26 +47,6 @@ def parse_simple_yaml(path: Path) -> dict[str, Any]:
     if not isinstance(data, dict):
         return {}
     return data
-
-
-def extract_host(target: str) -> str:
-    if "://" in target:
-        parsed = urlparse(target)
-        return (parsed.hostname or "").lower().strip(".")
-    # Strip path and port: "localhost:8983/path" -> "localhost"
-    host = target.split("/", 1)[0].lower().strip(".")
-    if ":" in host:
-        host = host.split(":", 1)[0]
-    return host
-
-
-def match_pattern(host: str, target: str, pattern: str) -> bool:
-    pat = pattern.lower().strip(".")
-    if fnmatch.fnmatch(host, pat):
-        return True
-    if fnmatch.fnmatch(target.lower(), pat):
-        return True
-    return False
 
 
 def load_global_scope() -> dict[str, Any]:
@@ -125,44 +106,20 @@ def check_target(target: str, merged: dict) -> tuple[int, str]:
       2. Engagement in_scope → ALLOW (exit 0)  [overrides engagement denied]
       3. Engagement denied → REJECT (exit 2)
       4. Default-deny → UNKNOWN (exit 3 = ask human)
-    """
-    host = extract_host(target)
-    if not host:
-        return 3, f"Could not extract host from {target}"
 
-    # Separate global denied from engagement denied. merge_scopes() puts
-    # global denied first, then engagement denied, in merged["denied"].
-    # We need to check global denied FIRST, then in_scope, then engagement denied.
+    Delegates to the shared `labutil.check_target_scope` so the matching core
+    has a single source of truth (also used by lib/h1report.py). The merged
+    dict carries `_global_denied` / `_eng_denied` splits from merge_scopes();
+    if absent, all `denied` entries are treated as global (always-wins).
+    """
     global_denied = merged.get("_global_denied", [])
     eng_denied = merged.get("_eng_denied", [])
-    # Fallback: if the split isn't pre-computed, treat all denied as global-first
-    # (this preserves the global-denied-always-wins behavior even without the split)
+    in_scope = merged.get("in_scope", [])
     if not global_denied and not eng_denied:
-        global_denied = merged["denied"]
-
-    # 1. Global denied always rejects
-    for item in global_denied:
-        pattern = item.get("pattern", "") if isinstance(item, dict) else str(item)
-        reason = item.get("reason", "") if isinstance(item, dict) else ""
-        if match_pattern(host, target, pattern):
-            return 2, f"DENIED: {host} matches global denied pattern '{pattern}' ({reason})"
-
-    # 2. Engagement in-scope ALLOWS (overrides engagement denied)
-    for item in merged["in_scope"]:
-        pattern = item.get("pattern", "") if isinstance(item, dict) else str(item)
-        note = item.get("note", "") if isinstance(item, dict) else ""
-        if match_pattern(host, target, pattern):
-            return 0, f"OK: {host} matches in-scope pattern '{pattern}' ({note})"
-
-    # 3. Engagement-specific denied rejects
-    for item in eng_denied:
-        pattern = item.get("pattern", "") if isinstance(item, dict) else str(item)
-        reason = item.get("reason", "") if isinstance(item, dict) else ""
-        if match_pattern(host, target, pattern):
-            return 2, f"DENIED: {host} matches engagement denied pattern '{pattern}' ({reason})"
-
-    # 4. Default-deny → UNKNOWN (exit 3 = ask human)
-    return 3, f"UNKNOWN: {host} is not in scope; ask human before proceeding"
+        # Fallback: no pre-computed split — treat all denied as global-first
+        # (preserves global-denied-always-wins behavior).
+        global_denied = merged.get("denied", [])
+    return labutil.check_target_scope(target, in_scope, global_denied, eng_denied)
 
 
 def list_engagements() -> int:
@@ -184,7 +141,6 @@ def list_engagements() -> int:
         eng = scope.get("engagement", {})
         if not isinstance(eng, dict):
             eng = {}
-        name = eng.get("name", f.stem)
         etype = eng.get("type", "?")
         status = eng.get("status", "active")
         print(f"{f.stem:<30} {etype:<10} {status}")
@@ -249,7 +205,7 @@ def print_engagement_summary(name: str) -> int:
 def audit_log(target: str, result: str, engagement: str = "") -> None:
     AUDIT_LOG.parent.mkdir(parents=True, exist_ok=True)
     entry = {
-        "ts": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "ts": datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "action": "scope-check",
         "target": target,
         "engagement": engagement,
