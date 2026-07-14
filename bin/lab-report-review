@@ -156,18 +156,20 @@ def review_report(report_path: Path, poc_path: Path | None = None) -> list[Check
         if 'Response(' in poc_content and 'status: 404' in poc_content:
             poc_issues.append("Mock returns 404 — use status: 200 with '{}' body so SDK completes without throwing")
 
-    # Check report's embedded PoC too
-    embedded_poc = re.search(r"```javascript\n(.*?)```", content, re.DOTALL)
-    if embedded_poc:
-        epoc = embedded_poc.group(1)
+    # Check embedded PoCs (all javascript/js/ts/bash blocks)
+    embedded_pocs = re.findall(r"```(?:javascript|js|ts|bash|sh)\n(.*?)```", content, re.DOTALL)
+    for epoc in embedded_pocs:
         if "init?.headers?.Authorization" in epoc or 'init?.headers["Authorization"]' in epoc:
             poc_issues.append("Embedded PoC reads Authorization with capital A")
         if "maxRetries: 0" in epoc:
             poc_issues.append("Embedded PoC uses maxRetries:0 — use retry:false")
         if 'status: 404' in epoc and 'Response(' in epoc:
             poc_issues.append("Embedded mock returns 404 — use 200 with {}")
+        # Check for curl path traversal without --path-as-is
+        if re.search(r'curl\s+[^\n]*%2e%2e', epoc, re.IGNORECASE) and '--path-as-is' not in epoc:
+            poc_issues.append("Embedded PoC curl uses %2e%2e without --path-as-is")
 
-    # Check for curl path traversal without --path-as-is
+    # Check for curl path traversal without --path-as-is in PoC file
     if poc_content:
         if re.search(r'curl\s+[^\n]*%2e%2e', poc_content, re.IGNORECASE) and '--path-as-is' not in poc_content:
             poc_issues.append("PoC curl uses %2e%2e encoding without --path-as-is — curl normalizes it to ..")
@@ -180,7 +182,7 @@ def review_report(report_path: Path, poc_path: Path | None = None) -> list[Check
         results.append(CheckResult("PoC correctness", "PASS",
             "No common PoC issues detected"))
 
-    # Check for hardcoded tokens in PoC
+    # Check for hardcoded tokens in PoC file
     if poc_content:
         token_patterns = [
             (r'(?:secret|ntn_|sk-|Bearer\s+eyJ)[A-Za-z0-9_\-]{10,}', "integration/API token"),
@@ -193,6 +195,13 @@ def review_report(report_path: Path, poc_path: Path | None = None) -> list[Check
                 if not test_value_re.search(m.group(0)):
                     found_tokens.append(label)
                     break
+        # Also check embedded PoCs in the report
+        for epoc in embedded_pocs:
+            for pattern, label in token_patterns:
+                for m in re.finditer(pattern, epoc):
+                    if not test_value_re.search(m.group(0)):
+                        found_tokens.append(label)
+                        break
         if found_tokens:
             results.append(CheckResult("Hardcoded tokens", "FAIL",
                 f"PoC may contain hardcoded {', '.join(found_tokens)}",

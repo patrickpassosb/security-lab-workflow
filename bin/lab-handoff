@@ -247,10 +247,19 @@ def resolve_workspace(challenge_name: str, ctf_home_arg: str) -> tuple[Path, Pat
             return ctf_dir, ctf_dir / "solve_log.md", "ctf"
         return None
     
-    # 2. Auto-detect from cwd: walk up to find a program folder (has AGENTS.md
-    #    AND a challenges/ or findings/ subdir), then find the workspace.
+    # 2. Auto-detect from cwd: walk up to find a program folder.
+    #    Supports CTF (challenges/ dir, with or without AGENTS.md),
+    #    bounty (findings/ + AGENTS.md), and CVE (findings/ + AGENTS.md).
     search = cwd
     while search != search.parent:
+        # CTF: check for challenges/ dir (with or without AGENTS.md)
+        if (search / "challenges").is_dir():
+            ws = search / "challenges" / challenge_name
+            if ws.exists():
+                log = ws / "solve_log.md"
+                if log.exists():
+                    return ws, log, "ctf"
+                return ws, ws / "solve_log.md", "ctf"
         if (search / "AGENTS.md").exists():
             # CTF: program folder has challenges/
             if (search / "challenges").is_dir():
@@ -262,17 +271,21 @@ def resolve_workspace(challenge_name: str, ctf_home_arg: str) -> tuple[Path, Pat
                     return ws, ws / "solve_log.md", "ctf"
             # Bounty or CVE: program folder has findings/
             if (search / "findings").is_dir():
-                # Determine type from the program folder's parent (bounties/ vs cves/)
-                etype_default = "cve" if search.parent.name == "cves" else "bounty"
-                default_log = "cve_log.md" if etype_default == "cve" else "bounty_log.md"
+                # Determine type from the program folder's parent (bounties/ vs cves/ vs ctfs/)
+                parent_name = search.parent.name
+                if parent_name == "cves":
+                    etype_default = "cve"
+                elif parent_name == "ctfs":
+                    etype_default = "ctf"
+                else:
+                    etype_default = "bounty"
+                default_log = {"cve": "cve_log.md", "ctf": "solve_log.md", "bounty": "bounty_log.md"}[etype_default]
                 ws = search / "findings" / challenge_name
                 if ws.exists():
-                    # Check for existing log files to determine type
                     for logname, et in [(default_log, etype_default), ("bounty_log.md", "bounty"), ("cve_log.md", "cve"), ("solve_log.md", "ctf")]:
                         log = ws / logname
                         if log.exists():
                             return ws, log, et
-                    # No existing log — use default based on parent dir
                     return ws, ws / default_log, etype_default
         search = search.parent
     

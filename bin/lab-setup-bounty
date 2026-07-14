@@ -6,7 +6,7 @@ creates the engagement scope file, and scaffolds the program folder with
 AGENTS.md + CONTEXT.md — all in one command.
 
 Usage:
-    lab-setup-bounty <program-name> [--h1-url <url>] [--platform hackerone]
+    lab-setup-bounty <program-name> [--h1-url <url>] [--no-fetch] [--force]
 
 Examples:
     lab-setup-bounty notion --h1-url https://hackerone.com/notion
