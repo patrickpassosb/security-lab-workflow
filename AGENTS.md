@@ -112,9 +112,9 @@ See the `ctf-workflow` and `report-ctf` skills for the full protocol.
 ## CTF-day helpers
 
 - `~/security-lab/bin/lab-preflight <challenge> [--new --target <url>] [--ack-failed-paths]` is the enforcement gate. Run BEFORE any offensive tool. Enforces: read Failed Paths, check blackboard, check pivot alerts, verify Hint Theory, auto-start pivot-watch. Exits 1 if any gate fails — fix and re-run until exit 0.
-- `~/security-lab/bin/lab-handoff <challenge> --stuck|--solved|--pivoting` captures session context before pivoting or stopping. Appends session block to solve_log.md, updates Failed Paths, writes HANDOFF.md. Run this before leaving a challenge.
+- `~/security-lab/bin/lab-handoff <challenge> --stuck|--solved|--pivoting` captures session context before pivoting or stopping. Appends session block to the log file, updates Failed Paths, writes HANDOFF.md. Works for CTF (solve_log.md), bounty (bounty_log.md), and CVE (cve_log.md). Run this before leaving a session.
 - `~/security-lab/bin/lab-pivot-watch --start|--stop|--status` monitors challenge solve_logs for pivot rule violations. Alerts at 25 min (WARN) and 35 min (CRIT) to `.pivot-alerts`. Auto-started by `lab-preflight`.
-- `~/security-lab/bin/lab-new ctf <challenge> --target <target> --engagement <ctf-engagement>` creates the challenge workspace, `solve_log.md`, `work/exploit.py`, evidence folders, and a scope snapshot. (Backward compat: `ctf-new <challenge> --target <target>` still works.)
+- `~/security-lab/bin/lab-new ctf <challenge> --target <target> --engagement <ctf-engagement>` creates the challenge workspace, `solve_log.md`, `work/exploit.py`, evidence folders, and a scope snapshot. Auto-creates the engagement scope file if missing. (Backward compat: `ctf-new <challenge> --target <target>` still works.)
 - `~/security-lab/bin/ctf-evidence <challenge> <label> -- <command>` captures command output and metadata under `findings/ctf/<challenge>/evidence/`. Auto-detects workspace root across all engagement types.
 - `~/security-lab/bin/ctf-health web|crypto|pwn|forensics|all [--install]` checks category-specific readiness. With `--install`, agents may install missing local tools automatically when useful, preferring user-space/local paths and logging installs in `solve_log.md`.
 - `~/security-lab/bin/lab-scope <target> --engagement <name>` checks if a target is in scope for an engagement. `lab-scope --list` lists all engagements.
@@ -123,6 +123,14 @@ See the `ctf-workflow` and `report-ctf` skills for the full protocol.
 - `~/security-lab/templates/ctf/endpoint_siblings.txt` is the capped contextual route-family list for hidden endpoint probing.
 - `~/security-lab/templates/bounty/` contains `bounty_log.md`, `report_h1.md`, `exploit.py` for bug bounty workspaces.
 - `~/security-lab/templates/cve/` contains `cve_log.md`, `advisory_template.md`, `poc.py` for CVE research workspaces.
+
+## Bounty helpers
+
+- `~/security-lab/bin/lab-setup-bounty <program> [--h1-url <url>]` auto-fetches H1 program scope and scaffolds the program folder with AGENTS.md + CONTEXT.md + engagement scope file. Run this once per new bounty program.
+- `~/security-lab/bin/lab-report-review <finding-name> [--report path] [--poc path]` reviews a bounty report before submission. Checks: severity calibration, scope, PoC correctness (header case, curl path-as-is, mock 200, portable), body schema compatibility, version range, timeline, attachments, duplicate risk, consumer prerequisites. Run this BEFORE submitting to HackerOne.
+- `~/security-lab/bin/lab-sota-prime <program> [--target <domain>]` pre-loads SOTA target intelligence from gbrain before an engagement. Searches for prior CVEs, known vulns, architecture notes. Seeds a basic threat model if no prior knowledge exists. Run this at session start, before any testing.
+- `~/security-lab/bin/lab-install-js-recon [--check]` pre-installs JS recon tools (LinkFinder, SecretFinder, gf patterns) globally. These are file-processing tools, not scanners — safe for manual-only programs.
+- `~/security-lab/clones/` (gitignored) is the persistent directory for cloning target repos. Clones survive across sessions (unlike /tmp).
 
 Every active challenge must keep `solve_log.md` current: known facts, hypotheses, failed paths, evidence, next best test, primitive chain, tool installs, and final eval.
 
@@ -141,6 +149,8 @@ Invoke the right skill based on the task. Don't improvise — the skills encode 
 | Solve a stego or forensics challenge | `stego-forensics` | `~/security-lab/skills/security/stego-forensics/SKILL.md` |
 | Write a flag / finding report | `report-ctf` | `~/security-lab/skills/security/report-ctf/SKILL.md` |
 | Hunt for bounty bugs | `bounty-attack` | `~/security-lab/skills/security/bounty-attack/SKILL.md` |
+| Review a report before submission | `report-review` | `~/security-lab/skills/security/report-review/SKILL.md` |
+| Pre-load SOTA target intelligence | `sota-prime` | `~/security-lab/skills/security/sota-prime/SKILL.md` |
 
 ## Skills (gbrain — persistent memory)
 

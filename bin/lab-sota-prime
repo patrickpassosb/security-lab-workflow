@@ -1,0 +1,248 @@
+#!/usr/bin/env python3
+"""lab-sota-prime — pre-load SOTA target intelligence before an engagement.
+
+Searches gbrain for prior knowledge about a target (CVEs, known vulns,
+architecture notes, prior session findings) and presents a threat model
+summary. If the brain has no prior knowledge, it seeds it with a basic
+target profile.
+
+Usage:
+    lab-sota-prime <program-name>          # search gbrain for program
+    lab-sota-prime notion                   # e.g. for Notion bounty
+    lab-sota-prime --target api.notion.com  # search by target domain
+
+The agent runs this BEFORE starting any testing, so it starts with the
+best available context instead of from zero.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import subprocess
+import sys
+from pathlib import Path
+from typing import Any
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib"))
+import labutil  # noqa: E402
+
+LAB = labutil.LAB
+BOUNTIES_DIR = LAB / "bounties"
+CVE_DIR = LAB / "cves"
+
+RED = labutil.RED
+GREEN = labutil.GREEN
+YELLOW = labutil.YELLOW
+BOLD = labutil.BOLD
+MUTED = labutil.MUTED
+RESET = labutil.RESET
+
+
+def color(text: str, c: str) -> str:
+    return f"{c}{text}{RESET}"
+
+
+def gbrain_search(query: str, limit: int = 5) -> list[dict[str, Any]]:
+    """Search gbrain and return results."""
+    try:
+        result = subprocess.run(
+            ["gbrain", "search", query, "--limit", str(limit)],
+            capture_output=True, text=True, timeout=30,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            # gbrain search returns text results; try to parse or return raw
+            return [{"query": query, "raw": result.stdout[:500]}]
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        pass
+    return []
+
+
+def gbrain_list_filter(pattern: str) -> list[str]:
+    """List gbrain pages matching a pattern."""
+    try:
+        result = subprocess.run(
+            ["gbrain", "list"],
+            capture_output=True, text=True, timeout=15,
+        )
+        if result.returncode == 0:
+            lines = result.stdout.strip().split("\n")
+            return [l for l in lines if pattern.lower() in l.lower()]
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        pass
+    return []
+
+
+def check_program_dir(program: str) -> Path | None:
+    """Check if a bounty or CVE program folder exists."""
+    bounty_path = BOUNTIES_DIR / program
+    if bounty_path.is_dir():
+        return bounty_path
+    cve_path = CVE_DIR / program
+    if cve_path.is_dir():
+        return cve_path
+    return None
+
+
+def find_prior_findings(program: str) -> list[Path]:
+    """Find prior finding workspaces for this program."""
+    findings: list[Path] = []
+    program_dir = check_program_dir(program)
+    if not program_dir:
+        return findings
+    findings_dir = program_dir / "findings"
+    if findings_dir.is_dir():
+        for f in findings_dir.iterdir():
+            if f.is_dir() and (f / "report_h1.md").exists() or (f / "bounty_log.md").exists():
+                findings.append(f)
+    return findings
+
+
+def generate_threat_model(program: str, target_domain: str | None) -> str:
+    """Generate a basic threat model for the target."""
+    target = target_domain or program
+    return f"""# SOTA Threat Model: {program}
+
+## Target
+- Program: {program}
+- Domain: {target}
+
+## Common vulnerability classes for this target type
+
+### Web applications / SaaS (like {target})
+1. **IDOR / privilege escalation** — multi-tenant apps often have per-object
+   authz gaps. Test: change object IDs in API calls, access other users' data.
+2. **SSRF** — webhook/URL-fetch features. Test: point to 169.254.169.254
+   (cloud metadata), internal hosts.
+3. **Path traversal** — file upload/download, import/export. Test: ../ in
+   filenames, URL-encoded variants (%2e%2e), invalid encoding bypass (%zz).
+4. **XSS** — stored XSS in comments, titles, profile fields. Test: manual
+   payloads one at a time.
+5. **CSRF** — state-changing endpoints. Test: missing CSRF tokens on
+   integrations, callbacks.
+6. **Auth bypass** — JWT confusion, token reuse, session fixation.
+7. **API scope confusion** — internal API (/api/v3) vs public API. Test:
+   cross-workspace access, link-share bypass.
+
+### Pre-engagement checklist
+- [ ] Create testing account (use HackerOne email or alias)
+- [ ] Create SECOND account for cross-account IDOR testing
+- [ ] Check if automated scanning is allowed (most programs: NO)
+- [ ] Download and review the target's public API docs
+- [ ] Clone target's GitHub repos to ~/security-lab/clones/
+- [ ] Run JS bundle analysis (LinkFinder + SecretFinder + gf)
+- [ ] Search gbrain for prior knowledge: `gbrain search "{program}"`
+
+## Known CVEs / prior reports
+(No prior knowledge in gbrain — this is a fresh engagement.)
+"""
+
+
+def seed_gbrain(program: str, target_domain: str | None) -> None:
+    """Seed gbrain with a basic target profile if nothing exists."""
+    slug = f"sota-{program}-threat-model"
+    threat_model = generate_threat_model(program, target_domain)
+    try:
+        subprocess.run(
+            ["gbrain", "put", slug, "--type", "gstack/note",
+             "--title", f"SOTA Threat Model: {program}",
+             "--body", threat_model],
+            capture_output=True, text=True, timeout=15,
+        )
+        print(color(f"  [PASS]", GREEN) + f" Seeded gbrain with threat model (slug={slug})")
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        print(color(f"  [WARN]", YELLOW) + " Could not seed gbrain (not installed?)")
+
+
+def main() -> int:
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        description="Pre-load SOTA target intelligence before an engagement",
+    )
+    parser.add_argument("program", help="Program name (e.g. notion, log4j)")
+    parser.add_argument("--target", help="Target domain (e.g. api.notion.com)")
+    args = parser.parse_args()
+
+    program = args.program
+    target_domain = args.target
+
+    print(color(f"\n  lab-sota-prime — {program}", BOLD))
+    print(color(f"  {'=' * 50}", BOLD))
+
+    # 1. Check if program folder exists
+    print(f"\n  [1/4] Checking program folder...")
+    program_dir = check_program_dir(program)
+    if program_dir:
+        print(color(f"  [PASS]", GREEN) + f" Program folder: {program_dir}")
+    else:
+        print(color(f"  [WARN]", YELLOW) + f" No program folder found for '{program}'")
+        print(f"         Run: lab-setup-bounty {program}")
+
+    # 2. Find prior findings
+    print(f"\n  [2/4] Searching for prior findings...")
+    prior = find_prior_findings(program)
+    if prior:
+        print(color(f"  [PASS]", GREEN) + f" {len(prior)} prior finding(s):")
+        for f in prior:
+            print(f"         {f.name}")
+    else:
+        print(color(f"  [INFO]", MUTED) + " No prior findings")
+
+    # 3. Search gbrain for SOTA knowledge
+    print(f"\n  [3/4] Searching gbrain for SOTA knowledge...")
+    queries = [
+        f"{program} vulnerability",
+        f"{program} CVE",
+        f"{program} bug bounty",
+        f"{program} IDOR",
+        f"{program} SSRF",
+    ]
+    if target_domain:
+        queries.insert(0, target_domain)
+
+    found_any = False
+    for q in queries:
+        results = gbrain_search(q, limit=3)
+        if results:
+            found_any = True
+            print(color(f"  [HIT] ", GREEN) + f'gbrain search "{q}":')
+            for r in results:
+                raw = r.get("raw", "")[:200]
+                print(f"         {raw}")
+            break
+
+    if not found_any:
+        print(color(f"  [EMPTY]", MUTED) + f" No prior gbrain knowledge for '{program}'")
+
+    # Also check gbrain list
+    gbrain_pages = gbrain_list_filter(program)
+    if gbrain_pages:
+        print(color(f"  [HIT] ", GREEN) + f"gbrain pages matching '{program}':")
+        for p in gbrain_pages[:5]:
+            print(f"         {p}")
+    elif not found_any:
+        print(color(f"  [INFO]", MUTED) + " No gbrain pages found")
+
+    # 4. Seed gbrain if empty
+    print(f"\n  [4/4] Seeding gbrain with threat model...")
+    if not found_any and not gbrain_pages:
+        seed_gbrain(program, target_domain)
+    else:
+        print(color(f"  [SKIP]", MUTED) + " gbrain already has knowledge — skipping seed")
+
+    # Summary
+    print()
+    print(color(f"  {'=' * 50}", BOLD))
+    if program_dir:
+        print(color(f"  READY", GREEN) + f" — cd '{program_dir}' && opencode")
+        print(f"  The agent will read AGENTS.md and start with the SOTA context above.")
+    else:
+        print(color(f"  PARTIAL", YELLOW) + f" — create the program folder first:")
+        print(f"  Run: lab-setup-bounty {program}")
+    print()
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -4,6 +4,7 @@ tools/
 wordlists/
 proxy/
 containers/
+clones/
 
 # ─── Engagement-specific workspaces (YOUR data, never committed) ───
 ctfs/

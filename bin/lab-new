@@ -184,11 +184,25 @@ def main() -> int:
 
     eng_scope_path = ENGAGEMENTS_DIR / f"{engagement}.yaml"
     if not eng_scope_path.exists():
-        print(f"ERROR: engagement scope file not found: {eng_scope_path}", file=sys.stderr)
-        print(f"Available engagements:", file=sys.stderr)
-        for f in sorted(ENGAGEMENTS_DIR.glob("*.yaml")):
-            print(f"  {f.stem}", file=sys.stderr)
-        return 2
+        # Auto-create a minimal engagement scope file if it doesn't exist
+        # (fixes the issue where lab-scope/lab-new fail because the engagement
+        # file is missing even though a snapshot exists in the program folder)
+        ENGAGEMENTS_DIR.mkdir(parents=True, exist_ok=True)
+        minimal_scope = f"""# Engagement scope — {engagement}
+# Auto-created by lab-new. Update with the full scope from the program page.
+
+engagement:
+  name: "{engagement}"
+  type: "{args['type']}"
+
+in_scope: []
+# Add in-scope targets manually, e.g.:
+#  - pattern: "example.com"
+#    note: "Main web app"
+"""
+        eng_scope_path.write_text(minimal_scope, encoding="utf-8")
+        print(f"[INFO] Auto-created engagement scope file: {eng_scope_path}", file=sys.stderr)
+        print(f"[INFO] Update it with the full scope from the program page.", file=sys.stderr)
 
     scope_checked = "no"
     if args["target"]:
