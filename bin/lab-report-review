@@ -1,0 +1,376 @@
+#!/usr/bin/env python3
+"""lab-report-review — pre-submission quality check for bounty reports.
+
+Reviews report_h1.md for common quality issues that lead to downgrades,
+rejections, or duplicate closes. Outputs a structured PASS/FAIL/WARN
+checklist with specific fix guidance.
+
+Usage:
+    lab-report-review <finding-name>          # find report in bounty workspace
+    lab-report-review --report path/to/report # review a specific file
+    lab-report-review --report path --poc path/to/poc.mjs  # also check PoC
+
+Exit codes:
+    0 = all checks PASS
+    1 = one or more FAIL
+    2 = report not found
+
+Checks:
+    1. Severity calibration (not oversold/undersold)
+    2. Scope correctness (asset matches vulnerability)
+    3. PoC correctness (header case, curl path-as-is, mock returns 200, portable)
+    4. Body schema compatibility (destructive mappings qualified)
+    5. Version range (affected versions stated and verified)
+    6. Timeline accuracy ("Discovered and validated" if not yet submitted)
+    7. Attachments (local paths -> "attached PoC", portable imports)
+    8. Duplicate risk (search documented)
+    9. Consumer prerequisites (stated if needed)
+"""
+
+from __future__ import annotations
+
+import re
+import sys
+from pathlib import Path
+
+# Import shared labutil helpers
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib"))
+import labutil  # noqa: E402
+
+LAB = labutil.LAB
+BOUNTIES_DIR = LAB / "bounties"
+
+RED = labutil.RED
+GREEN = labutil.GREEN
+YELLOW = labutil.YELLOW
+BOLD = labutil.BOLD
+RESET = labutil.RESET
+
+
+def color(text: str, c: str) -> str:
+    return f"{c}{text}{RESET}"
+
+
+class CheckResult:
+    def __init__(self, name: str, status: str, detail: str = "", fix: str = ""):
+        self.name = name
+        self.status = status  # PASS, FAIL, WARN
+        self.detail = detail
+        self.fix = fix
+
+    def __str__(self) -> str:
+        c = {"PASS": GREEN, "FAIL": RED, "WARN": YELLOW}[self.status]
+        line = f"  [{color(self.status, c)}] {self.name}"
+        if self.detail:
+            line += f"\n         {self.detail}"
+        if self.fix:
+            line += f"\n         Fix: {self.fix}"
+        return line
+
+
+def find_report(finding_name: str) -> Path | None:
+    """Find report_h1.md in a bounty finding workspace."""
+    if not BOUNTIES_DIR.exists():
+        return None
+    # Search all bounty program folders
+    for program_dir in BOUNTIES_DIR.iterdir():
+        if not program_dir.is_dir():
+            continue
+        findings = program_dir / "findings" / finding_name
+        if findings.is_dir():
+            report = findings / "report_h1.md"
+            if report.exists():
+                return report
+    # Also check legacy global findings
+    legacy = LAB / "findings" / "bounty" / finding_name / "report_h1.md"
+    if legacy.exists():
+        return legacy
+    return None
+
+
+def review_report(report_path: Path, poc_path: Path | None = None) -> list[CheckResult]:
+    """Run all review checks on a report and optional PoC."""
+    results: list[CheckResult] = []
+    content = report_path.read_text(encoding="utf-8", errors="replace")
+    poc_content = ""
+    if poc_path and poc_path.exists():
+        poc_content = poc_path.read_text(encoding="utf-8", errors="replace")
+
+    # --- 1. Severity calibration ---
+    severity_match = re.search(r"\*\*Severity:\*\*\s*(\w+)", content, re.IGNORECASE)
+    severity = severity_match.group(1).lower() if severity_match else ""
+    if severity in ("medium", "high"):
+        # Check if the report oversells — mentions "critical" impact with Medium severity
+        has_critical_claim = bool(re.search(r"\bCritical\b.*\$5,?000|\bcross-scope data access\b", content, re.IGNORECASE))
+        has_authz_holds = bool(re.search(r"authorization\s+(?:remains\s+)?intact|authz\s+holds|server-side\s+auth", content, re.IGNORECASE))
+        if severity == "medium" and has_critical_claim and not has_authz_holds:
+            results.append(CheckResult("Severity calibration", "FAIL",
+                "Report mentions Critical impact claims but severity is Medium",
+                "Either downgrade impact language to match Medium, or justify why it's not Critical"))
+        elif severity == "high" and has_authz_holds:
+            results.append(CheckResult("Severity calibration", "WARN",
+                "Severity is High but report says server authz holds — consider Medium",
+                "If server authz holds and no cross-scope data access, Medium is more defensible"))
+        else:
+            results.append(CheckResult("Severity calibration", "PASS",
+                f"Severity={severity}, claims match severity"))
+    elif severity:
+        results.append(CheckResult("Severity calibration", "PASS",
+            f"Severity={severity}"))
+    else:
+        results.append(CheckResult("Severity calibration", "FAIL",
+            "No severity field found in report",
+            "Add **Severity:** Medium/High/Critical to the header"))
+
+    # --- 2. Scope correctness ---
+    asset_match = re.search(r"\*\*Asset:\*\*\s*(.+)", content)
+    target_match = re.search(r"\*\*Target:\*\*\s*(.+)", content)
+    if asset_match or target_match:
+        asset = (asset_match or target_match).group(1).strip()
+        # Generic check: if report says authz holds but asset is an API host, warn
+        has_authz_holds = bool(re.search(r"authorization\s+(?:remains\s+)?intact|authz\s+holds|server-side\s+auth", content, re.IGNORECASE))
+        has_privesc_scope = bool(re.search(r"privesc|privilege\s+esc", content, re.IGNORECASE))
+        if has_authz_holds and has_privesc_scope:
+            results.append(CheckResult("Scope correctness", "WARN",
+                f"Asset={asset} but report says authz holds and mentions privesc",
+                "If the bug doesn't provide privesc, file under the appropriate non-API asset (e.g. GitHub repos)"))
+        else:
+            results.append(CheckResult("Scope correctness", "PASS",
+                f"Asset={asset}"))
+    else:
+        results.append(CheckResult("Scope correctness", "WARN",
+            "No Asset/Target field found",
+            "Add **Asset:** field to identify the H1 scope asset"))
+
+    # --- 3. PoC correctness ---
+    poc_issues: list[str] = []
+    if poc_content:
+        if "init?.headers?.Authorization" in poc_content or 'init?.headers["Authorization"]' in poc_content:
+            poc_issues.append("PoC reads Authorization header with capital A — use new Headers(init?.headers).get('authorization')")
+        if ".catch(() => {})" in poc_content or ".catch(()=>{})" in poc_content:
+            poc_issues.append("PoC uses .catch(()=>{}) — use explicit assertions instead")
+        if "maxRetries: 0" in poc_content:
+            poc_issues.append("PoC uses maxRetries:0 — use retry:false (the correct top-level option)")
+        if "/tmp/" in poc_content and "import" in poc_content:
+            poc_issues.append("PoC imports from /tmp path — use 'import { Client } from \"@notionhq/client\"' for portability")
+        if "globalThis.fetch" in poc_content and "fetch:" not in poc_content:
+            poc_issues.append("PoC overrides globalThis.fetch — use the Client's fetch option instead")
+        if 'Response(' in poc_content and 'status: 404' in poc_content:
+            poc_issues.append("Mock returns 404 — use status: 200 with '{}' body so SDK completes without throwing")
+
+    # Check embedded PoCs (all javascript/js/ts/bash blocks)
+    embedded_pocs = re.findall(r"```(?:javascript|js|ts|bash|sh)\n(.*?)```", content, re.DOTALL)
+    for epoc in embedded_pocs:
+        if "init?.headers?.Authorization" in epoc or 'init?.headers["Authorization"]' in epoc:
+            poc_issues.append("Embedded PoC reads Authorization with capital A")
+        if "maxRetries: 0" in epoc:
+            poc_issues.append("Embedded PoC uses maxRetries:0 — use retry:false")
+        if 'status: 404' in epoc and 'Response(' in epoc:
+            poc_issues.append("Embedded mock returns 404 — use 200 with {}")
+        # Check for curl path traversal without --path-as-is
+        if re.search(r'curl\s+[^\n]*%2e%2e', epoc, re.IGNORECASE) and '--path-as-is' not in epoc:
+            poc_issues.append("Embedded PoC curl uses %2e%2e without --path-as-is")
+
+    # Check for curl path traversal without --path-as-is in PoC file
+    if poc_content:
+        if re.search(r'curl\s+[^\n]*%2e%2e', poc_content, re.IGNORECASE) and '--path-as-is' not in poc_content:
+            poc_issues.append("PoC curl uses %2e%2e encoding without --path-as-is — curl normalizes it to ..")
+
+    if poc_issues:
+        results.append(CheckResult("PoC correctness", "FAIL",
+            f"{len(poc_issues)} issue(s) found",
+            "; ".join(poc_issues)))
+    else:
+        results.append(CheckResult("PoC correctness", "PASS",
+            "No common PoC issues detected"))
+
+    # Check for hardcoded tokens in PoC file
+    if poc_content:
+        token_patterns = [
+            (r'(?:secret|ntn_|sk-|Bearer\s+eyJ)[A-Za-z0-9_\-]{10,}', "integration/API token"),
+            (r'-----BEGIN\s+(?:RSA\s+)?PRIVATE\s+KEY-----', "private key"),
+        ]
+        test_value_re = re.compile(r'(?:test|example|fake|placeholder|dummy|xxxx|secret_test)', re.IGNORECASE)
+        found_tokens = []
+        for pattern, label in token_patterns:
+            for m in re.finditer(pattern, poc_content):
+                if not test_value_re.search(m.group(0)):
+                    found_tokens.append(label)
+                    break
+        # Also check embedded PoCs in the report
+        for epoc in embedded_pocs:
+            for pattern, label in token_patterns:
+                for m in re.finditer(pattern, epoc):
+                    if not test_value_re.search(m.group(0)):
+                        found_tokens.append(label)
+                        break
+        if found_tokens:
+            results.append(CheckResult("Hardcoded tokens", "FAIL",
+                f"PoC may contain hardcoded {', '.join(found_tokens)}",
+                "Use environment variables for all secrets"))
+        else:
+            results.append(CheckResult("Hardcoded tokens", "PASS",
+                "No obvious hardcoded tokens in PoC"))
+
+    # --- 4. Body schema compatibility ---
+    if ("destructive" in content.lower() or ("delete" in content.lower() and "redirect" in content.lower())) and "non-destructive" not in content.lower():
+        has_mock_confirmed = bool(re.search(r"mock-confirmed|not.*executed.*live|not.*performed", content, re.IGNORECASE))
+        if not has_mock_confirmed:
+            results.append(CheckResult("Destructive mapping qualification", "WARN",
+                "Report claims destructive endpoint redirect but doesn't qualify as mock-confirmed",
+                "Add 'mock-confirmed URL/method/body construction, not live destructive execution'"))
+        else:
+            results.append(CheckResult("Destructive mapping qualification", "PASS",
+                "Destructive mappings qualified as mock-confirmed"))
+    else:
+        results.append(CheckResult("Destructive mapping qualification", "PASS",
+            "No destructive mappings claimed"))
+
+    # --- 5. Version range ---
+    version_match = re.search(r"(?:v\d+\.\d+\.\d+)\s*(?:through|to|-)\s*(?:v?\d+\.\d+\.\d+|latest)", content, re.IGNORECASE)
+    has_affected_versions = bool(re.search(r"Affected\s+(?:versions|components)", content, re.IGNORECASE))
+    if version_match:
+        results.append(CheckResult("Version range", "PASS",
+            f"Affected versions stated: {version_match.group(0)}"))
+    elif has_affected_versions:
+        results.append(CheckResult("Version range", "WARN",
+            "Affected Components section exists but no explicit version range found",
+            "Add 'vX.Y.0 through vX.Y.0' format version range"))
+    else:
+        results.append(CheckResult("Version range", "FAIL",
+            "No affected version range found",
+            "Add affected versions (check git tags: git tag --contains <commit>)"))
+
+    # --- 6. Timeline accuracy ---
+    # Check for "Reported via HackerOne" but NOT when negated
+    timeline_reported = re.search(r"Reported\s+via\s+HackerOne", content, re.IGNORECASE)
+    timeline_negated = re.search(r"not\s+(?:yet\s+)?(?:been\s+)?Reported\s+via\s+HackerOne", content, re.IGNORECASE)
+    if timeline_reported and not timeline_negated:
+        results.append(CheckResult("Timeline accuracy", "FAIL",
+            "Timeline says 'Reported via HackerOne' — has it been submitted?",
+            "If not yet submitted, change to 'Discovered and validated'"))
+    else:
+        discovered = bool(re.search(r"Discovered\s+and\s+validated", content, re.IGNORECASE))
+        if discovered:
+            results.append(CheckResult("Timeline accuracy", "PASS",
+                "Timeline says 'Discovered and validated'"))
+        else:
+            results.append(CheckResult("Timeline accuracy", "WARN",
+                "No timeline entry found",
+                "Add a Disclosure Timeline section with 'Discovered and validated'"))
+
+    # --- 7. Attachments ---
+    # Match local paths like evidence/..., extracts/..., work/... but NOT URLs containing those words
+    local_refs = re.findall(r"(?:^|\s|\(|`)(?:evidence|extracts|work)/[^\s)`]+\.(?:out|md|mjs|js|py|json)", content, re.MULTILINE)
+    if local_refs:
+        results.append(CheckResult("Attachments", "FAIL",
+            f"Report references {len(local_refs)} local file path(s): {local_refs[0][:50]}...",
+            "Replace local paths with 'attached PoC' / 'attached sanitized output'"))
+    else:
+        results.append(CheckResult("Attachments", "PASS",
+            "No local file path references found"))
+
+    # --- 8. Duplicate risk ---
+    has_dup_search = bool(re.search(r"searched.*(?:GitHub|issues|PRs|duplicate)", content, re.IGNORECASE))
+    has_no_duplicate = bool(re.search(r"not\s+a\s+duplicate|no\s+prior\s+report", content, re.IGNORECASE))
+    if has_dup_search or has_no_duplicate:
+        results.append(CheckResult("Duplicate risk", "PASS",
+            "Duplicate search documented in report"))
+    else:
+        results.append(CheckResult("Duplicate risk", "WARN",
+            "No duplicate search mentioned in report",
+            "Add a note documenting what was searched (GitHub issues, H1 disclosed, CVE databases)"))
+
+    # --- 9. Consumer prerequisites ---
+    has_prereqs = bool(re.search(r"prerequisites?|attacker-controlled.*(?:ID|input)|no.*(?:strict|upstream).*validation|observable.*response", content, re.IGNORECASE))
+    has_deputy = bool(re.search(r"confused.deputy|deputy.*scenario", content, re.IGNORECASE))
+    if has_deputy and not has_prereqs:
+        results.append(CheckResult("Consumer prerequisites", "WARN",
+            "Report mentions confused-deputy but doesn't state consumer prerequisites",
+            "Add: attacker-controlled ID, no strict upstream validation, observable response or state-changing operation"))
+    elif has_prereqs:
+        results.append(CheckResult("Consumer prerequisites", "PASS",
+            "Consumer prerequisites stated"))
+    else:
+        results.append(CheckResult("Consumer prerequisites", "PASS",
+            "Not applicable (no deputy scenario claimed)"))
+
+    # --- 10. API version ---
+    # Check if report mentions an older API version for curl while SDK uses a newer default
+    old_version_match = re.search(r"2022-\d{2}-\d{2}", content)
+    new_version_match = re.search(r"2025-\d{2}-\d{2}|SDK.*default.*API.*version", content, re.IGNORECASE)
+    if old_version_match and not new_version_match:
+        results.append(CheckResult("API version", "WARN",
+            f"Report mentions older API version ({old_version_match.group(0)}) — check if SDK default is newer",
+            "State the SDK's default API version and note the older version was only for curl"))
+    else:
+        results.append(CheckResult("API version", "PASS",
+            "API version correct or not applicable"))
+
+    return results
+
+
+def main() -> int:
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        description="Pre-submission quality check for bounty reports",
+    )
+    parser.add_argument("finding_name", nargs="?", help="Finding name (searches bounty workspaces)")
+    parser.add_argument("--report", help="Path to report_h1.md")
+    parser.add_argument("--poc", help="Path to PoC file (optional)")
+    args = parser.parse_args()
+
+    # Find the report
+    if args.report:
+        report_path = Path(args.report).expanduser()
+        if not report_path.exists():
+            print(color(f"  FAIL: report not found: {report_path}", RED))
+            return 2
+    elif args.finding_name:
+        report_path = find_report(args.finding_name)
+        if not report_path:
+            print(color(f"  FAIL: report not found for finding '{args.finding_name}'", RED))
+            print(f"  Searched: {BOUNTIES_DIR}/*/findings/{args.finding_name}/report_h1.md")
+            return 2
+    else:
+        parser.print_help()
+        return 2
+
+    poc_path = Path(args.poc).expanduser() if args.poc else None
+
+    print(color(f"\n  lab-report-review — {report_path.name}", BOLD))
+    print(color(f"  {'=' * 50}", BOLD))
+    print(f"  Report: {report_path}")
+    if poc_path:
+        print(f"  PoC:    {poc_path}")
+    print()
+
+    results = review_report(report_path, poc_path)
+
+    passes = sum(1 for r in results if r.status == "PASS")
+    fails = sum(1 for r in results if r.status == "FAIL")
+    warns = sum(1 for r in results if r.status == "WARN")
+
+    for r in results:
+        print(r)
+
+    print()
+    print(color(f"  {'=' * 50}", BOLD))
+    summary = f"  {passes} PASS, {warns} WARN, {fails} FAIL"
+    if fails:
+        print(color(summary, RED))
+        print(color(f"  FIX {fails} issue(s) before submitting.", RED))
+        return 1
+    elif warns:
+        print(color(summary, YELLOW))
+        print(color(f"  Review {warns} warning(s) — may not block submission but could improve it.", YELLOW))
+        return 0
+    else:
+        print(color(summary, GREEN))
+        print(color("  Report looks good to submit.", GREEN))
+        return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

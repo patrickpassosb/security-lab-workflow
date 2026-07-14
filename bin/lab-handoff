@@ -1,17 +1,19 @@
 #!/usr/bin/env python3
-"""lab-handoff — mechanical session-end context capture for CTF challenges.
+"""lab-handoff — mechanical session-end context capture for all engagement types.
 
-Run this before pivoting away from a challenge or stopping a session. It
+Run this before pivoting away from a challenge/finding or stopping a session. It
 captures what was tested, what failed, and what the next agent should try.
 This makes cross-session handoff mechanical rather than depending on the
 agent remembering to do it.
 
-The #1 failure mode in CTFs is agents not reading prior
-session context and repeating dead ends 10 times. lab-handoff fixes the
-supply side: it ensures the context is actually written.
+The #1 failure mode is agents not reading prior session context and repeating
+dead ends 10 times. lab-handoff fixes the supply side: it ensures the context
+is actually written.
+
+Supports: CTF (solve_log.md), bounty (bounty_log.md), CVE (cve_log.md).
 
 Actions:
-  1. Append a ### Session N block to solve_log.md with structured template
+  1. Append a ### Session N block to the log file with structured template
   2. Update Failed Paths / Do Not Repeat with new dead ends
   3. Write/update HANDOFF.md with TL;DR for the next agent
 
@@ -174,7 +176,7 @@ def update_failed_paths(solve_log_path, new_dead_ends):
     labutil.atomic_write(solve_log_path, content)
 
 def write_handoff_md(challenge_dir, challenge_name, status, summary, 
-                     flag, next_test, read_next, missing_primitive):
+                     flag, next_test, read_next, missing_primitive, engagement_type="ctf"):
     """Write or update HANDOFF.md with TL;DR for the next agent."""
     handoff_path = challenge_dir / "HANDOFF.md"
     ts = datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
@@ -209,7 +211,12 @@ def write_handoff_md(challenge_dir, challenge_name, status, summary,
             block += f"- {item}\n"
         block += "\n"
     
-    block += "**Before attacking:** run `lab-preflight {name}` — it will show you the Failed Paths.\n".format(name=challenge_name)
+    if engagement_type == "ctf":
+        block += "**Before attacking:** run `lab-preflight {name}` — it will show you the Failed Paths.\n".format(name=challenge_name)
+    elif engagement_type == "bounty":
+        block += "**Before testing:** re-read the program's AGENTS.md and check the Failed Paths in the bounty log.\n"
+    elif engagement_type == "cve":
+        block += "**Before testing:** re-read the CVE project's AGENTS.md and check the Failed Paths in the cve log.\n"
 
     content += block
     labutil.atomic_write(handoff_path, content)
@@ -222,29 +229,111 @@ def log_audit(challenge_name, action, detail):
         detail=detail,
     )
 
+def resolve_workspace(challenge_name: str, ctf_home_arg: str) -> tuple[Path, Path, str] | None:
+    """Resolve the workspace dir, log file, and engagement type.
+    
+    Supports CTF (challenges/ + solve_log.md), bounty (findings/ + bounty_log.md),
+    and CVE (findings/ + cve_log.md) engagement types.
+    
+    Returns (workspace_dir, log_path, engagement_type) or None if not found.
+    """
+    cwd = Path.cwd()
+    
+    # 1. Explicit --ctf-home override (backward compat, CTF only)
+    if ctf_home_arg:
+        home = Path(os.path.expanduser(ctf_home_arg))
+        ctf_dir = home / "challenges" / challenge_name
+        if ctf_dir.exists():
+            return ctf_dir, ctf_dir / "solve_log.md", "ctf"
+        return None
+    
+    # 2. Auto-detect from cwd: walk up to find a program folder.
+    #    Supports CTF (challenges/ dir, with or without AGENTS.md),
+    #    bounty (findings/ + AGENTS.md), and CVE (findings/ + AGENTS.md).
+    search = cwd
+    while search != search.parent:
+        # CTF: check for challenges/ dir (with or without AGENTS.md)
+        if (search / "challenges").is_dir():
+            ws = search / "challenges" / challenge_name
+            if ws.exists():
+                log = ws / "solve_log.md"
+                if log.exists():
+                    return ws, log, "ctf"
+                return ws, ws / "solve_log.md", "ctf"
+        if (search / "AGENTS.md").exists():
+            # CTF: program folder has challenges/
+            if (search / "challenges").is_dir():
+                ws = search / "challenges" / challenge_name
+                if ws.exists():
+                    log = ws / "solve_log.md"
+                    if log.exists():
+                        return ws, log, "ctf"
+                    return ws, ws / "solve_log.md", "ctf"
+            # Bounty or CVE: program folder has findings/
+            if (search / "findings").is_dir():
+                # Determine type from the program folder's parent (bounties/ vs cves/ vs ctfs/)
+                parent_name = search.parent.name
+                if parent_name == "cves":
+                    etype_default = "cve"
+                elif parent_name == "ctfs":
+                    etype_default = "ctf"
+                else:
+                    etype_default = "bounty"
+                default_log = {"cve": "cve_log.md", "ctf": "solve_log.md", "bounty": "bounty_log.md"}[etype_default]
+                ws = search / "findings" / challenge_name
+                if ws.exists():
+                    for logname, et in [(default_log, etype_default), ("bounty_log.md", "bounty"), ("cve_log.md", "cve"), ("solve_log.md", "ctf")]:
+                        log = ws / logname
+                        if log.exists():
+                            return ws, log, et
+                    return ws, ws / default_log, etype_default
+        search = search.parent
+    
+    # 3. Legacy global paths
+    for base, subdir, logname, etype in [
+        (LAB / "ctfs", challenge_name, "solve_log.md", "ctf"),
+        (LAB / "bounties", challenge_name, "bounty_log.md", "bounty"),
+        (LAB / "cves", challenge_name, "cve_log.md", "cve"),
+        (LAB / "findings" / "ctf", challenge_name, "solve_log.md", "ctf"),
+        (LAB / "findings" / "bounty", challenge_name, "bounty_log.md", "bounty"),
+        (LAB / "findings" / "cve", challenge_name, "cve_log.md", "cve"),
+    ]:
+        ws = base / subdir
+        log = ws / logname
+        if log.exists():
+            return ws, log, etype
+        # Also check if the workspace dir exists (log may not be created yet)
+        if ws.is_dir():
+            return ws, ws / logname, etype
+    
+    return None
+
+
 def main():
     parser = argparse.ArgumentParser(
-        description='CTF session handoff — capture context for the next agent',
+        description='Session handoff — capture context for the next agent (CTF, bounty, or CVE)',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Run this before pivoting or stopping. It captures:
-  1. Session block in solve_log.md (what was tested, what failed, what's next)
+  1. Session block in the log file (what was tested, what failed, what's next)
   2. Updates Failed Paths / Do Not Repeat with new dead ends
   3. HANDOFF.md with TL;DR for the next agent
 
+Works for CTF (solve_log.md), bounty (bounty_log.md), and CVE (cve_log.md).
+
 Examples:
   lab-handoff sheets --stuck --next "try the same-site navigation approach"
-  lab-handoff sheets --solved --flag "flag{abc123}" --summary "SameSite cookie chain"
-  lab-handoff sheets --pivoting --summary "stuck on CSP bypass, trying other challenges"
+  lab-handoff sdk-path-traversal-bypass --solved --summary "Found bypass via %zz"
+  lab-handoff log4j --pivoting --summary "stuck on RCE, trying other vectors"
 """)
-    parser.add_argument('challenge', help='Challenge name')
-    parser.add_argument('--ctf-home', default=DEFAULT_CTF_HOME, help='CTF home directory')
+    parser.add_argument('challenge', help='Challenge/finding name')
+    parser.add_argument('--ctf-home', default=DEFAULT_CTF_HOME, help='CTF home directory (CTF only, backward compat)')
     parser.add_argument('--status', choices=['solved', 'stuck', 'pivoting'],
                         help='Session outcome status')
-    parser.add_argument('--solved', action='store_true', help='Challenge was solved')
+    parser.add_argument('--solved', action='store_true', help='Challenge/finding was solved')
     parser.add_argument('--stuck', action='store_true', help='Stuck — missing primitive')
     parser.add_argument('--pivoting', action='store_true', help='Pivoting to another challenge')
-    parser.add_argument('--accepted-flag', dest='flag', help='Accepted flag value (with --solved). Renamed from --flag to disambiguate from the pre-acceptance FLAG CANDIDATE handoff protocol.')
+    parser.add_argument('--accepted-flag', dest='flag', help='Accepted flag value (with --solved, CTF only)')
     parser.add_argument('--flag', dest='flag', help=argparse.SUPPRESS)  # backward compat
     parser.add_argument('--summary', help='One-line summary of the session')
     parser.add_argument('--next', help='Next best test for the next agent')
@@ -270,36 +359,51 @@ Examples:
     else:
         status = "pivoting"  # default
 
-    # Resolve ctf_home: explicit flag > cwd detection > fail
-    ctf_home_str = args.ctf_home
-    if not ctf_home_str:
-        cwd = Path.cwd()
-        # If cwd is inside a .../challenges/<name> dir, ctf_home is the grandparent's parent
-        if (cwd / "solve_log.md").exists() and cwd.name == args.challenge:
-            ctf_home_str = str(cwd.parent.parent)
-        # If cwd contains a challenges/ dir, it's the ctf home
-        elif (cwd / "challenges").is_dir():
-            ctf_home_str = str(cwd)
-    if not ctf_home_str:
-        print(color("\n  FAIL: could not determine CTF home. Pass --ctf-home or run from a program folder.", RED))
+    # Resolve workspace: auto-detect CTF/bounty/CVE, fall back to --ctf-home
+    resolved = resolve_workspace(args.challenge, args.ctf_home)
+    if not resolved:
+        print(color("\n  FAIL: could not find workspace for '" + args.challenge + "'.", RED))
+        print("  Pass --ctf-home or run from a program folder (bounties/<program>/ or ctfs/<ctf>/).", file=sys.stderr)
         sys.exit(1)
-    ctf_home = Path(os.path.expanduser(ctf_home_str))
-    challenge_dir = ctf_home / "challenges" / args.challenge
-    solve_log_path = challenge_dir / "solve_log.md"
+    
+    challenge_dir, solve_log_path, engagement_type = resolved
 
     if not challenge_dir.exists():
-        print(color(f"\n  FAIL: challenge directory not found: {challenge_dir}", RED))
+        print(color(f"\n  FAIL: workspace directory not found: {challenge_dir}", RED))
         sys.exit(1)
 
+    # Create log file if it doesn't exist (bounty/CVE workspaces may not have one yet)
     if not solve_log_path.exists():
-        print(color(f"\n  FAIL: solve_log.md not found: {solve_log_path}", RED))
-        sys.exit(1)
+        # Use the proper template per engagement type
+        template_map = {
+            "ctf": ("ctf", "solve_log.md"),
+            "bounty": ("bounty", "bounty_log.md"),
+            "cve": ("cve", "cve_log.md"),
+        }
+        tmpl_subdir, tmpl_name = template_map.get(engagement_type, ("ctf", "solve_log.md"))
+        tmpl_path = LAB / "templates" / tmpl_subdir / tmpl_name
+        if tmpl_path.exists():
+            template_content = tmpl_path.read_text(encoding="utf-8")
+            # Basic placeholder substitution
+            template_content = template_content.replace("{{PROGRAM}}", args.challenge)
+            template_content = template_content.replace("{{CHALLENGE}}", args.challenge)
+            template_content = template_content.replace("{{TARGET}}", "")
+            template_content = template_content.replace("{{DATE}}", datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))
+        else:
+            template_content = f"# {args.challenge} — Session Log\n\n## Known Facts\n\n## Hypotheses\n\n## Failed Paths / Do Not Repeat\n\n- None yet.\n\n## Evidence\n\n## Next Best Test\n\n"
+        labutil.atomic_write(solve_log_path, template_content)
+        print(color(f"  [INFO]", YELLOW) + f" Created {solve_log_path.name} (was missing)")
 
     content = solve_log_path.read_text(errors='replace')
     session_num = count_sessions(content) + 1
 
-    print(color(f"\n  lab-handoff — {args.challenge} (session {session_num}, {status})", BOLD))
+    print(color(f"\n  lab-handoff — {args.challenge} (session {session_num}, {status}, {engagement_type})", BOLD))
     print(color(f"  {'=' * 50}", BOLD))
+
+    # Warn if --flag is used with non-CTF engagement
+    if args.flag and engagement_type != "ctf":
+        print(color(f"  [WARN]", YELLOW) + f" --flag is CTF-only, ignoring for {engagement_type} engagement")
+        args.flag = None
 
     # 1. Append session block (T2-13: pure — returns block, no write)
     session_block = append_session_block(
@@ -318,12 +422,12 @@ Examples:
 
     # Single atomic write (T2-13: no two-write TOCTOU)
     labutil.atomic_write(solve_log_path, content)
-    print(color("  [PASS]", GREEN) + f" Session {session_num} block appended to solve_log.md")
+    print(color("  [PASS]", GREEN) + f" Session {session_num} block appended to {solve_log_path.name}")
 
     # 3. Write/update HANDOFF.md
     write_handoff_md(
         challenge_dir, args.challenge, status, args.summary,
-        args.flag, args.next, args.read_next, args.missing
+        args.flag, args.next, args.read_next, args.missing, engagement_type
     )
     print(color("  [PASS]", GREEN) + " HANDOFF.md updated with TL;DR for next agent")
 
@@ -341,11 +445,17 @@ Examples:
     if status == "solved":
         print(color("  HANDOFF COMPLETE — challenge solved, context captured.", GREEN))
     elif status == "stuck":
-        print(color("  HANDOFF COMPLETE — next agent should run: lab-preflight " + args.challenge, YELLOW))
+        if engagement_type == "ctf":
+            print(color("  HANDOFF COMPLETE — next agent should run: lab-preflight " + args.challenge, YELLOW))
+        else:
+            print(color(f"  HANDOFF COMPLETE — next agent should re-read the {engagement_type} log and AGENTS.md", YELLOW))
         if args.missing:
             print(color(f"  Missing primitive: {args.missing}", YELLOW))
     else:
-        print(color("  HANDOFF COMPLETE — next agent should run: lab-preflight " + args.challenge, GREEN))
+        if engagement_type == "ctf":
+            print(color("  HANDOFF COMPLETE — next agent should run: lab-preflight " + args.challenge, GREEN))
+        else:
+            print(color(f"  HANDOFF COMPLETE — next agent should re-read the {engagement_type} log and AGENTS.md", GREEN))
     print()
     sys.exit(0)
 

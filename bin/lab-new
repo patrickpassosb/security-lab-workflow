@@ -182,13 +182,30 @@ def main() -> int:
         print(f"ERROR: --engagement is required for type '{args['type']}'", file=sys.stderr)
         return 2
 
+    # Validate engagement name (path-traversal guard, prevents YAML injection)
+    labutil.require_valid_name(engagement, "engagement")
+
     eng_scope_path = ENGAGEMENTS_DIR / f"{engagement}.yaml"
     if not eng_scope_path.exists():
-        print(f"ERROR: engagement scope file not found: {eng_scope_path}", file=sys.stderr)
-        print(f"Available engagements:", file=sys.stderr)
-        for f in sorted(ENGAGEMENTS_DIR.glob("*.yaml")):
-            print(f"  {f.stem}", file=sys.stderr)
-        return 2
+        # Auto-create a minimal engagement scope file if it doesn't exist
+        # (fixes the issue where lab-scope/lab-new fail because the engagement
+        # file is missing even though a snapshot exists in the program folder)
+        ENGAGEMENTS_DIR.mkdir(parents=True, exist_ok=True)
+        minimal_scope = f"""# Engagement scope — {engagement}
+# Auto-created by lab-new. Update with the full scope from the program page.
+
+engagement:
+  name: "{engagement}"
+  type: "{args['type']}"
+
+in_scope: []
+# Add in-scope targets manually, e.g.:
+#  - pattern: "example.com"
+#    note: "Main web app"
+"""
+        eng_scope_path.write_text(minimal_scope, encoding="utf-8")
+        print(f"[INFO] Auto-created engagement scope file: {eng_scope_path}", file=sys.stderr)
+        print(f"[INFO] Update it with the full scope from the program page.", file=sys.stderr)
 
     scope_checked = "no"
     if args["target"]:
@@ -254,23 +271,24 @@ def main() -> int:
 
     log_template = tmpl_dir / cfg["log_template"]
     log_dest = work / cfg["log_filename"]
+    # Always define replacements (needed for writeup even if log already exists)
+    replacements = {
+        "CHALLENGE": args["name"],
+        "TARGET": target or "unknown",
+        "CATEGORY": category,
+        "CTF_NAME": engagement,
+        "DATE": date_utc,
+        "SCOPE_CHECKED": scope_checked,
+        "PROGRAM": args["name"],
+        "PLATFORM": "hackerone",
+        "PROGRAM_URL": "",
+        "ENGAGEMENT": engagement,
+        "PROJECT": args["name"],
+        "REPO": "",
+        "LOCAL_CLONE": "",
+        "REPORTER": os.environ.get("USER", "agent"),
+    }
     if not log_dest.exists() and log_template.exists():
-        replacements = {
-            "CHALLENGE": args["name"],
-            "TARGET": target or "unknown",
-            "CATEGORY": category,
-            "CTF_NAME": engagement,
-            "DATE": date_utc,
-            "SCOPE_CHECKED": scope_checked,
-            "PROGRAM": args["name"],
-            "PLATFORM": "hackerone",
-            "PROGRAM_URL": "",
-            "ENGAGEMENT": engagement,
-            "PROJECT": args["name"],
-            "REPO": "",
-            "LOCAL_CLONE": "",
-            "REPORTER": os.environ.get("USER", "agent"),
-        }
         fill_template(log_template, log_dest, replacements)
 
     exploit_template = tmpl_dir / cfg["exploit_template"]
