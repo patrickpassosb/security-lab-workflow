@@ -26,7 +26,6 @@ bounties, OOS rules, safe harbor status, and the attack approach.
 
 from __future__ import annotations
 
-import os
 import re
 import subprocess
 import sys
@@ -71,7 +70,7 @@ def require_valid_name(name: str) -> str:
 def fetch_url(url: str) -> str | None:
     """Fetch a URL and return the text content, or None on failure."""
     if not labutil.is_safe_url(url):
-        print(color(f"  [WARN]", YELLOW) + f" URL blocked by safety check (non-http(s) or metadata host): {url}")
+        print(color("  [WARN]", YELLOW) + f" URL blocked by safety check (non-http(s) or metadata host): {url}")
         return None
     try:
         result = subprocess.run(
@@ -104,7 +103,7 @@ def extract_h1_scope(html: str) -> dict[str, Any]:
     # Extract in-scope assets — look for table rows with asset + bounty
     # H1 renders scope as a table with columns: Asset, Eligible for Bounties, Eligible for Submission
     asset_pattern = re.findall(
-        r'<(?:td|span)[^>]*>([^<]*(?:notion\.so|api\.|mail\.|www\.|\.\w+)[^<]*)</(?:td|span)>',
+        r'<(?:td|span)[^>]*>([^<]*(?:api\.|mail\.|www\.|\.\w+)[^<]*)</(?:td|span)>',
         html, re.IGNORECASE
     )
     for asset in asset_pattern:
@@ -382,7 +381,6 @@ gh repo clone <org>/<repo>
 def generate_engagement_yaml(program_name: str, h1_url: str, scope: dict[str, Any]) -> str:
     """Generate the engagement scope YAML file using yaml.safe_dump for safety."""
     import yaml as yaml_mod
-    from datetime import datetime, UTC
 
     in_scope_list: list[dict[str, str]] = []
     if scope.get("in_scope"):
@@ -438,8 +436,8 @@ def main() -> int:
     )
     parser.add_argument("program", help="Program name (e.g. notion, hackerone)")
     parser.add_argument("--h1-url", default="", help="HackerOne program URL (default: https://hackerone.com/<program>)")
-    parser.add_argument("--platform", default="hackerone", help="Bounty platform (default: hackerone)")
     parser.add_argument("--no-fetch", action="store_true", help="Skip H1 fetch, create empty templates")
+    parser.add_argument("--force", action="store_true", help="Overwrite existing AGENTS.md/CONTEXT.md/engagement YAML")
     args = parser.parse_args()
 
     program = require_valid_name(args.program)
@@ -457,13 +455,13 @@ def main() -> int:
         if html:
             scope = extract_h1_scope(html)
             in_scope_count = len(scope.get("in_scope", []))
-            print(color(f"  [PASS]", GREEN) + f" Fetched ({len(html)} bytes, {in_scope_count} in-scope assets found)")
+            print(color("  [PASS]", GREEN) + f" Fetched ({len(html)} bytes, {in_scope_count} in-scope assets found)")
             if in_scope_count == 0:
-                print(color(f"  [WARN]", YELLOW) + " Auto-extract found 0 scope assets — add them manually from the H1 page")
+                print(color("  [WARN]", YELLOW) + " Auto-extract found 0 scope assets — add them manually from the H1 page")
         else:
-            print(color(f"  [WARN]", YELLOW) + f" Could not fetch {h1_url} — creating empty templates, fill scope manually")
+            print(color("  [WARN]", YELLOW) + f" Could not fetch {h1_url} — creating empty templates, fill scope manually")
     else:
-        print(f"  [SKIP] --no-fetch, creating empty templates")
+        print("  [SKIP] --no-fetch, creating empty templates")
 
     # Create program directory
     print(f"  [2/5] Creating program folder: {program_dir}")
@@ -471,31 +469,31 @@ def main() -> int:
     (program_dir / "findings").mkdir(exist_ok=True)
 
     # Generate AGENTS.md (don't overwrite existing without --force)
-    print(f"  [3/5] Generating AGENTS.md")
+    print("  [3/5] Generating AGENTS.md")
     agents_md = generate_agents_md(program, h1_url, scope)
     agents_path = program_dir / "AGENTS.md"
-    if agents_path.exists():
-        print(color(f"  [WARN]", YELLOW) + f" AGENTS.md already exists — skipping (use --force to overwrite)")
+    if agents_path.exists() and not args.force:
+        print(color("  [WARN]", YELLOW) + " AGENTS.md already exists — skipping (use --force to overwrite)")
     else:
         labutil.atomic_write(agents_path, agents_md)
 
     # Generate CONTEXT.md (don't overwrite existing without --force)
-    print(f"  [4/5] Generating CONTEXT.md")
+    print("  [4/5] Generating CONTEXT.md")
     context_md = generate_context_md(program, h1_url)
     context_path = program_dir / "CONTEXT.md"
-    if context_path.exists():
-        print(color(f"  [WARN]", YELLOW) + f" CONTEXT.md already exists — skipping (use --force to overwrite)")
+    if context_path.exists() and not args.force:
+        print(color("  [WARN]", YELLOW) + " CONTEXT.md already exists — skipping (use --force to overwrite)")
     else:
         labutil.atomic_write(context_path, context_md)
 
     # Generate engagement scope YAML (don't overwrite existing without --force)
-    print(f"  [5/5] Creating engagement scope file")
+    print("  [5/5] Creating engagement scope file")
     eng_name = f"bounty-{program}"
     eng_yaml = generate_engagement_yaml(program, h1_url, scope)
     eng_path = ENGAGEMENTS_DIR / f"{eng_name}.yaml"
     ENGAGEMENTS_DIR.mkdir(parents=True, exist_ok=True)
-    if eng_path.exists():
-        print(color(f"  [WARN]", YELLOW) + f" Engagement file already exists — skipping (use --force to overwrite)")
+    if eng_path.exists() and not args.force:
+        print(color("  [WARN]", YELLOW) + " Engagement file already exists — skipping (use --force to overwrite)")
     else:
         labutil.atomic_write(eng_path, eng_yaml)
 
@@ -509,18 +507,18 @@ def main() -> int:
     )
 
     print()
-    print(color(f"  DONE — bounty program folder ready:", GREEN))
+    print(color("  DONE — bounty program folder ready:", GREEN))
     print(f"  Program folder:  {program_dir}")
     print(f"  AGENTS.md:       {agents_path}")
     print(f"  CONTEXT.md:      {context_path}")
     print(f"  Engagement:      {eng_path}")
     print()
     print(f"  Next: cd '{program_dir}' && opencode")
-    print(f"  The agent will read AGENTS.md and know the program rules, scope, and approach.")
+    print("  The agent will read AGENTS.md and know the program rules, scope, and approach.")
     if not scope.get("in_scope"):
         print()
-        print(color(f"  ACTION NEEDED:", YELLOW))
-        print(f"  Auto-extract found 0 in-scope assets. Manually edit:")
+        print(color("  ACTION NEEDED:", YELLOW))
+        print("  Auto-extract found 0 in-scope assets. Manually edit:")
         print(f"    {eng_path}  (add in_scope targets)")
         print(f"    {agents_path}  (update In-scope targets section)")
     print()

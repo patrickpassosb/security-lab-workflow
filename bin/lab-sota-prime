@@ -17,8 +17,7 @@ best available context instead of from zero.
 
 from __future__ import annotations
 
-import json
-import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -70,7 +69,7 @@ def gbrain_list_filter(pattern: str) -> list[str]:
         )
         if result.returncode == 0:
             lines = result.stdout.strip().split("\n")
-            return [l for l in lines if pattern.lower() in l.lower()]
+            return [line for line in lines if pattern.lower() in line.lower()]
     except (subprocess.TimeoutExpired, FileNotFoundError):
         pass
     return []
@@ -153,12 +152,12 @@ def seed_gbrain(program: str, target_domain: str | None) -> None:
             capture_output=True, text=True, timeout=30,
         )
         if result.returncode == 0:
-            print(color(f"  [PASS]", GREEN) + f" Seeded gbrain with threat model (slug={slug})")
+            print(color("  [PASS]", GREEN) + f" Seeded gbrain with threat model (slug={slug})")
         else:
             err = result.stderr[:100] if result.stderr else "unknown error"
-            print(color(f"  [WARN]", YELLOW) + f" gbrain put failed (exit={result.returncode}): {err}")
+            print(color("  [WARN]", YELLOW) + f" gbrain put failed (exit={result.returncode}): {err}")
     except (subprocess.TimeoutExpired, FileNotFoundError):
-        print(color(f"  [WARN]", YELLOW) + " Could not seed gbrain (not installed?)")
+        print(color("  [WARN]", YELLOW) + " Could not seed gbrain (not installed?)")
 
 
 def main() -> int:
@@ -178,26 +177,26 @@ def main() -> int:
     print(color(f"  {'=' * 50}", BOLD))
 
     # 1. Check if program folder exists
-    print(f"\n  [1/4] Checking program folder...")
+    print("\n  [1/4] Checking program folder...")
     program_dir = check_program_dir(program)
     if program_dir:
-        print(color(f"  [PASS]", GREEN) + f" Program folder: {program_dir}")
+        print(color("  [PASS]", GREEN) + f" Program folder: {program_dir}")
     else:
-        print(color(f"  [WARN]", YELLOW) + f" No program folder found for '{program}'")
+        print(color("  [WARN]", YELLOW) + f" No program folder found for '{program}'")
         print(f"         Run: lab-setup-bounty {program}")
 
     # 2. Find prior findings
-    print(f"\n  [2/4] Searching for prior findings...")
+    print("\n  [2/4] Searching for prior findings...")
     prior = find_prior_findings(program)
     if prior:
-        print(color(f"  [PASS]", GREEN) + f" {len(prior)} prior finding(s):")
+        print(color("  [PASS]", GREEN) + f" {len(prior)} prior finding(s):")
         for f in prior:
             print(f"         {f.name}")
     else:
-        print(color(f"  [INFO]", MUTED) + " No prior findings")
+        print(color("  [INFO]", MUTED) + " No prior findings")
 
     # 3. Search gbrain for SOTA knowledge
-    print(f"\n  [3/4] Searching gbrain for SOTA knowledge...")
+    print("\n  [3/4] Searching gbrain for SOTA knowledge...")
     queries = [
         f"{program} vulnerability",
         f"{program} CVE",
@@ -213,39 +212,39 @@ def main() -> int:
         results = gbrain_search(q, limit=3)
         if results:
             found_any = True
-            print(color(f"  [HIT] ", GREEN) + f'gbrain search "{q}":')
+            print(color("  [HIT] ", GREEN) + f'gbrain search "{q}":')
             for r in results:
                 raw = r.get("raw", "")[:200]
                 print(f"         {raw}")
             break
 
     if not found_any:
-        print(color(f"  [EMPTY]", MUTED) + f" No prior gbrain knowledge for '{program}'")
+        print(color("  [EMPTY]", MUTED) + f" No prior gbrain knowledge for '{program}'")
 
     # Also check gbrain list
     gbrain_pages = gbrain_list_filter(program)
     if gbrain_pages:
-        print(color(f"  [HIT] ", GREEN) + f"gbrain pages matching '{program}':")
+        print(color("  [HIT] ", GREEN) + f"gbrain pages matching '{program}':")
         for p in gbrain_pages[:5]:
             print(f"         {p}")
     elif not found_any:
-        print(color(f"  [INFO]", MUTED) + " No gbrain pages found")
+        print(color("  [INFO]", MUTED) + " No gbrain pages found")
 
     # 4. Seed gbrain if empty
-    print(f"\n  [4/4] Seeding gbrain with threat model...")
+    print("\n  [4/4] Seeding gbrain with threat model...")
     if not found_any and not gbrain_pages:
         seed_gbrain(program, target_domain)
     else:
-        print(color(f"  [SKIP]", MUTED) + " gbrain already has knowledge — skipping seed")
+        print(color("  [SKIP]", MUTED) + " gbrain already has knowledge — skipping seed")
 
     # Summary
     print()
     print(color(f"  {'=' * 50}", BOLD))
     if program_dir:
-        print(color(f"  READY", GREEN) + f" — cd '{program_dir}' && opencode")
-        print(f"  The agent will read AGENTS.md and start with the SOTA context above.")
+        print(color("  READY", GREEN) + f" — cd '{program_dir}' && opencode")
+        print("  The agent will read AGENTS.md and start with the SOTA context above.")
     else:
-        print(color(f"  PARTIAL", YELLOW) + f" — create the program folder first:")
+        print(color("  PARTIAL", YELLOW) + " — create the program folder first:")
         print(f"  Run: lab-setup-bounty {program}")
     print()
     return 0
@@ -253,3 +252,4 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+

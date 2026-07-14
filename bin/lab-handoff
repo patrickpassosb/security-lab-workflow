@@ -260,17 +260,20 @@ def resolve_workspace(challenge_name: str, ctf_home_arg: str) -> tuple[Path, Pat
                     if log.exists():
                         return ws, log, "ctf"
                     return ws, ws / "solve_log.md", "ctf"
-            # Bounty: program folder has findings/
+            # Bounty or CVE: program folder has findings/
             if (search / "findings").is_dir():
+                # Determine type from the program folder's parent (bounties/ vs cves/)
+                etype_default = "cve" if search.parent.name == "cves" else "bounty"
+                default_log = "cve_log.md" if etype_default == "cve" else "bounty_log.md"
                 ws = search / "findings" / challenge_name
                 if ws.exists():
-                    # Check for bounty_log.md or cve_log.md
-                    for logname, etype in [("bounty_log.md", "bounty"), ("cve_log.md", "cve"), ("solve_log.md", "ctf")]:
+                    # Check for existing log files to determine type
+                    for logname, et in [(default_log, etype_default), ("bounty_log.md", "bounty"), ("cve_log.md", "cve"), ("solve_log.md", "ctf")]:
                         log = ws / logname
                         if log.exists():
-                            return ws, log, etype
-                    # Default to bounty_log for bounty folders
-                    return ws, ws / "bounty_log.md", "bounty"
+                            return ws, log, et
+                    # No existing log — use default based on parent dir
+                    return ws, ws / default_log, etype_default
         search = search.parent
     
     # 3. Legacy global paths
@@ -429,11 +432,17 @@ Examples:
     if status == "solved":
         print(color("  HANDOFF COMPLETE — challenge solved, context captured.", GREEN))
     elif status == "stuck":
-        print(color("  HANDOFF COMPLETE — next agent should run: lab-preflight " + args.challenge, YELLOW))
+        if engagement_type == "ctf":
+            print(color("  HANDOFF COMPLETE — next agent should run: lab-preflight " + args.challenge, YELLOW))
+        else:
+            print(color(f"  HANDOFF COMPLETE — next agent should re-read the {engagement_type} log and AGENTS.md", YELLOW))
         if args.missing:
             print(color(f"  Missing primitive: {args.missing}", YELLOW))
     else:
-        print(color("  HANDOFF COMPLETE — next agent should run: lab-preflight " + args.challenge, GREEN))
+        if engagement_type == "ctf":
+            print(color("  HANDOFF COMPLETE — next agent should run: lab-preflight " + args.challenge, GREEN))
+        else:
+            print(color(f"  HANDOFF COMPLETE — next agent should re-read the {engagement_type} log and AGENTS.md", GREEN))
     print()
     sys.exit(0)
 
