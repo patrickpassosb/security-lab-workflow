@@ -271,23 +271,24 @@ in_scope: []
 
     log_template = tmpl_dir / cfg["log_template"]
     log_dest = work / cfg["log_filename"]
+    # Always define replacements (needed for writeup even if log already exists)
+    replacements = {
+        "CHALLENGE": args["name"],
+        "TARGET": target or "unknown",
+        "CATEGORY": category,
+        "CTF_NAME": engagement,
+        "DATE": date_utc,
+        "SCOPE_CHECKED": scope_checked,
+        "PROGRAM": args["name"],
+        "PLATFORM": "hackerone",
+        "PROGRAM_URL": "",
+        "ENGAGEMENT": engagement,
+        "PROJECT": args["name"],
+        "REPO": "",
+        "LOCAL_CLONE": "",
+        "REPORTER": os.environ.get("USER", "agent"),
+    }
     if not log_dest.exists() and log_template.exists():
-        replacements = {
-            "CHALLENGE": args["name"],
-            "TARGET": target or "unknown",
-            "CATEGORY": category,
-            "CTF_NAME": engagement,
-            "DATE": date_utc,
-            "SCOPE_CHECKED": scope_checked,
-            "PROGRAM": args["name"],
-            "PLATFORM": "hackerone",
-            "PROGRAM_URL": "",
-            "ENGAGEMENT": engagement,
-            "PROJECT": args["name"],
-            "REPO": "",
-            "LOCAL_CLONE": "",
-            "REPORTER": os.environ.get("USER", "agent"),
-        }
         fill_template(log_template, log_dest, replacements)
 
     exploit_template = tmpl_dir / cfg["exploit_template"]

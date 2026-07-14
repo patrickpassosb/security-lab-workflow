@@ -70,6 +70,8 @@ class CheckResult:
 
 def find_report(finding_name: str) -> Path | None:
     """Find report_h1.md in a bounty finding workspace."""
+    if not BOUNTIES_DIR.exists():
+        return None
     # Search all bounty program folders
     for program_dir in BOUNTIES_DIR.iterdir():
         if not program_dir.is_dir():
