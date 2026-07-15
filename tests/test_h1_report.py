@@ -3080,3 +3080,267 @@ class TestAdversarialRound5:
         assert not any("placeholder" in i.message.lower() for i in errors), (
             f"'(state: production)' label should not be flagged; got {errors}"
         )
+
+
+# ─── Adversarial round 6: P2 review fixes ─────────────────────────────────────
+
+class TestAdversarialRound6:
+    """Regression tests for the 10 P2 findings from the Codex PR review."""
+
+    # P2 #1: reject non-letter YAML anchor names (&1 / *1 / &_)
+    def test_yaml_anchor_with_digit_name_rejected(self, tmp_path):
+        """P2: PyYAML accepts anchors like &1 / *1, so the old [A-Za-z]-only
+        guard let them reach safe_load. The anchor regex must cover all valid
+        YAML anchor-name start chars (word + hyphen)."""
+        ws = _make_workspace(tmp_path)
+        bomb = (
+            "---\n"
+            "a: &1 ['x']\n"
+            "b: *1\n"
+            "schema: security-lab/hackerone-report/v1\n"
+            "---\n\n# body\n"
+        )
+        (ws / "report_h1.md").write_text(bomb, encoding="utf-8")
+        with pytest.raises(h1report.ReportParseError):
+            h1report.parse_report(ws / "report_h1.md")
+
+    def test_yaml_alias_with_underscore_name_rejected(self, tmp_path):
+        """P2: anchors starting with '_' must also be rejected."""
+        ws = _make_workspace(tmp_path)
+        bomb = (
+            "---\n"
+            "a: &_ ['x']\n"
+            "b: *_\n"
+            "schema: security-lab/hackerone-report/v1\n"
+            "---\n\n# body\n"
+        )
+        (ws / "report_h1.md").write_text(bomb, encoding="utf-8")
+        with pytest.raises(h1report.ReportParseError):
+            h1report.parse_report(ws / "report_h1.md")
+
+    # P2 #7: detect PGP PRIVATE KEY BLOCK
+    def test_pgp_private_key_block_in_body_fails(self, tmp_path):
+        """P2: armored PGP private keys use 'BEGIN PGP PRIVATE KEY BLOCK'
+        (with BLOCK suffix), which the old regex missed."""
+        ws = _make_workspace(tmp_path)
+        lab = _make_engagement(tmp_path)
+        body = (
+            "# Title\n\n## Description\n\n"
+            "-----BEGIN PGP PRIVATE KEY BLOCK-----\n"
+            "lQVYBF2asdfGhjklFakeKeyNotReal1234567890\n"
+            "-----END PGP PRIVATE KEY BLOCK-----\n\n"
+            "## Impact\n\nreal impact\n"
+        )
+        _write_report(ws, body=body)
+        issues = h1report.check_report(ws, lab_root=lab)
+        errors = [i for i in issues if i.level == "ERROR"]
+        assert any("secret" in i.message.lower() or "private key" in i.message.lower()
+                   for i in errors), f"PGP private key block should be detected; got {errors}"
+
+    def test_pgp_private_key_block_detected_directly(self):
+        """P2: _detect_secrets must catch PGP PRIVATE KEY BLOCK."""
+        text = (
+            "-----BEGIN PGP PRIVATE KEY BLOCK-----\n"
+            "fakeBase64Here\n"
+            "-----END PGP PRIVATE KEY BLOCK-----\n"
+        )
+        hits = h1report._detect_secrets(text)
+        assert any("private key" in k.lower() for k, _ in hits), hits
+
+    # P2 #8: malformed URL parsing in extract_host
+    def test_extract_host_malformed_ipv6_returns_empty(self):
+        """P2: urlparse() raises ValueError on malformed bracketed IPv6 like
+        'http://[::1,'. extract_host must return '' (fail closed), not crash."""
+        import labutil
+        assert labutil.extract_host("http://[::1,") == ""
+
+    def test_extract_host_malformed_ipv6_in_h1report_fallback(self):
+        """P2: the fallback extract_host in h1report must also handle the
+        ValueError (exercised via the fallback path when labutil import fails)."""
+        from urllib.parse import urlparse
+        try:
+            urlparse("http://[::1,")
+        except ValueError:
+            pass  # confirm it raises
+        # The h1report module's extract_host (whether labutil or fallback)
+        # must not raise.
+        assert h1report.extract_host("http://[::1,") == ""
+
+    # P2 #9: symlinked engagement.txt is ERROR not WARN
+    def test_symlinked_engagement_txt_is_error(self, tmp_path):
+        """P2: a symlinked engagement.txt must be an ERROR, not a silent WARN.
+        prepare ignores WARNs, so the old behavior let reports be prepared
+        under an unverified engagement identity."""
+        ws = _make_workspace(tmp_path)
+        lab = _make_engagement(tmp_path)
+        _write_report(ws, VALID_SOURCE_FRONTMATTER)
+        # Replace engagement.txt with a symlink.
+        (ws / "engagement.txt").unlink()
+        outside = tmp_path / "outside_eng.txt"
+        outside.write_text("evil-engagement\n", encoding="utf-8")
+        os.symlink(outside, ws / "engagement.txt")
+        issues = h1report.check_report(ws, lab_root=lab)
+        errors = [i for i in issues if i.level == "ERROR"]
+        assert any("engagement.txt" in i.location and "symlink" in i.message.lower()
+                   for i in errors), (
+            f"symlinked engagement.txt should be ERROR; got {errors}"
+        )
+
+    # P2 #3: fail closed when global scope.yaml is unreadable
+    def test_corrupt_global_scope_fails_closed(self, tmp_path):
+        """P2: a present-but-malformed scope.yaml must produce an ERROR, not
+        silently replace the denied list with {}."""
+        ws = _make_workspace(tmp_path)
+        lab = _make_engagement(tmp_path)
+        _write_report(ws, VALID_SOURCE_FRONTMATTER)
+        # Corrupt the global scope.yaml.
+        (lab / "scope.yaml").write_text("[: not valid yaml\n", encoding="utf-8")
+        issues = h1report.check_report(ws, lab_root=lab)
+        errors = [i for i in issues if i.level == "ERROR"]
+        assert any("scope.yaml" in i.location and "fail closed" in i.message.lower()
+                   for i in errors), (
+            f"corrupt scope.yaml should fail closed; got {errors}"
+        )
+
+    def test_missing_global_scope_is_not_error(self, tmp_path):
+        """P2: a MISSING scope.yaml is not an error (no global scope is legit);
+        only a present-but-unreadable one fails closed."""
+        ws = _make_workspace(tmp_path)
+        lab = _make_engagement(tmp_path)
+        _write_report(ws, VALID_SOURCE_FRONTMATTER)
+        # Remove scope.yaml entirely.
+        (lab / "scope.yaml").unlink()
+        issues = h1report.check_report(ws, lab_root=lab)
+        errors = [i for i in issues if i.level == "ERROR"]
+        assert not any("scope.yaml" in i.location and "fail closed" in i.message.lower()
+                       for i in errors), (
+            f"missing scope.yaml should not fail closed; got {errors}"
+        )
+
+    # P2 #5: scan report frontmatter for secrets
+    def test_secret_in_frontmatter_fails(self, tmp_path):
+        """P2: a token pasted into frontmatter (title/program_url/live_targets)
+        must be detected — prepare copies report_h1.md verbatim."""
+        ws = _make_workspace(tmp_path)
+        lab = _make_engagement(tmp_path)
+        fm = copy.deepcopy(VALID_SOURCE_FRONTMATTER)
+        fm["title"] = "-----BEGIN RSA PRIVATE KEY-----\nMIIBVAIB\n-----END RSA PRIVATE KEY-----"
+        _write_report(ws, fm)
+        issues = h1report.check_report(ws, lab_root=lab)
+        errors = [i for i in issues if i.level == "ERROR"]
+        assert any("frontmatter" in i.location.lower() and "secret" in i.message.lower()
+                   for i in errors), (
+            f"secret in frontmatter should be detected; got {errors}"
+        )
+
+    def test_bearer_token_in_live_targets_fails(self, tmp_path):
+        """P2: a bearer token in a live_targets list item must be detected."""
+        ws = _make_workspace(tmp_path)
+        lab = _make_engagement(tmp_path)
+        fm = copy.deepcopy(VALID_LIVE_FRONTMATTER)
+        fm["live_targets"] = [
+            "https://api.example.com/v1/fetch",
+            "Authorization: Bearer abcdef0123456789abcdef0123456789",
+        ]
+        _write_report(ws, fm)
+        issues = h1report.check_report(ws, lab_root=lab)
+        errors = [i for i in issues if i.level == "ERROR"]
+        assert any("frontmatter" in i.location.lower() and "bearer" in i.message.lower()
+                   for i in errors), (
+            f"bearer token in live_targets should be detected; got {errors}"
+        )
+
+    # P2 #10: warn on oversized report body secret scan
+    def test_oversized_body_emits_truncation_warning(self, tmp_path):
+        """P2: a report body exceeding the 256KB scan cap must emit a WARN
+        that the tail was not scanned (matching the attachment warning)."""
+        ws = _make_workspace(tmp_path)
+        lab = _make_engagement(tmp_path)
+        # Build a body just over 256KB. Use a long valid description.
+        big_desc = "A" * (h1report._SECRET_SCAN_MAX_BYTES + 100)
+        body = f"# Title\n\n## Description\n\n{big_desc}\n\n## Impact\n\nreal impact\n"
+        _write_report(ws, body=body)
+        issues = h1report.check_report(ws, lab_root=lab)
+        warns = [i for i in issues if i.level == "WARN"]
+        assert any("body" in i.location.lower() and "truncat" in i.message.lower()
+                   for i in warns), (
+            f"oversized body should emit truncation WARN; got {warns}"
+        )
+
+    # P2 #4: hash scope snapshots during status integrity check
+    def test_status_detects_scope_snapshot_tampering(self, tmp_path):
+        """P2: if a scope snapshot is edited after prepare, status must report
+        integrity drift (the old check only re-hashed report files/attachments)."""
+        ws = _make_workspace(tmp_path)
+        lab = _make_engagement(tmp_path)
+        # Write workspace snapshots so they're copied into the package.
+        snap_eng = {
+            "engagement": {"name": "Example Bug Bounty", "type": "bounty",
+                           "platform": "hackerone",
+                           "program_url": "https://hackerone.com/example"},
+            "assets": [
+                {"id": "frontend", "display_name": "Frontend / marketing site",
+                 "asset_type": "url", "patterns": ["example.com"],
+                 "eligible_for_submission": True, "eligible_for_bounty": True},
+            ],
+            "in_scope": [{"pattern": "example.com"}],
+            "denied": [],
+        }
+        (ws / "engagement_scope_snapshot.yaml").write_text(
+            yaml.safe_dump(snap_eng, sort_keys=False), encoding="utf-8"
+        )
+        (ws / "scope_snapshot.yaml").write_text(
+            yaml.safe_dump({"denied": [{"pattern": "*.gov"}]}, sort_keys=False),
+            encoding="utf-8",
+        )
+        _write_report(ws, VALID_SOURCE_FRONTMATTER)
+        result = h1report.prepare_report(ws, lab_root=lab)
+        pkg = Path(result["package_path"])
+        # Tamper with a scope snapshot in the package.
+        (pkg / "scope_snapshot.yaml").write_text("tampered\n", encoding="utf-8")
+        status = h1report.status_report(ws, lab_root=lab)
+        assert status["integrity_ok"] is False
+        assert any("scope_snapshot" in d for d in status["integrity_drift"]), (
+            f"scope snapshot drift should be detected; got {status['integrity_drift']}"
+        )
+
+    # P2 #6: validate manifest objects are mappings before status deref
+    def test_status_scalar_manifest_report_source_no_traceback(self, tmp_path):
+        """P2: a corrupted manifest where report_source is a scalar must report
+        integrity drift, not traceback with AttributeError."""
+        ws = _make_workspace(tmp_path)
+        lab = _make_engagement(tmp_path)
+        _write_report(ws, VALID_SOURCE_FRONTMATTER)
+        result = h1report.prepare_report(ws, lab_root=lab)
+        pkg = Path(result["package_path"])
+        # Corrupt manifest: make report_source a scalar.
+        import json
+        man = json.loads((pkg / "manifest.json").read_text())
+        man["report_source"] = "not-a-mapping"
+        (pkg / "manifest.json").write_text(json.dumps(man), encoding="utf-8")
+        # Must not raise; should report drift.
+        status = h1report.status_report(ws, lab_root=lab)
+        assert status["integrity_ok"] is False
+        assert any("report_source" in d and "not a mapping" in d
+                   for d in status["integrity_drift"]), (
+            f"scalar report_source should report drift; got {status['integrity_drift']}"
+        )
+
+    def test_status_scalar_manifest_scope_snapshots_no_traceback(self, tmp_path):
+        """P2: a corrupted manifest where scope_snapshots is a scalar must
+        report drift, not traceback."""
+        ws = _make_workspace(tmp_path)
+        lab = _make_engagement(tmp_path)
+        _write_report(ws, VALID_SOURCE_FRONTMATTER)
+        result = h1report.prepare_report(ws, lab_root=lab)
+        pkg = Path(result["package_path"])
+        import json
+        man = json.loads((pkg / "manifest.json").read_text())
+        man["scope_snapshots"] = "not-a-list"
+        (pkg / "manifest.json").write_text(json.dumps(man), encoding="utf-8")
+        status = h1report.status_report(ws, lab_root=lab)
+        assert status["integrity_ok"] is False
+        assert any("scope_snapshots" in d and "not a list" in d
+                   for d in status["integrity_drift"]), (
+            f"scalar scope_snapshots should report drift; got {status['integrity_drift']}"
+        )

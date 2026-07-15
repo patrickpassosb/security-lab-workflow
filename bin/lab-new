@@ -168,6 +168,25 @@ def scope_check(target: str, engagement: str) -> tuple[int, str]:
     return result.returncode, result.stdout.strip()
 
 
+def _yaml_scalar_escape(value: str) -> str:
+    """Escape a string for safe insertion into a double-quoted YAML scalar.
+
+    P2: report_h1.md frontmatter scalars (engagement, program, program_url,
+    title) are now double-quoted in the template, but a value containing a
+    literal double-quote would break the YAML. Escape backslashes and
+    double-quotes so the quoted scalar stays valid regardless of the
+    program/engagement name. Newlines are already rejected upstream for
+    --target; for other fields we replace them with spaces (a YAML
+    double-quoted scalar cannot contain a raw newline without CRLF escaping).
+    """
+    if not value:
+        return ""
+    # Replace newlines with spaces (cannot appear in a single-line quoted scalar).
+    v = value.replace("\r", " ").replace("\n", " ")
+    # Escape backslashes first, then double-quotes.
+    return v.replace("\\", "\\\\").replace('"', '\\"')
+
+
 def fill_template(template_path: Path, dest_path: Path, replacements: dict[str, str]) -> None:
     """Fill a template by replacing {{KEY}} placeholders with values.
 
@@ -365,16 +384,24 @@ def main() -> int:
             if not writeup_template.exists():
                 writeup_template = tmpl_dir / ("report_h1.md" if args["type"] == "bounty" else "advisory_template.md" if args["type"] == "cve" else "")
             if writeup_template and writeup_template.exists() and writeup_template.is_file():
+                # P2: YAML-escape scalar frontmatter values that are inserted
+                # into double-quoted positions in report_h1.md (engagement,
+                # program, program_url, title). A program name like Foo: Bar
+                # or with embedded double-quotes would otherwise break or
+                # change the generated frontmatter. INITIAL_LIVE_TARGET is a
+                # list item, not a quoted scalar, so it's not escaped here.
                 writeup_replacements = {
                     **replacements,
                     "VULN_CLASS": "",
                     "SEVERITY": "",
-                    "TITLE": args["name"],
+                    "TITLE": _yaml_scalar_escape(args["name"]),
                     "VENDOR": "",
                     "AFFECTED_VERSIONS": "",
                     "CVE_ID": "",
                     "CVSS_SCORE": "",
-                    "PROGRAM_URL": program_url,
+                    "PROGRAM_URL": _yaml_scalar_escape(program_url),
+                    "ENGAGEMENT": _yaml_scalar_escape(engagement),
+                    "PROGRAM": _yaml_scalar_escape(program_name or args["name"]),
                     # Bounty report_h1.md frontmatter prefilling. The template
                     # has `live_targets:\n  {{INITIAL_LIVE_TARGET}}` so we can
                     # inject either a `- <url>` entry or `[]` via simple replace.

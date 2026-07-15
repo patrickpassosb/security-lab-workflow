@@ -86,7 +86,11 @@ except Exception:  # pragma: no cover — fallback when labutil unavailable
         if not target:
             return ""
         if "://" in target:
-            parsed = _urlparse(target)
+            # P2: urlparse() raises ValueError on malformed bracketed IPv6.
+            try:
+                parsed = _urlparse(target)
+            except ValueError:
+                return ""
             return (parsed.hostname or "").lower().strip(".")
         host = target.split("/", 1)[0].lower().strip(".")
         if ":" in host:
@@ -283,8 +287,13 @@ def parse_report_text(path: Path, text: str) -> Report:
     # Presence of a YAML anchor (`&name`) or alias (`*name`) is a strong
     # adversarial signal (billion-laughs vector). This catches anchors in any
     # position: block style (`a: &a [...]`), flow style (`*a`), or bare lines.
-    if re.search(r"(?:^|\s|:|,\s*)&[A-Za-z]", fm_text) or \
-       re.search(r"(?:^|\s|:|,\s*)\*[A-Za-z]", fm_text):
+    # P2: match ALL valid YAML anchor-name start chars, not just letters.
+    # PyYAML accepts anchors/aliases whose names start with digits or
+    # punctuation (&1 / *1 / &_), so the old [A-Za-z]-only guard let those
+    # reach yaml.safe_load and the alias-bomb case still hang/OOM within the
+    # 64KB cap. Anchor/alias names are alnum + '_' + '-' per the YAML spec.
+    if re.search(r"(?:^|\s|:|,\s*)&[\w-]", fm_text) or \
+       re.search(r"(?:^|\s|:|,\s*)\*[\w-]", fm_text):
         raise ReportParseError(
             f"{path}: YAML anchors/aliases are not permitted in report frontmatter"
         )
@@ -417,14 +426,30 @@ def load_global_scope(
     them. All other snapshot keys (``default_rate_limits``, ``evidence``,
     ``notes``) are taken from the snapshot as-is.
 
-    Returns (scope_dict, issues). Missing global scope is not an error —
-    returns ({}, []) — but missing snapshot triggers a WARN.
+    Returns (scope_dict, issues). A missing global scope.yaml is not an
+    error — returns ({}, []) — but a present-but-unreadable/malformed
+    scope.yaml is a blocking ERROR (P2: fail closed). The global denied list
+    is the lab's hardest safety rail; silently replacing it with {} when the
+    file is corrupt would let any globally denied host pass scope checks.
+    Missing snapshot triggers a WARN.
     """
     issues: list[Issue] = []
     lab = Path(lab_root) if lab_root else LAB_ROOT_DEFAULT
     live_path = lab / "scope.yaml"
     live_data = load_yaml_file(live_path)
     if live_data is None:
+        # P2: distinguish "missing" (legit — no global scope) from
+        # "present but malformed/unreadable" (fail closed). load_yaml_file
+        # returns None for both, so check file existence here. A corrupt
+        # scope.yaml must NOT silently disable the global denied list.
+        if live_path.is_file():
+            issues.append(Issue(
+                "ERROR", str(live_path),
+                "global scope.yaml is present but unreadable or not a valid "
+                "YAML mapping; cannot enforce global denied list — refusing "
+                "to validate (fail closed)",
+            ))
+            return {}, issues
         live_data = {}
 
     if workspace is None:
@@ -666,15 +691,22 @@ _SECRET_SCAN_MAX_BYTES = 256 * 1024
 # pre-scan for the END marker before running the DOTALL regex — if no END
 # marker is present, the regex would backtrack catastrophically on adversarial
 # input containing many BEGIN markers.
+# P2: PGP armored private keys use "-----BEGIN PGP PRIVATE KEY BLOCK-----"
+# (with the BLOCK suffix), not "-----BEGIN PGP PRIVATE KEY-----". The optional
+# "BLOCK" is only valid after the PGP variant, so it's modeled as an
+# alternative in the non-capturing group.
 _PRIVATE_KEY_BEGIN_RE = re.compile(
-    r"-----BEGIN (?:RSA |EC |DSA |OPENSSH |PGP |ENCRYPTED )?PRIVATE KEY-----"
+    r"-----BEGIN (?:RSA |EC |DSA |OPENSSH |ENCRYPTED )?PRIVATE KEY-----"
+    r"|-----BEGIN PGP PRIVATE KEY BLOCK-----"
 )
 _PRIVATE_KEY_END_RE = re.compile(
-    r"-----END (?:RSA |EC |DSA |OPENSSH |PGP |ENCRYPTED )?PRIVATE KEY-----"
+    r"-----END (?:RSA |EC |DSA |OPENSSH |ENCRYPTED )?PRIVATE KEY-----"
+    r"|-----END PGP PRIVATE KEY BLOCK-----"
 )
 _PRIVATE_KEY_RE = re.compile(
-    r"-----BEGIN (?:RSA |EC |DSA |OPENSSH |PGP |ENCRYPTED )?PRIVATE KEY-----"
-    r".*?-----END (?:RSA |EC |DSA |OPENSSH |PGP |ENCRYPTED )?PRIVATE KEY-----",
+    r"-----BEGIN (?:RSA |EC |DSA |OPENSSH |ENCRYPTED )?PRIVATE KEY-----"
+    r".*?-----END (?:RSA |EC |DSA |OPENSSH |ENCRYPTED )?PRIVATE KEY-----"
+    r"|-----BEGIN PGP PRIVATE KEY BLOCK-----.*?-----END PGP PRIVATE KEY BLOCK-----",
     re.DOTALL,
 )
 
@@ -1217,6 +1249,32 @@ def _scan_secrets(text: str, location: str) -> list[Issue]:
     return issues
 
 
+def _frontmatter_secrets_text(fm: dict[str, Any]) -> str:
+    """Flatten frontmatter scalar values into a single string for secret scanning.
+
+    P2: _validate_no_secrets only scanned the Markdown body and attachments,
+    so a token pasted into a frontmatter scalar (title, program_url,
+    live_targets) was packaged without detection. This recurses into the
+    frontmatter mapping/list structure and joins all leaf string values with
+    newlines so _detect_secrets can scan them. Non-string scalars (ints,
+    bools) are ignored — they cannot contain a secret.
+    """
+    parts: list[str] = []
+
+    def _walk(obj: Any) -> None:
+        if isinstance(obj, str):
+            parts.append(obj)
+        elif isinstance(obj, dict):
+            for v in obj.values():
+                _walk(v)
+        elif isinstance(obj, list):
+            for item in obj:
+                _walk(item)
+
+    _walk(fm)
+    return "\n".join(parts)
+
+
 def _scan_warnings(text: str, location: str) -> list[Issue]:
     issues: list[Issue] = []
     for kind, snippet in _detect_warning_ids(text):
@@ -1227,7 +1285,25 @@ def _scan_warnings(text: str, location: str) -> list[Issue]:
 def _validate_no_secrets(fm: dict[str, Any], body: str, workspace: Path, path: Path) -> list[Issue]:
     issues: list[Issue] = []
     report_loc = str(path)
-    # Scan the report body.
+    # P2: scan the report frontmatter values for secrets. prepare copies
+    # report_h1.md verbatim into the submission package, so a token pasted
+    # into frontmatter (title, program_url, live_targets) would be packaged
+    # without the body/attachment scan catching it. Serialize the frontmatter
+    # scalars to text and scan that. Only scalars are scanned — nested
+    # mappings/lists are recursed to extract their leaf string values.
+    fm_text = _frontmatter_secrets_text(fm)
+    if fm_text:
+        issues.extend(_scan_secrets(fm_text, report_loc + " (frontmatter)"))
+    # Scan the report body. P2: warn if the body exceeds the secret-scan cap
+    # — _detect_secrets truncates at _SECRET_SCAN_MAX_BYTES, so a secret after
+    # the first 256KB would hide without this warning. Attachments already
+    # emit this warning; the body needs it too.
+    if len(body.encode("utf-8")) > _SECRET_SCAN_MAX_BYTES:
+        issues.append(Issue(
+            "WARN", report_loc + " (body)",
+            f"report body exceeds {_SECRET_SCAN_MAX_BYTES // 1024}KB; "
+            f"secret scan truncated, tail not scanned — review manually",
+        ))
     issues.extend(_scan_secrets(body, report_loc + " (body)"))
     # Scan text attachments (read their contents).
     atts = fm.get("attachments")
@@ -1358,7 +1434,19 @@ def check_report(
     # prevention.
     eng_txt = read_engagement_name(ws)
     eng_txt_path = ws / "engagement.txt"
-    if eng_txt_path.is_file() and not _is_nonempty_str(eng_txt):
+    # P2: a symlinked engagement.txt must be an ERROR, not a silent WARN.
+    # read_engagement_name returns "" for a symlink, so without this guard
+    # the empty-string WARN branch below fires and prepare ignores WARNs,
+    # letting reports be prepared under an engagement that doesn't match the
+    # workspace marker. Match the symlink-rejects-ERROR pattern used for
+    # report_h1.md and scope snapshots.
+    if eng_txt_path.is_symlink():
+        issues.append(Issue(
+            "ERROR", str(eng_txt_path),
+            "engagement.txt is a symlink (not allowed); cannot verify "
+            "workspace engagement identity",
+        ))
+    elif eng_txt_path.is_file() and not _is_nonempty_str(eng_txt):
         issues.append(Issue(
             "WARN", str(eng_txt_path),
             "engagement.txt exists but is empty; frontmatter engagement match "
@@ -1503,7 +1591,7 @@ def status_report(
         "engagement": manifest.get("engagement", ""),
         "program": manifest.get("program", ""),
         "asset_id": manifest.get("asset_id", ""),
-        "attachments": len(manifest.get("attachments", []) or []),
+        "attachments": len(manifest.get("attachments") or []) if isinstance(manifest.get("attachments"), list) else 0,
     }
 
     # Integrity: re-hash report_h1.md and report.md in the package and compare
@@ -1512,7 +1600,18 @@ def status_report(
     # the package dir before hashing (Path("/pkg") / "/etc/hostname" escapes).
     drift: list[str] = []
     for key, subkey in (("report_source", "report_h1.md"), ("report_body", "report.md")):
-        entry = manifest.get(key, {}) or {}
+        # P2: validate the manifest section is a mapping before dereferencing.
+        # A corrupted/tampered manifest where report_source or report_body is
+        # a scalar would raise AttributeError on .get() and traceback status
+        # instead of reporting integrity drift.
+        raw_entry = manifest.get(key)
+        if raw_entry is None:
+            entry: dict = {}
+        elif isinstance(raw_entry, dict):
+            entry = raw_entry
+        else:
+            drift.append(f"{key} (manifest field not a mapping)")
+            continue
         stored = entry.get("sha256", "")
         rel = entry.get("path", subkey)
         pkg_file = _safe_pkg_relative_path(rel, latest_pkg_path)
@@ -1557,6 +1656,37 @@ def status_report(
                 continue
             if actual != stored:
                 drift.append(rel)
+    # P2: scope snapshot integrity. Prepared packages include scope_snapshots
+    # entries with hashes in manifest.json, but the status integrity check
+    # only re-hashed report files and attachments. If a scope snapshot is
+    # edited after prepare, status still reported integrity: OK, corrupting
+    # the package's record of the scope that justified the submission. Hash
+    # each scope snapshot the same way.
+    manifest_scope_snaps = manifest.get("scope_snapshots")
+    if manifest_scope_snaps is not None and not isinstance(manifest_scope_snaps, list):
+        drift.append("scope_snapshots (manifest field not a list)")
+    elif isinstance(manifest_scope_snaps, list):
+        for snap in manifest_scope_snaps:
+            if not isinstance(snap, dict):
+                continue
+            rel = snap.get("path", "")
+            stored = snap.get("sha256", "")
+            if not rel:
+                continue
+            pkg_file = _safe_pkg_relative_path(rel, latest_pkg_path)
+            if pkg_file is None:
+                drift.append(f"{rel} (scope snapshot path escapes package)")
+                continue
+            if not pkg_file.is_file():
+                drift.append(rel + " (scope snapshot missing)")
+                continue
+            try:
+                actual = _sha256_file(pkg_file)
+            except OSError:
+                drift.append(rel + " (scope snapshot unreadable)")
+                continue
+            if actual != stored:
+                drift.append(rel + " (scope snapshot drift)")
     # S5/R7: cross-check the manifest itself against record.json's stored
     # manifest_sha256. A self-consistent forgery (tamper files + recompute
     # manifest hashes) would pass the per-file checks above, but the manifest's
@@ -1614,7 +1744,10 @@ def status_report(
 
     # Source drift: hash the workspace's report_h1.md and compare to the
     # package's report_source.sha256.
-    src_entry = manifest.get("report_source", {}) or {}
+    # P2: validate report_source is a mapping before dereferencing (same guard
+    # as the integrity loop above — a scalar manifest field would traceback).
+    raw_src = manifest.get("report_source")
+    src_entry = raw_src if isinstance(raw_src, dict) else {}
     stored_src = src_entry.get("sha256", "")
     if stored_src:
         try:

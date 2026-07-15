@@ -394,3 +394,96 @@ class TestExampleBountyAssets:
         assert rc == 2, (
             f"engagement path traversal should be rejected (exit 2); got {rc}"
         )
+
+
+# ─── P2 #2: templated YAML scalars are quoted/escaped ─────────────────────────
+
+
+class TestYamlScalarEscaping:
+    """P2: program/engagement names with YAML-significant characters (colons,
+    quotes, brackets) must not break the generated report_h1.md frontmatter.
+    The template quotes these scalars and lab-new escapes embedded quotes."""
+
+    lab_new = _import_lab_new()
+
+    def test_program_name_with_colon_parses(self, tmp_path, monkeypatch):
+        """A program name like 'Foo: Bar' must parse as a string, not break."""
+        lab = tmp_path / "lab"
+        (lab / "engagements").mkdir(parents=True)
+        (lab / "engagements" / "colon-eng.yaml").write_text(
+            "engagement: {name: 'Foo: Bar', type: bounty, platform: hackerone, "
+            "program_url: 'https://hackerone.com/foo'}\n"
+            "in_scope: [{pattern: example.com}]\n"
+            "denied: []\n",
+            encoding="utf-8",
+        )
+        (lab / "scope.yaml").write_text("denied: [{pattern: '*.gov'}]\n", encoding="utf-8")
+        templates_dst = lab / "templates"
+        templates_dst.mkdir()
+        templates_src = WT_ROOT / "templates"
+        for sub in templates_src.iterdir():
+            (templates_dst / sub.name).symlink_to(sub, target_is_directory=True)
+        monkeypatch.setenv("HACKING_LAB", str(lab))
+        rc = _run_lab_new(self.lab_new, [
+            "bounty", "test-finding", "--engagement", "colon-eng",
+        ], lab, monkeypatch)
+        assert rc == 0
+        ws = lab / "findings" / "bounty" / "test-finding"
+        fm = _parse_frontmatter(ws / "report_h1.md")
+        assert fm["program"] == "Foo: Bar", f"colon program name must parse; got {fm['program']!r}"
+        assert fm["engagement"] == "colon-eng"
+
+    def test_program_name_with_double_quote_parses(self, tmp_path, monkeypatch):
+        """A program name with an embedded double-quote must be escaped."""
+        lab = tmp_path / "lab"
+        (lab / "engagements").mkdir(parents=True)
+        (lab / "engagements" / "quote-eng.yaml").write_text(
+            'engagement: {name: \'Foo "Bar"\', type: bounty, platform: hackerone, '
+            "program_url: 'https://hackerone.com/foo'}\n"
+            "in_scope: [{pattern: example.com}]\n"
+            "denied: []\n",
+            encoding="utf-8",
+        )
+        (lab / "scope.yaml").write_text("denied: [{pattern: '*.gov'}]\n", encoding="utf-8")
+        templates_dst = lab / "templates"
+        templates_dst.mkdir()
+        templates_src = WT_ROOT / "templates"
+        for sub in templates_src.iterdir():
+            (templates_dst / sub.name).symlink_to(sub, target_is_directory=True)
+        monkeypatch.setenv("HACKING_LAB", str(lab))
+        rc = _run_lab_new(self.lab_new, [
+            "bounty", "test-finding", "--engagement", "quote-eng",
+        ], lab, monkeypatch)
+        assert rc == 0
+        ws = lab / "findings" / "bounty" / "test-finding"
+        fm = _parse_frontmatter(ws / "report_h1.md")
+        assert fm["program"] == 'Foo "Bar"', f"quoted program name must parse; got {fm['program']!r}"
+
+    def test_program_name_with_brackets_parses_as_string(self, tmp_path, monkeypatch):
+        """A program name like '[Foo] Bar' must parse as a string, not a YAML
+        flow list. The program name comes from engagement YAML (not the
+        validated --name), so it can contain brackets."""
+        lab = tmp_path / "lab"
+        (lab / "engagements").mkdir(parents=True)
+        (lab / "engagements" / "b-eng.yaml").write_text(
+            "engagement: {name: '[Foo] Bar', type: bounty, platform: hackerone, "
+            "program_url: 'https://hackerone.com/foo'}\n"
+            "in_scope: [{pattern: example.com}]\n"
+            "denied: []\n",
+            encoding="utf-8",
+        )
+        (lab / "scope.yaml").write_text("denied: [{pattern: '*.gov'}]\n", encoding="utf-8")
+        templates_dst = lab / "templates"
+        templates_dst.mkdir()
+        templates_src = WT_ROOT / "templates"
+        for sub in templates_src.iterdir():
+            (templates_dst / sub.name).symlink_to(sub, target_is_directory=True)
+        monkeypatch.setenv("HACKING_LAB", str(lab))
+        rc = _run_lab_new(self.lab_new, [
+            "bounty", "test-finding", "--engagement", "b-eng",
+        ], lab, monkeypatch)
+        assert rc == 0
+        ws = lab / "findings" / "bounty" / "test-finding"
+        fm = _parse_frontmatter(ws / "report_h1.md")
+        assert fm["program"] == "[Foo] Bar", f"bracketed program name must parse as string; got {fm['program']!r}"
+        assert isinstance(fm["program"], str)

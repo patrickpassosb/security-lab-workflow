@@ -319,7 +319,13 @@ def extract_host(target: str) -> str:
     if not target:
         return ""
     if "://" in target:
-        parsed = urlparse(target)
+        # P2: urlparse() raises ValueError on malformed bracketed IPv6 URLs
+        # (e.g. "http://[::1,"). Fail closed — return "" so check_target_scope
+        # treats the target as UNKNOWN rather than crashing the check command.
+        try:
+            parsed = urlparse(target)
+        except ValueError:
+            return ""
         return (parsed.hostname or "").lower().strip(".")
     host = target.split("/", 1)[0].lower().strip(".")
     if ":" in host:

@@ -1,10 +1,10 @@
 ---
 schema: security-lab/hackerone-report/v1
-engagement: {{ENGAGEMENT}}
+engagement: "{{ENGAGEMENT}}"
 platform: hackerone
-program: {{PROGRAM}}
-program_url: {{PROGRAM_URL}}
-title: {{TITLE}}
+program: "{{PROGRAM}}"
+program_url: "{{PROGRAM_URL}}"
+title: "{{TITLE}}"
 asset_id: ""
 asset_name: ""
 weakness: ""
