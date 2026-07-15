@@ -208,6 +208,17 @@ def main() -> int:
         print(f"ERROR: --engagement is required for type '{args['type']}'", file=sys.stderr)
         return 2
 
+    # S1/R6: validate the engagement name before using it in a path. --name is
+    # already validated (lines 148-155), but --engagement was not, allowing
+    # path traversal (e.g. '../evil') to read/copy a file outside engagements/.
+    if not labutil.validate_name(engagement):
+        print(
+            f"ERROR: invalid engagement name {engagement!r}. Use only letters, "
+            f"numbers, dots, hyphens, underscores. No '..', '/', or '\\'.",
+            file=sys.stderr,
+        )
+        return 2
+
     eng_scope_path = ENGAGEMENTS_DIR / f"{engagement}.yaml"
     if not eng_scope_path.exists():
         print(f"ERROR: engagement scope file not found: {eng_scope_path}", file=sys.stderr)

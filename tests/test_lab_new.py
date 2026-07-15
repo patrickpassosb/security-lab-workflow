@@ -359,3 +359,38 @@ class TestExampleBountyAssets:
     def test_example_bounty_has_other_type_asset(self, example_bounty):
         types = {a["asset_type"] for a in example_bounty["assets"]}
         assert "OTHER" in types, "must have at least one OTHER-type asset"
+
+    def test_engagement_name_path_traversal_rejected(self, tmp_path, monkeypatch):
+        """S1/R6: --engagement with path traversal (e.g. '../evil') must be
+        rejected before constructing the engagement scope path."""
+        lab = tmp_path / "lab"
+        (lab / "engagements").mkdir(parents=True)
+        # Create a valid engagement + an evil YAML outside engagements/.
+        (lab / "engagements" / "test-eng.yaml").write_text(
+            "engagement: {name: Test, type: bounty, platform: hackerone, "
+            "program_url: https://hackerone.com/test}\n"
+            "in_scope: [{pattern: example.com}]\n"
+            "denied: []\n",
+            encoding="utf-8",
+        )
+        evil = tmp_path / "evil.yaml"
+        evil.write_text(
+            "engagement: {name: EVIL, program_url: https://evil.com}\n"
+            "in_scope: [{pattern: '*'}]\n"
+            "denied: []\n",
+            encoding="utf-8",
+        )
+        (lab / "scope.yaml").write_text(
+            "denied: [{pattern: '*.gov'}]\n", encoding="utf-8"
+        )
+        monkeypatch.setenv("HACKING_LAB", str(lab))
+        # Try --engagement ../evil (path traversal to read evil.yaml outside engagements/)
+        cli = _import_lab_new()
+        monkeypatch.setattr(
+            "sys.argv",
+            ["lab-new", "bounty", "test-finding", "--engagement", "../evil"],
+        )
+        rc = cli.main()
+        assert rc == 2, (
+            f"engagement path traversal should be rejected (exit 2); got {rc}"
+        )
