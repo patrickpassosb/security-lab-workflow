@@ -558,25 +558,25 @@ _PLACEHOLDER_PATTERNS = [
     re.compile(r"\bTODO\b", re.IGNORECASE),
     re.compile(r"\bTBD\b", re.IGNORECASE),
     # Line-anchored parenthesized template instruction (whole-line placeholder).
-    # B2/R2 + S4/R3: use imperative instruction verbs. Expanded from the
-    # Round 2 set to cover common template-instruction verbs that Round 2
-    # missed (explain, provide, fill, insert, list, enter, write, detail,
-    # summarize, replace, add, specify, outline, state). Excludes nouns and
-    # common prose words (step, what, reference) that false-positived.
+    # B2/R2 + S4/R3 + B1/R4: use imperative instruction verbs. Expanded from
+    # Round 2, but B1/R4 removed `state` (common noun in security prose like
+    # "(state: production)"). Excludes colon-containing labels via [^:\)].
     re.compile(
         r"^\s*\([^\)]*(describe|paste|include|suggest|explain|provide|fill|insert|"
-        r"list|enter|write|detail|summarize|replace|add|specify|outline|state|"
+        r"list|enter|write|detail|summarize|replace|add|specify|outline|"
         r"any caveats)"
-        r"[^\)]*\)\s*$",
+        r"[^:\)]*\)\s*$",
         re.IGNORECASE | re.MULTILINE,
     ),
     # R10: unanchored parenthesized template instruction (mid-line placeholder).
-    # B2/R2 + S4/R3: same expanded imperative verb list as above.
+    # B1/R4: exclude colon-containing labels like "(state: production)" by
+    # using [^:\)] instead of [^\)] — a parenthesized phrase with a colon is a
+    # label, not an imperative instruction. Also removed `state` (noun).
     re.compile(
         r"\(\s*(describe|paste|include|suggest|explain|provide|fill|insert|"
-        r"list|enter|write|detail|summarize|replace|add|specify|outline|state|"
+        r"list|enter|write|detail|summarize|replace|add|specify|outline|"
         r"any caveats)"
-        r"[^\)]{0,80}\)",
+        r"[^:\)]{0,80}\)",
         re.IGNORECASE,
     ),
 ]

@@ -2969,3 +2969,72 @@ class TestAdversarialRound3:
         assert not any("placeholder" in i.message.lower() for i in errors), (
             f"legitimate prose should not be flagged; got {errors}"
         )
+
+
+# ─── Adversarial Round 4 fixes (regression tests) ─────────────────────────────
+
+
+class TestAdversarialRound4:
+    """Regression tests for findings from the fourth adversarial review round."""
+
+    def test_lab_scope_handles_dashdash_separator(self, tmp_path, monkeypatch):
+        """S1/R4: lab-scope must handle '--' (POSIX end-of-options) so lab-new's
+        argument-injection guard doesn't break scope checking. A globally
+        denied .gov target passed via '--' must still be DENIED (exit 2)."""
+        # Set up a temp lab with a global denied list.
+        lab = tmp_path / "lab"
+        (lab / "engagements").mkdir(parents=True)
+        (lab / "engagements" / "test-eng.yaml").write_text(
+            yaml.safe_dump({
+                "engagement": {"name": "Test", "type": "bounty",
+                               "platform": "hackerone",
+                               "program_url": "https://hackerone.com/test"},
+                "in_scope": [{"pattern": "example.com"}],
+                "denied": [],
+            }, sort_keys=False),
+            encoding="utf-8",
+        )
+        (lab / "scope.yaml").write_text(
+            yaml.safe_dump({"denied": [{"pattern": "*.gov"}]}, sort_keys=False),
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("HACKING_LAB", str(lab))
+        # Import lab-scope and run with '--' before the target.
+        import importlib.machinery
+        import importlib.util
+        bin_dir = HERE.parent / "bin"
+        loader = importlib.machinery.SourceFileLoader(
+            "lab_scope_r4", str(bin_dir / "lab-scope")
+        )
+        spec = importlib.util.spec_from_loader("lab_scope_r4", loader)
+        mod = importlib.util.module_from_spec(spec)
+        loader.exec_module(mod)
+        # Override LAB + dirs to our temp lab.
+        mod.LAB = lab
+        mod.GLOBAL_SCOPE = lab / "scope.yaml"
+        mod.ENGAGEMENTS_DIR = lab / "engagements"
+        code, msg = mod.check_target(
+            "evil.gov",
+            mod.merge_scopes(mod.load_global_scope(), mod.load_engagement_scope("test-eng")),
+        )
+        assert code == 2, (
+            f"globally denied .gov target must be DENIED even with '--'; "
+            f"got code={code} msg={msg}"
+        )
+
+    def test_colon_label_not_flagged_as_placeholder(self, tmp_path):
+        """B1/R4: a parenthesized label like '(state: production)' must NOT be
+        flagged as a template placeholder (it's a label, not an instruction)."""
+        ws = _make_workspace(tmp_path)
+        lab = _make_engagement(tmp_path)
+        body = (
+            "# Title\n\n## Description\n\n"
+            "The database (state: production) was queried.\n\n"
+            "## Impact\n\nreal impact text\n"
+        )
+        _write_report(ws, body=body)
+        issues = h1report.check_report(ws, lab_root=lab)
+        errors = [i for i in issues if i.level == "ERROR"]
+        assert not any("placeholder" in i.message.lower() for i in errors), (
+            f"'(state: production)' is a label, not a placeholder; got {errors}"
+        )
