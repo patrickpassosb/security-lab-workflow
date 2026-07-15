@@ -52,4 +52,7 @@ regexes = [
     '''MIIBVAIB''',
     '''MIIEpAIBAAKCAQEA0Z3VS5Jcd6S5''',
     '''MIIEpAIBAAKCAQEA0Z3[^A-Za-z0-9]''',
+    # PGP private key block fixtures (synthetic fake base64, not real keys).
+    '''lQVYBF2asdfGhjklFakeKeyNotReal''',
+    '''fakeBase64Here''',
 ]
