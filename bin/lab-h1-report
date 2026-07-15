@@ -265,7 +265,9 @@ def cmd_status(args: list[str]) -> int:
             if url:
                 print(f"h1_url: {url}")
             # B9: if record.json exists but has no valid schema/id, warn.
-            if rid is None and url is None:
+            # B6/R2: use `not rid` (covers both None and "") — status_report
+            # returns "" (not None) for empty report_id/url.
+            if not rid and not url:
                 print("record_warning: record.json is corrupt or has an unrecognized schema")
         else:
             print("record: none")

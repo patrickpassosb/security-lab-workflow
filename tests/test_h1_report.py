@@ -513,7 +513,7 @@ class TestBodyAndPlaceholders:
         lab = _make_engagement(tmp_path)
         body = (
             "# Title\n\n## Description\n\nreal description text\n\n"
-            "## Impact\n\n(What can an attacker do?)\n"
+            "## Impact\n\n(describe the impact here)\n"
         )
         _write_report(ws, body=body)
         issues = h1report.check_report(ws, lab_root=lab)
@@ -2673,3 +2673,185 @@ class TestAdversarialRound1:
                 url="https://hackerone.com/reports/1234567",
                 submitted_at="2026-07-13T21:30:00Z",
             )
+
+
+# ─── Adversarial Round 2 fixes (regression tests) ─────────────────────────────
+
+
+class TestAdversarialRound2:
+    """Regression tests for findings from the second adversarial review round."""
+
+    def test_manifest_path_escape_rejected_in_status(self, tmp_path):
+        """S1/R2: a manifest with report_body.path = '/etc/hostname' must be
+        flagged as drift (not followed to an external file)."""
+        ws = _make_workspace(tmp_path)
+        lab = _make_engagement(tmp_path)
+        _write_report(ws, VALID_SOURCE_FRONTMATTER)
+        result = h1report.prepare_report(ws, lab_root=lab)
+        pkg = Path(result["package_path"])
+        # Tamper the manifest to point report_body.path at /etc/hostname.
+        import json as _json
+        mf = pkg / "manifest.json"
+        data = _json.loads(mf.read_text())
+        data["report_body"]["path"] = "/etc/hostname"
+        mf.write_text(_json.dumps(data, indent=2, sort_keys=True))
+        status = h1report.status_report(ws, lab_root=lab)
+        assert not status.get("integrity_ok", True), (
+            "expected integrity failure on manifest path escape; "
+            f"got {status.get('integrity_drift')}"
+        )
+        assert any("escapes package" in d for d in status.get("integrity_drift", [])), (
+            f"expected 'escapes package' in drift; got {status.get('integrity_drift')}"
+        )
+
+    def test_relative_package_path_accepted(self, tmp_path, monkeypatch):
+        """B1/R2: a relative --package path like 'submission/prepared-<ts>'
+        must be accepted (resolved against the workspace, not CWD)."""
+        ws = _make_workspace(tmp_path)
+        lab = _make_engagement(tmp_path)
+        _write_report(ws, VALID_SOURCE_FRONTMATTER)
+        result = h1report.prepare_report(ws, lab_root=lab)
+        pkg_id = result["package_id"]
+        # Use a relative path (relative to workspace) — must not be rejected.
+        rel = f"submission/{pkg_id}"
+        monkeypatch.chdir(ws)
+        rec = h1report.record_submission(
+            ws, lab_root=lab, package=rel,
+            h1_id="1234567", url="https://hackerone.com/reports/1234567",
+            submitted_at="2026-07-13T21:30:00Z",
+        )
+        assert rec["report_id"] == "1234567"
+
+    def test_legitimate_parenthesized_prose_not_flagged(self, tmp_path):
+        """B2/R2: legitimate prose like '(step by step)' must NOT be flagged
+        as a template placeholder (R10 fix was too broad)."""
+        ws = _make_workspace(tmp_path)
+        lab = _make_engagement(tmp_path)
+        body = (
+            "# Title\n\n## Description\n\n"
+            "We tested this (step by step) and found the bug.\n\n"
+            "## Impact\n\nreal impact text\n"
+        )
+        _write_report(ws, body=body)
+        issues = h1report.check_report(ws, lab_root=lab)
+        errors = [i for i in issues if i.level == "ERROR"]
+        assert not any("placeholder" in i.message.lower() for i in errors), (
+            f"legitimate prose '(step by step)' should not be flagged; got {errors}"
+        )
+
+    def test_imperative_parenthesized_still_flagged(self, tmp_path):
+        """B2/R2: imperative instructions like '(describe the bug here)' must
+        STILL be flagged (the tightened pattern catches the first-word form)."""
+        ws = _make_workspace(tmp_path)
+        lab = _make_engagement(tmp_path)
+        body = (
+            "# Title\n\n## Description\n\n"
+            "This is (describe the bug here) the issue.\n\n"
+            "## Impact\n\nreal impact text\n"
+        )
+        _write_report(ws, body=body)
+        issues = h1report.check_report(ws, lab_root=lab)
+        errors = [i for i in issues if i.level == "ERROR"]
+        assert any("placeholder" in i.message.lower() for i in errors), (
+            f"imperative '(describe the bug here)' should be flagged; got {errors}"
+        )
+
+    def test_staged_name_invalid_warns_in_check(self, tmp_path):
+        """B3/R2: an invalid staged_name (e.g. '..') must produce a WARN in
+        check (so the author knows prepare will ignore it)."""
+        ws = _make_workspace(tmp_path)
+        lab = _make_engagement(tmp_path)
+        (ws / "evidence").mkdir()
+        (ws / "evidence" / "req.txt").write_text("GET / HTTP/1.1\n", encoding="utf-8")
+        fm = copy.deepcopy(VALID_SOURCE_FRONTMATTER)
+        fm["attachments"] = [
+            {"source": "evidence/req.txt", "staged_name": "..",
+             "classification": "attachment-candidate"}
+        ]
+        _write_report(ws, fm)
+        issues = h1report.check_report(ws, lab_root=lab)
+        warns = [i for i in issues if i.level == "WARN"]
+        assert any("staged_name" in i.message.lower() for i in warns), (
+            f"expected staged_name WARN; got {warns}"
+        )
+
+    def test_symlinked_manifest_rejected(self, tmp_path):
+        """B4/R2: a symlinked manifest.json must be rejected by _load_manifest."""
+        ws = _make_workspace(tmp_path)
+        lab = _make_engagement(tmp_path)
+        _write_report(ws, VALID_SOURCE_FRONTMATTER)
+        result = h1report.prepare_report(ws, lab_root=lab)
+        pkg = Path(result["package_path"])
+        # Replace manifest.json with a symlink to an external file.
+        real = tmp_path / "fake-manifest.json"
+        import json as _json
+        real.write_text(_json.dumps({
+            "schema": "security-lab/hackerone-package/v1",
+            "report_source": {"path": "report_h1.md", "sha256": "x", "size": 1},
+            "report_body": {"path": "report.md", "sha256": "x", "size": 1},
+            "scope_snapshots": [], "attachments": [],
+        }), encoding="utf-8")
+        (pkg / "manifest.json").unlink()
+        os.symlink(real, pkg / "manifest.json")
+        # _load_manifest must return None (symlink rejected).
+        assert h1report._load_manifest(pkg) is None
+
+    def test_large_attachment_triggers_truncation_warn(self, tmp_path):
+        """B5/R2: an attachment >256KB must produce a WARN that the tail was
+        not scanned."""
+        ws = _make_workspace(tmp_path)
+        lab = _make_engagement(tmp_path)
+        (ws / "evidence").mkdir()
+        big = "x" * (h1report._SECRET_SCAN_MAX_BYTES + 100)
+        (ws / "evidence" / "big.txt").write_text(big, encoding="utf-8")
+        fm = copy.deepcopy(VALID_SOURCE_FRONTMATTER)
+        fm["attachments"] = [
+            {"source": "evidence/big.txt", "classification": "attachment-candidate"}
+        ]
+        _write_report(ws, fm)
+        issues = h1report.check_report(ws, lab_root=lab)
+        warns = [i for i in issues if i.level == "WARN"]
+        assert any("truncat" in i.message.lower() for i in warns), (
+            f"expected truncation WARN for >256KB attachment; got {warns}"
+        )
+
+    def test_gitlab_token_detected(self, tmp_path):
+        """S5/R2: a GitLab token (glpat-) must be detected as a secret."""
+        ws = _make_workspace(tmp_path)
+        lab = _make_engagement(tmp_path)
+        body = (
+            "# Title\n\n## Description\n\n"
+            "The token was glpat-AAAAAAAAAAAAAAAAAAAA in the config.\n\n"
+            "## Impact\n\nreal impact\n"
+        )
+        _write_report(ws, body=body)
+        issues = h1report.check_report(ws, lab_root=lab)
+        errors = [i for i in issues if i.level == "ERROR"]
+        assert any("api key" in i.message.lower() or "secret" in i.message.lower()
+                   for i in errors), (
+            f"expected glpat- token detection; got {errors}"
+        )
+
+    def test_record_body_sha256_cross_checked(self, tmp_path):
+        """S2/R2: tampering report.md after record-submission must be detected
+        via the record.json report_body_sha256 cross-check."""
+        ws = _make_workspace(tmp_path)
+        lab = _make_engagement(tmp_path)
+        _write_report(ws, VALID_SOURCE_FRONTMATTER)
+        result = h1report.prepare_report(ws, lab_root=lab)
+        pkg = Path(result["package_path"])
+        h1report.record_submission(
+            ws, lab_root=lab, package=result["package_id"],
+            h1_id="1234567", url="https://hackerone.com/reports/1234567",
+            submitted_at="2026-07-13T21:30:00Z",
+        )
+        # Tamper report.md in the package.
+        (pkg / "report.md").write_text("TAMPERED CONTENT\n", encoding="utf-8")
+        status = h1report.status_report(ws, lab_root=lab)
+        assert not status.get("integrity_ok", True), (
+            "expected integrity failure after report.md tamper; "
+            f"got {status.get('integrity_drift')}"
+        )
+        assert any("report.md" in d for d in status.get("integrity_drift", [])), (
+            f"expected report.md in drift; got {status.get('integrity_drift')}"
+        )

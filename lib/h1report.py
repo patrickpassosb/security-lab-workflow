@@ -490,6 +490,34 @@ def _is_safe_engagement_name(name: str) -> bool:
     return not (p.is_absolute() or any(part == ".." for part in p.parts))
 
 
+def _safe_pkg_relative_path(rel: str, pkg_dir: Path) -> Path | None:
+    """S2/R2: validate that a manifest-provided path field (`report_source.path`,
+    `report_body.path`, `attachments[].staged_path`) resolves strictly inside
+    `pkg_dir`. Returns the resolved absolute Path if safe, or None if the path
+    is absolute, contains `..`, is empty, or escapes the package directory.
+
+    This closes the integrity-bypass where `Path("/pkg") / "/etc/hostname"`
+    yields `/etc/hostname` (Python's Path.__truediv__ discards the left operand
+    when the right is absolute). Manifest path fields are untrusted data and
+    must never be allowed to point outside the package.
+    """
+    if not isinstance(rel, str) or not rel:
+        return None
+    if "\\" in rel or "\x00" in rel:
+        return None
+    p = Path(rel)
+    if p.is_absolute():
+        return None
+    if any(part == ".." for part in p.parts):
+        return None
+    resolved = (pkg_dir / p).resolve()
+    try:
+        resolved.relative_to(pkg_dir.resolve())
+    except ValueError:
+        return None
+    return resolved
+
+
 # Severity bucket validation. Per the task spec:
 #   low 0.1-3.9, medium 4.0-6.9, high 7.0-8.9, critical 9.0-10.0
 #   score 0 is NOT supported (reject even if rating would be "none").
@@ -510,16 +538,20 @@ _PLACEHOLDER_PATTERNS = [
     re.compile(r"\bTODO\b", re.IGNORECASE),
     re.compile(r"\bTBD\b", re.IGNORECASE),
     # Line-anchored parenthesized template instruction (whole-line placeholder).
+    # B2/R2: use imperative verbs only (describe/paste/include/suggest), not
+    # nouns/common words (step/what/reference) that appear in normal prose.
     re.compile(
-        r"^\s*\([^\)]*(describe|what|step|include|reference|paste|suggested|any caveats)"
+        r"^\s*\([^\)]*(describe|paste|include|suggest|any caveats)"
         r"[^\)]*\)\s*$",
         re.IGNORECASE | re.MULTILINE,
     ),
     # R10: unanchored parenthesized template instruction (mid-line placeholder).
-    # Catches "(describe the bug)" embedded in prose like "This is (describe the
-    # bug) the issue." without requiring the whole line to be the instruction.
+    # B2/R2: tighten to avoid false-positives on legitimate prose like
+    # "(step by step)" or "(see step 3)". Only match imperative INSTRUCTION
+    # verbs as the first word (describe/paste/include/suggest), not nouns or
+    # common words (step/what/reference) that appear in normal prose.
     re.compile(
-        r"\([^\)]{0,80}(describe|what|step|include|reference|paste|suggested|any caveats)"
+        r"\(\s*(describe|paste|include|suggest|any caveats)"
         r"[^\)]{0,80}\)",
         re.IGNORECASE,
     ),
@@ -636,11 +668,14 @@ _API_KEY_PREFIXES = (
     "AKIA",       # AWS access key id
     "sk_live_",   # Stripe live secret
     "sk-",        # OpenAI / generic
-    "ghp_",       # GitHub PAT
+    "ghp_",       # GitHub PAT (classic)
     "gho_",       # GitHub OAuth
+    "github_pat_",  # GitHub fine-grained PAT (S5/R2)
+    "glpat-",     # GitLab token (S5/R2)
     "xoxb-",      # Slack bot token
     "xoxp-",      # Slack user token
     "AIza",       # Google API key
+    "SG.",        # SendGrid key (S5/R2)
 )
 # Prefixes that are example/redacted and must NOT match.
 _EXAMPLE_PREFIXES = ("example_", "test_", "demo_", "sample_", "REDACTED", "YOUR_", "REPLACE")
@@ -874,6 +909,16 @@ def _validate_attachments_shape(fm: dict[str, Any], path: Path) -> list[Issue]:
                 "ERROR", loc,
                 f"attachments[{idx}].classification must be {ATTACHMENT_CLASSIFICATION!r}, "
                 f"got {classification!r}",
+            ))
+        # B3/R2: validate staged_name if present — prepare silently falls back
+        # to the basename when _safe_staged_name rejects it; warn the author
+        # so they know their staged_name will be ignored.
+        staged_name = a.get("staged_name")
+        if _is_nonempty_str(staged_name) and not _safe_staged_name(staged_name):
+            issues.append(Issue(
+                "WARN", loc,
+                f"attachments[{idx}].staged_name {staged_name!r} is not a safe "
+                f"staged name (prepare will fall back to the source basename)",
             ))
     return issues
 
@@ -1181,6 +1226,14 @@ def _validate_no_secrets(fm: dict[str, Any], body: str, workspace: Path, path: P
                 att_text = resolved.read_text(encoding="utf-8", errors="replace")
             except OSError:
                 continue
+            # B5/R2: warn if the attachment exceeds the secret-scan cap — the
+            # tail is not scanned, so a secret could hide there.
+            if len(att_text.encode("utf-8")) > _SECRET_SCAN_MAX_BYTES:
+                issues.append(Issue(
+                    "WARN", report_loc + f" (attachment {source!r})",
+                    f"attachment exceeds {_SECRET_SCAN_MAX_BYTES // 1024}KB; "
+                    f"secret scan truncated, tail not scanned — review manually",
+                ))
             issues.extend(_scan_secrets(att_text, report_loc + f" (attachment {source!r})"))
     return issues
 
@@ -1432,12 +1485,17 @@ def status_report(
 
     # Integrity: re-hash report_h1.md and report.md in the package and compare
     # to the manifest's stored hashes. Also re-hash each staged attachment.
+    # S1/R2: manifest path fields are untrusted — validate they resolve inside
+    # the package dir before hashing (Path("/pkg") / "/etc/hostname" escapes).
     drift: list[str] = []
     for key, subkey in (("report_source", "report_h1.md"), ("report_body", "report.md")):
         entry = manifest.get(key, {}) or {}
         stored = entry.get("sha256", "")
         rel = entry.get("path", subkey)
-        pkg_file = latest_pkg_path / rel
+        pkg_file = _safe_pkg_relative_path(rel, latest_pkg_path)
+        if pkg_file is None:
+            drift.append(f"{rel} (manifest path escapes package)")
+            continue
         if not pkg_file.is_file():
             drift.append(rel)
             continue
@@ -1462,7 +1520,10 @@ def status_report(
             stored = att.get("sha256", "")
             if not rel:
                 continue
-            pkg_file = latest_pkg_path / rel
+            pkg_file = _safe_pkg_relative_path(rel, latest_pkg_path)
+            if pkg_file is None:
+                drift.append(f"{rel} (staged_path escapes package)")
+                continue
             if not pkg_file.is_file():
                 drift.append(rel)
                 continue
@@ -1478,6 +1539,9 @@ def status_report(
     # manifest hashes) would pass the per-file checks above, but the manifest's
     # own hash is pinned in record.json at submission time. If they differ,
     # the manifest was forged after submission.
+    # S2/R2: also cross-check record.json's report_body_sha256 against the
+    # actual report.md on disk (defense-in-depth — catches report.md tampering
+    # even if the manifest is also forged).
     record_path_check = latest_pkg_path / "record.json"
     if record_path_check.is_file():
         try:
@@ -1492,6 +1556,18 @@ def status_report(
                     else:
                         if actual_manifest_sha != stored_manifest_sha:
                             drift.append("manifest.json (forged after submission)")
+                # S2: cross-check report_body_sha256 against the actual report.md.
+                stored_body_sha = rec_check.get("report_body_sha256", "")
+                if stored_body_sha:
+                    body_path = _safe_pkg_relative_path("report.md", latest_pkg_path)
+                    if body_path is not None and body_path.is_file():
+                        try:
+                            actual_body_sha = _sha256_file(body_path)
+                        except OSError:
+                            drift.append("report.md (unreadable)")
+                        else:
+                            if actual_body_sha != stored_body_sha:
+                                drift.append("report.md (record hash mismatch)")
         except (OSError, ValueError):
             drift.append("record.json (corrupt)")
     result["integrity_drift"] = drift
@@ -1560,6 +1636,26 @@ def _sha256_bytes(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
+def _atomic_write_bytes_0600(path: Path, data: bytes) -> None:
+    """Atomically write `data` to `path` with 0o600 permissions (S3/R2).
+
+    Uses O_WRONLY | O_CREAT | O_EXCL so we never clobber an existing file,
+    and sets 0o600 so the content isn't world-readable on multi-user systems.
+    Writes to a temp file first, then renames (atomic on the same filesystem).
+    """
+    path = Path(path)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(data)
+        os.replace(str(tmp), str(path))
+    except Exception:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp)
+        raise
+
+
 def _is_binary_sniff(path: Path) -> bool:
     """Heuristic: True if a NUL byte appears in the first 8KB of the file."""
     try:
@@ -1584,7 +1680,10 @@ def _content_type_for(path_str: str) -> str:
 
 def _find_latest_package(workspace: Path) -> tuple[Path | None, str | None]:
     """Find the lexically-last prepared-<timestamp> directory under
-    <workspace>/submission/. Returns (path, package_id) or (None, None)."""
+    <workspace>/submission/. Returns (path, package_id) or (None, None).
+
+    B7/R2: skip symlinked package dirs (defense-in-depth — a symlinked
+    prepared-<ts> could point outside the workspace)."""
     submission = workspace / "submission"
     if not submission.is_dir():
         return None, None
@@ -1592,6 +1691,8 @@ def _find_latest_package(workspace: Path) -> tuple[Path | None, str | None]:
     pat = re.compile(r"^prepared-\d{8}T\d{6}Z$")
     candidates: list[tuple[str, Path]] = []
     for entry in submission.iterdir():
+        if entry.is_symlink():
+            continue  # B7: skip symlinked package dirs
         if not entry.is_dir():
             continue
         name = entry.name
@@ -1606,8 +1707,13 @@ def _find_latest_package(workspace: Path) -> tuple[Path | None, str | None]:
 
 def _load_manifest(package: Path) -> dict[str, Any] | None:
     """Load and schema-validate a package manifest.json. Returns None if
-    missing, corrupt, or wrong schema."""
+    missing, corrupt, or wrong schema.
+
+    B4/R2: reject a symlinked manifest.json (defense-in-depth — a symlinked
+    manifest could point to an attacker-controlled file outside the package)."""
     mp = package / "manifest.json"
+    if mp.is_symlink():
+        return None  # B4: reject symlinked manifest
     if not mp.is_file():
         return None
     try:
@@ -1836,11 +1942,13 @@ def prepare_report(
             raise PackageError(f"cannot stage report_h1.md: {e}") from e
 
         # report.md: frontmatter-stripped body.
+        # S3/R2: write with 0o600 (consistent with report_h1.md and
+        # record.json) so report content isn't world-readable on multi-user
+        # systems. Use O_EXCL so we never clobber an existing file.
         body_text = _render_report_body(report)
         dest_body = tmp_pkg / "report.md"
         body_bytes = body_text.encode("utf-8")
-        with open(dest_body, "wb") as f:
-            f.write(body_bytes)
+        _atomic_write_bytes_0600(dest_body, body_bytes)
         sha_body = _sha256_bytes(body_bytes)
         size_body = len(body_bytes)
 
@@ -1942,7 +2050,8 @@ def prepare_report(
             "attachments": manifest_attachments,
         }
         manifest_bytes = json.dumps(manifest, indent=2, sort_keys=True).encode("utf-8")
-        (tmp_pkg / "manifest.json").write_bytes(manifest_bytes)
+        # S3/R2: write manifest with 0o600 (consistent with other package files).
+        _atomic_write_bytes_0600(tmp_pkg / "manifest.json", manifest_bytes)
 
         # 4. Atomically publish: rename temp -> final.
         try:
@@ -1988,7 +2097,10 @@ def _resolve_package(workspace: Path, package: str) -> Path:
     submission_dir = (workspace / "submission").resolve()
     if pkg.is_absolute() or "/" in package:
         # Treat as a path — but it MUST resolve inside <workspace>/submission/.
-        resolved = pkg.resolve()
+        # B1/R2: resolve relative paths against the WORKSPACE, not the process
+        # CWD (pkg.resolve() uses CWD, which rejected valid relative paths like
+        # 'submission/prepared-...'). Join with workspace first, then resolve.
+        resolved = (workspace / pkg).resolve()
         try:
             resolved.relative_to(submission_dir)
         except ValueError:

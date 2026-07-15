@@ -189,6 +189,18 @@ def main() -> int:
     args = parse_args()
     cfg = TYPE_CONFIG[args["type"]]
 
+    # S4/R2: reject newlines in --target to prevent YAML injection into the
+    # report_h1.md frontmatter live_targets list (a target like
+    # 'https://evil\n  - https://gov.example.com' would inject an extra entry).
+    if args["type"] == "bounty" and args["target"]:
+        if "\n" in args["target"] or "\r" in args["target"]:
+            print(
+                "ERROR: --target contains a newline; refusing to inject into "
+                "YAML frontmatter (use a single URL)",
+                file=sys.stderr,
+            )
+            return 2
+
     engagement = args["engagement"] or cfg["default_engagement"]
     if not engagement:
         print(f"ERROR: --engagement is required for type '{args['type']}'", file=sys.stderr)
