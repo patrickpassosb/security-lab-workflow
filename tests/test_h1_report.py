@@ -2855,3 +2855,117 @@ class TestAdversarialRound2:
         assert any("report.md" in d for d in status.get("integrity_drift", [])), (
             f"expected report.md in drift; got {status.get('integrity_drift')}"
         )
+
+
+# ─── Adversarial Round 3 fixes (regression tests) ─────────────────────────────
+
+
+class TestAdversarialRound3:
+    """Regression tests for findings from the third adversarial review round."""
+
+    def test_record_submission_uses_hardcoded_report_md_path(self, tmp_path):
+        """S1/B1/R3: record_submission must hash the canonical report.md, not
+        a manifest-provided path that could escape the package."""
+        ws = _make_workspace(tmp_path)
+        lab = _make_engagement(tmp_path)
+        _write_report(ws, VALID_SOURCE_FRONTMATTER)
+        result = h1report.prepare_report(ws, lab_root=lab)
+        pkg = Path(result["package_path"])
+        # Tamper manifest to point report_body.path at an external file.
+        import json as _json
+        mf = pkg / "manifest.json"
+        data = _json.loads(mf.read_text())
+        data["report_body"]["path"] = "/etc/hostname"
+        mf.write_text(_json.dumps(data, indent=2, sort_keys=True))
+        # record_submission must hash the ACTUAL report.md, not /etc/hostname.
+        h1report.record_submission(
+            ws, lab_root=lab, package=result["package_id"],
+            h1_id="1234567", url="https://hackerone.com/reports/1234567",
+            submitted_at="2026-07-13T21:30:00Z",
+        )
+        # Read the record.json to verify the stored hash matches the actual
+        # report.md, not /etc/hostname.
+        import json as _json
+        record_data = _json.loads((pkg / "record.json").read_text())
+        actual_body_sha = h1report._sha256_file(pkg / "report.md")
+        assert record_data["report_body_sha256"] == actual_body_sha, (
+            "record_submission hashed the wrong file (manifest path escape)"
+        )
+
+    def test_symlinked_engagement_scope_snapshot_rejected(self, tmp_path):
+        """S2/R3: a symlinked engagement_scope_snapshot.yaml must be rejected."""
+        ws = _make_workspace(tmp_path, engagement="example-bounty")
+        lab = _make_engagement(tmp_path)
+        # Create a symlinked snapshot pointing to an external permissive YAML.
+        evil = tmp_path / "evil-scope.yaml"
+        evil.write_text(yaml.safe_dump({
+            "engagement": {"type": "bounty"},
+            "in_scope": [{"pattern": "*"}],
+            "denied": [],
+            "assets": [
+                {"id": "api", "display_name": "Public API",
+                 "asset_type": "api", "patterns": ["api.example.com"],
+                 "finding_types": ["live_web"],
+                 "eligible_for_submission": True, "eligible_for_bounty": True},
+            ],
+        }, sort_keys=False), encoding="utf-8")
+        (ws / "engagement_scope_snapshot.yaml").unlink(missing_ok=True)
+        os.symlink(evil, ws / "engagement_scope_snapshot.yaml")
+        (ws / "scope_snapshot.yaml").write_text(
+            yaml.safe_dump({"denied": [{"pattern": "*.gov"}]}, sort_keys=False),
+            encoding="utf-8",
+        )
+        fm = copy.deepcopy(VALID_LIVE_FRONTMATTER)
+        _write_report(ws, fm)
+        issues = h1report.check_report(ws, lab_root=lab)
+        errors = [i for i in issues if i.level == "ERROR"]
+        assert any("symlink" in i.message.lower() for i in errors), (
+            f"expected symlink rejection for engagement snapshot; got {errors}"
+        )
+
+    def test_symlinked_engagement_txt_rejected(self, tmp_path):
+        """S3/R3: a symlinked engagement.txt must be rejected (return empty)."""
+        ws = _make_workspace(tmp_path, engagement="example-bounty")
+        # Replace engagement.txt with a symlink to an external file.
+        (ws / "engagement.txt").unlink()
+        evil = tmp_path / "evil-eng.txt"
+        evil.write_text("attacker-engagement\n", encoding="utf-8")
+        os.symlink(evil, ws / "engagement.txt")
+        # read_engagement_name must return "" (symlink rejected).
+        assert h1report.read_engagement_name(ws) == ""
+
+    def test_expanded_placeholder_verbs_caught(self, tmp_path):
+        """S4/R3: expanded placeholder verbs (explain, provide, fill, etc.)
+        must be caught as template placeholders."""
+        ws = _make_workspace(tmp_path)
+        lab = _make_engagement(tmp_path)
+        for verb in ["explain", "provide", "fill", "insert", "summarize"]:
+            body = (
+                f"# Title\n\n## Description\n\n"
+                f"({verb} the vulnerability here)\n\n"
+                f"## Impact\n\nreal impact text\n"
+            )
+            _write_report(ws, body=body)
+            issues = h1report.check_report(ws, lab_root=lab)
+            errors = [i for i in issues if i.level == "ERROR"]
+            assert any("placeholder" in i.message.lower() for i in errors), (
+                f"verb '{verb}' should be caught as placeholder; got {errors}"
+            )
+
+    def test_legitimate_prose_still_not_flagged(self, tmp_path):
+        """S4/R3: legitimate prose with common words must still NOT be flagged
+        (no regression from the expanded verb list)."""
+        ws = _make_workspace(tmp_path)
+        lab = _make_engagement(tmp_path)
+        body = (
+            "# Title\n\n## Description\n\n"
+            "We list the affected endpoints (see the table below) and "
+            "add a note about the state of the fix.\n\n"
+            "## Impact\n\nreal impact text\n"
+        )
+        _write_report(ws, body=body)
+        issues = h1report.check_report(ws, lab_root=lab)
+        errors = [i for i in issues if i.level == "ERROR"]
+        assert not any("placeholder" in i.message.lower() for i in errors), (
+            f"legitimate prose should not be flagged; got {errors}"
+        )

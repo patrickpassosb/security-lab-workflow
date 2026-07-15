@@ -337,9 +337,13 @@ def find_report_file(workspace: Path) -> Path:
 
 
 def read_engagement_name(workspace: Path) -> str:
-    """Read the engagement name from workspace/engagement.txt if present."""
+    """Read the engagement name from workspace/engagement.txt if present.
+
+    S3/R3: reject a symlinked engagement.txt (defense-in-depth — a symlinked
+    engagement.txt could point to an attacker-controlled file with a different
+    engagement name, enabling identity spoofing)."""
     p = workspace / "engagement.txt"
-    if not p.is_file():
+    if not p.is_file() or p.is_symlink():
         return ""
     try:
         return p.read_text(encoding="utf-8").strip()
@@ -372,6 +376,15 @@ def load_engagement_scope(
     issues: list[Issue] = []
     if workspace is not None:
         snap = workspace / "engagement_scope_snapshot.yaml"
+        if snap.is_symlink():
+            # S2/R3: reject a symlinked engagement snapshot (scope-bypass guard
+            # — a symlinked snapshot could point to an attacker-controlled YAML
+            # with permissive in_scope patterns).
+            issues.append(Issue(
+                "ERROR", str(snap),
+                "engagement scope snapshot is a symlink (not allowed)",
+            ))
+            return None, issues
         if snap.is_file():
             # Use load_yaml_file but bypass the "not a mapping" -> None by
             # re-checking; snapshots should be mappings.
@@ -418,6 +431,13 @@ def load_global_scope(
         return live_data, issues
 
     snap = workspace / "scope_snapshot.yaml"
+    if snap.is_symlink():
+        # S2/R3: reject a symlinked global scope snapshot (defense-in-depth).
+        issues.append(Issue(
+            "ERROR", str(snap),
+            "global scope snapshot is a symlink (not allowed)",
+        ))
+        return live_data, issues
     if not snap.is_file():
         issues.append(Issue("WARN", str(workspace), _SNAPSHOT_WARNING))
         return live_data, issues
@@ -538,20 +558,24 @@ _PLACEHOLDER_PATTERNS = [
     re.compile(r"\bTODO\b", re.IGNORECASE),
     re.compile(r"\bTBD\b", re.IGNORECASE),
     # Line-anchored parenthesized template instruction (whole-line placeholder).
-    # B2/R2: use imperative verbs only (describe/paste/include/suggest), not
-    # nouns/common words (step/what/reference) that appear in normal prose.
+    # B2/R2 + S4/R3: use imperative instruction verbs. Expanded from the
+    # Round 2 set to cover common template-instruction verbs that Round 2
+    # missed (explain, provide, fill, insert, list, enter, write, detail,
+    # summarize, replace, add, specify, outline, state). Excludes nouns and
+    # common prose words (step, what, reference) that false-positived.
     re.compile(
-        r"^\s*\([^\)]*(describe|paste|include|suggest|any caveats)"
+        r"^\s*\([^\)]*(describe|paste|include|suggest|explain|provide|fill|insert|"
+        r"list|enter|write|detail|summarize|replace|add|specify|outline|state|"
+        r"any caveats)"
         r"[^\)]*\)\s*$",
         re.IGNORECASE | re.MULTILINE,
     ),
     # R10: unanchored parenthesized template instruction (mid-line placeholder).
-    # B2/R2: tighten to avoid false-positives on legitimate prose like
-    # "(step by step)" or "(see step 3)". Only match imperative INSTRUCTION
-    # verbs as the first word (describe/paste/include/suggest), not nouns or
-    # common words (step/what/reference) that appear in normal prose.
+    # B2/R2 + S4/R3: same expanded imperative verb list as above.
     re.compile(
-        r"\(\s*(describe|paste|include|suggest|any caveats)"
+        r"\(\s*(describe|paste|include|suggest|explain|provide|fill|insert|"
+        r"list|enter|write|detail|summarize|replace|add|specify|outline|state|"
+        r"any caveats)"
         r"[^\)]{0,80}\)",
         re.IGNORECASE,
     ),
@@ -2230,9 +2254,11 @@ def record_submission(
     dt_utc = dt.astimezone(UTC)
     stored_ts = dt_utc.strftime("%Y-%m-%dT%H:%M:%SZ")
 
-    # Re-hash report.md on disk to detect tampering (prefer on-disk over manifest).
-    report_body_entry = manifest.get("report_body", {}) or {}
-    report_body_path = pkg_path / (report_body_entry.get("path", "report.md"))
+    # Re-hash report.md on disk to detect tampering.
+    # S1/B1/R3: do NOT trust the manifest's report_body.path field (an attacker
+    # can forge it to point at an external file like /etc/hostname, causing us
+    # to hash the wrong file). Always use the canonical "report.md" in the pkg.
+    report_body_path = pkg_path / "report.md"
     if not report_body_path.is_file():
         raise PackageError(f"report.md not found in package: {report_body_path}")
     report_body_sha = _sha256_file(report_body_path)

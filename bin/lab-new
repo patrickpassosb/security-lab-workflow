@@ -158,8 +158,10 @@ def parse_args() -> dict[str, Any]:
 
 
 def scope_check(target: str, engagement: str) -> tuple[int, str]:
+    # B2/R3: pass "--" before the target so a target value like "--list" is
+    # treated as a positional arg, not a flag (argument-injection guard).
     result = subprocess.run(
-        [str(LAB / "bin" / "lab-scope"), target, "--engagement", engagement],
+        [str(LAB / "bin" / "lab-scope"), "--", target, "--engagement", engagement],
         capture_output=True,
         text=True,
     )

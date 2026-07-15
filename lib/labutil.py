@@ -165,8 +165,15 @@ def atomic_append_jsonl(path: Path, entry: dict[str, Any]) -> None:
 
     Uses file locking (fcntl.flock) to avoid interleaved writes from
     concurrent agents.
+
+    S5/R3: reject a symlinked audit log path (defense-in-depth — a symlinked
+    audit log could point to /dev/null, swallowing events, or to an attacker-
+    controlled file, redirecting events). Refuse to write and log to stderr.
     """
     path = Path(path)
+    if path.is_symlink():
+        print(f"[!] audit log path is a symlink, refusing to write: {path}", file=sys.stderr)
+        return
     path.parent.mkdir(parents=True, exist_ok=True)
     line = json.dumps(entry, ensure_ascii=False, sort_keys=True) + "\n"
     with open(path, "a", encoding="utf-8") as f:
