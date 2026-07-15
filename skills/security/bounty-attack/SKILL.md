@@ -135,22 +135,68 @@ TARGET_URL="https://target" TARGET_ENDPOINT="/api/endpoint" \
 ~/security-lab/bin/ctf-evidence <finding-name> poc -- python3 work/exploit.py
 ```
 
-### H1 Report (use report_h1.md template)
+### H1 Report (use report_h1.md template + lab-h1-report)
 
-1. **Summary** — 1-2 sentences: what the bug is and its impact
-2. **Impact** — what can an attacker do? who is affected? why does it matter?
-3. **Steps to Reproduce** — exact requests, endpoints, parameters (numbered steps)
-4. **Proof of Concept** — reference evidence files, minimal request/response
-5. **Remediation** — suggested fix (be specific)
+`report_h1.md` is the **single source of truth** for the report. It uses YAML
+frontmatter (schema `security-lab/hackerone-report/v1`) plus a Markdown body with
+`## Description` (Summary, Steps to reproduce, Remediation) and `## Impact`
+sections. Do NOT duplicate report content in `bounty_log.md`.
+
+The reporting workflow is **local-only and human-gated**:
+
+```
+check -> prepare -> human submits -> record-submission -> status
+```
+
+1. **Draft `report_h1.md`.** Fill the YAML frontmatter: `asset_id`, `asset_name`
+   (must match a structured asset in the engagement snapshot exactly),
+   `weakness` (prefer a CWE id), `severity` (rating/score/vector with the
+   correct bucket), `finding_type` (`live_web` or `source_code`), `live_targets`,
+   `attachments` (explicit allowlist of relative paths under the workspace),
+   and the `testing` assertions (`manual_only`, `owned_accounts_only`,
+   `destructive_operations: false`). Then write the Description/Impact body —
+   no `TODO`, `TBD`, `{{FIELD}}`, or parenthesized template instructions.
+2. **`lab-h1-report check [workspace]`** — read-only validation. Confirms
+   frontmatter schema, body sections, engagement match, structured asset
+   eligibility, scope of live targets, testing assertions, attachment safety,
+   and secret scanning. Prints `PASS`/`WARN`/`FAIL` lines. Exit 0 = valid
+   (warnings allowed); 2 = validation failure; 1 = usage/fs/parse error.
+3. **`lab-h1-report prepare [workspace]`** — stage an immutable submission
+   package under `submission/prepared-<UTC>/` containing `report_h1.md`,
+   `report.md` (frontmatter-stripped body for HackerOne), `attachments/`, and
+   `manifest.json` (SHA-256 + size for every file). Runs `check` internally and
+   aborts on any validation error. Refuses to overwrite an existing package.
+4. **HUMAN submits via the HackerOne UI.** The human copies `report.md`, uploads
+   the staged attachments, and submits. **Agents MUST NOT submit a report.**
+   There is no `submit` command and there never will be. The human returns the
+   accepted HackerOne report ID and URL.
+5. **`lab-h1-report record-submission [workspace] --package <path|id> --h1-id <num> --url <url> --submitted-at <ts> [--submitted-by <id>]`**
+   — record a one-time immutable local receipt in `<package>/record.json`.
+   Validates the package manifest, the numeric report ID, the HackerOne URL
+   (`hackerone.com/reports/<same ID>`), and a timezone-aware timestamp. Uses
+   `O_EXCL` so a record is created exactly once and never overwritten. It never
+   contacts HackerOne — it only records what the human already did.
+6. **`lab-h1-report status [workspace]`** — read-only. Prints report metadata,
+   the latest prepared package, manifest integrity (re-hashes files on disk),
+   source drift (whether `report_h1.md` changed since `prepare`), and the
+   recorded HackerOne report ID/URL.
+
+Every command is local-only: no network requests, no subprocess calls, no
+target interaction. `report_h1.md` is never modified by the tool — submission
+metadata lives only in `record.json` inside the prepared package. See
+`lab-h1-report --help` and `templates/bounty/report_h1.md`.
 
 ### Report quality checklist
 
+- [ ] `report_h1.md` frontmatter parses and `lab-h1-report check` prints `PASS`
 - [ ] Reproducible — the triager can follow your steps and see the bug
 - [ ] Impact is clear — not just "XSS exists" but "attacker can steal session tokens"
 - [ ] Minimal — no unnecessary scanning output, just the winning request/response
 - [ ] One vuln per report — unless chaining for impact
 - [ ] No data exfiltration beyond what proves the bug
-- [ ] No destructive actions
+- [ ] No destructive actions (`testing.destructive_operations: false`)
+- [ ] Attachments are explicit, relative, non-symlink, and pass secret scanning
+- [ ] No `TODO`/`TBD`/`{{FIELD}}` placeholders left in the body
 
 ## Rate limits
 

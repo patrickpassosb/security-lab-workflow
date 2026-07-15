@@ -1,50 +1,43 @@
-# {{PROGRAM}} — HackerOne Report
-
-**Program:** {{PROGRAM}}
-**Program URL:** {{PROGRAM_URL}}
-**Date:** {{DATE}}
-**Target:** {{TARGET}}
-**Vulnerability class:** {{VULN_CLASS}}
-**Severity:** {{SEVERITY}}
-
+---
+schema: security-lab/hackerone-report/v1
+engagement: "{{ENGAGEMENT}}"
+platform: hackerone
+program: "{{PROGRAM}}"
+program_url: "{{PROGRAM_URL}}"
+title: "{{TITLE}}"
+asset_id: ""
+asset_name: ""
+weakness: ""
+severity:
+  rating: ""
+  score: 0
+  vector: ""
+finding_type: ""
+live_targets:
+  {{INITIAL_LIVE_TARGET}}
+attachments: []
+testing:
+  manual_only: false
+  owned_accounts_only: false
+  destructive_operations: false
 ---
 
-## Summary
+# {{TITLE}}
 
-(1-2 sentences: what the bug is and its impact. This is the first thing the triager reads.)
+## Description
+
+### Summary
+
+TODO: [add description here] (Describe the bug in 1-2 sentences: what the bug is and its impact. This is the first thing the triager reads.)
+
+### Steps to reproduce
+
+TODO: (Describe the bug here) Replace this placeholder with the exact steps to reproduce, including requests, endpoints, and parameters.
+
+### Remediation
+
+TODO: [add description here] Suggested fix — be specific: what check/validation/authorization should be added?
 
 ## Impact
 
-(What can an attacker do? Who is affected? What data/systems are compromised? Why does this matter to the program/company?)
-
-## Steps to Reproduce
-
-1. (Step 1 — include exact requests, endpoints, parameters)
-2. (Step 2)
-3. (Step 3)
-
-## Proof of Concept
-
-(Reference evidence files. Include the minimal request/response that proves the bug. Do NOT dump large responses — link to evidence files. Do NOT exfiltrate data beyond what proves the bug.)
-
-```
-(paste the winning request + key response lines here)
-```
-
-Evidence: `evidence/<file>`
-
-## Affected Components
-
-- (URLs, endpoints, features, versions if known)
-
-## Remediation
-
-(Suggested fix — be specific: what check/validation/authorization should be added?)
-
-## Disclosure Timeline
-
-- {{DATE}}: Reported via HackerOne
-
-## Notes
-
-- (Any caveats, conditions, or context the triager should know)
+TODO: (Describe the bug here) What can an attacker do? Who is affected? What data/systems are compromised? Why does this matter to the program/company?

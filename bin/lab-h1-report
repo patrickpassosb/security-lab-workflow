@@ -1,0 +1,526 @@
+#!/usr/bin/env python3
+"""lab-h1-report — HackerOne report check, prepare, record-submission, status.
+
+Read-only and local-only commands for HackerOne report_h1.md workspaces.
+
+Usage:
+    lab-h1-report check [workspace]
+    lab-h1-report prepare [workspace]
+    lab-h1-report status [workspace]
+    lab-h1-report record-submission [workspace] --package <path|id> \
+        --h1-id <num> --url <url> --submitted-at <ts> [--submitted-by <id>]
+
+There is NO submit command. No command makes a network request or subprocess
+call. Final submission is a human action in the HackerOne UI; record-submission
+only records what the human already did.
+
+This CLI is a thin wrapper over lib/h1report.py. Audit events are written via
+labutil.audit (canonical schema, JSON-safe, no secrets in detail).
+"""
+
+from __future__ import annotations
+
+import contextlib
+import os
+import sys
+from pathlib import Path
+
+# Import shared labutil helpers and the h1report library.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib"))
+import h1report  # noqa: E402
+import labutil  # noqa: E402
+
+AUDIT_ACTION_CHECK = "h1-report-check"
+AUDIT_ACTION_STATUS = "h1-report-status"
+AUDIT_ACTION_PREPARE = "h1-report-prepare"
+AUDIT_ACTION_RECORD = "h1-report-record-submission"
+
+
+def _resolve_lab_root() -> Path:
+    """Resolve the lab root from $HACKING_LAB (or default) and keep labutil in sync."""
+    lab_root = Path(os.environ.get("HACKING_LAB", os.path.expanduser("~/security-lab")))
+    # Keep labutil's audit log path in sync with the runtime lab root so that
+    # audit events land in the right lab's findings/.agent-audit.jsonl even when
+    # HACKING_LAB is overridden by the caller (e.g. tests).
+    labutil.AUDIT_LOG_PATH = lab_root / "findings" / ".agent-audit.jsonl"
+    return lab_root
+
+
+def usage() -> None:
+    print(__doc__)
+
+
+def _print_issue(issue: h1report.Issue) -> None:
+    """Print one issue line in ASCII (no ANSI escapes)."""
+    level = issue.level
+    if level == "ERROR":
+        label = "FAIL"
+    elif level == "WARN":
+        label = "WARN"
+    else:
+        label = "INFO"
+    # Keep the line ASCII-only and free of secret material (issue.message is
+    # constructed to never include raw secret values).
+    print(f"{label}: {issue.location}: {issue.message}")
+
+
+def _summarize(issues: list[h1report.Issue]) -> tuple[int, int, int]:
+    errors = sum(1 for i in issues if i.level == "ERROR")
+    warns = sum(1 for i in issues if i.level == "WARN")
+    infos = sum(1 for i in issues if i.level == "INFO")
+    return errors, warns, infos
+
+
+def cmd_check(args: list[str]) -> int:
+    """Validate a report. Exit 0 if no errors, 2 for validation failures,
+    1 for usage/filesystem/parse errors."""
+    workspace: str | None = None
+    if len(args) > 1:
+        print(f"check takes at most one optional workspace argument; got: {args}", file=sys.stderr)
+        return 1
+    if len(args) == 1:
+        workspace = args[0]
+
+    lab_root = _resolve_lab_root()
+
+    # Resolve workspace + report file first (filesystem errors -> exit 1).
+    try:
+        ws = h1report.resolve_workspace(workspace)
+        report_path = h1report.find_report_file(ws)
+    except h1report.ReportFileError as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        labutil.audit(
+            AUDIT_ACTION_CHECK,
+            target=str(workspace or ""),
+            exit_code=1,
+            detail="report file not found",
+        )
+        return 1
+
+    # Parse (parse errors -> exit 1).
+    try:
+        report = h1report.parse_report(report_path)
+    except h1report.ReportParseError as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        labutil.audit(
+            AUDIT_ACTION_CHECK,
+            target=str(report_path),
+            exit_code=1,
+            detail="report parse error",
+        )
+        return 1
+
+    # Run validation (returns issues; ERROR level -> exit 2).
+    try:
+        issues = h1report.check_report(ws, lab_root=lab_root)
+    except h1report.ReportFileError as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        labutil.audit(
+            AUDIT_ACTION_CHECK,
+            target=str(report_path),
+            exit_code=1,
+            detail="filesystem error during check",
+        )
+        return 1
+    except h1report.ReportParseError as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        labutil.audit(
+            AUDIT_ACTION_CHECK,
+            target=str(report_path),
+            exit_code=1,
+            detail="parse error during check",
+        )
+        return 1
+
+    # Print issues (ASCII only). WARN lines are non-blocking.
+    for issue in issues:
+        _print_issue(issue)
+
+    errors, warns, infos = _summarize(issues)
+    print(f"SUMMARY: {errors} error(s), {warns} warning(s), {infos} info")
+
+    engagement_name = ""
+    with contextlib.suppress(Exception):  # pragma: no cover — defensive
+        engagement_name = str(report.frontmatter.get("engagement", "") or "")
+
+    if errors == 0:
+        print("PASS")
+        labutil.audit(
+            AUDIT_ACTION_CHECK,
+            target=str(report_path),
+            engagement=engagement_name,
+            exit_code=0,
+            detail=f"pass errors={errors} warns={warns}",
+        )
+        return 0
+    print("FAIL")
+    # Do NOT put secret-bearing text into the audit detail. Only counts.
+    labutil.audit(
+        AUDIT_ACTION_CHECK,
+        target=str(report_path),
+        engagement=engagement_name,
+        exit_code=2,
+        detail=f"errors={errors} warns={warns}",
+    )
+    return 2
+
+
+def cmd_status(args: list[str]) -> int:
+    """Print report metadata + package + submission status. Exit 0 on success,
+    1 on fs/parse errors."""
+    workspace: str | None = None
+    if len(args) > 1:
+        print(f"status takes at most one optional workspace argument; got: {args}", file=sys.stderr)
+        return 1
+    if len(args) == 1:
+        workspace = args[0]
+
+    lab_root = _resolve_lab_root()
+
+    try:
+        ws = h1report.resolve_workspace(workspace)
+        status = h1report.status_report(ws, lab_root=lab_root)
+    except h1report.ReportFileError as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        labutil.audit(
+            AUDIT_ACTION_STATUS,
+            target=str(workspace or ""),
+            exit_code=1,
+            detail="report file not found",
+        )
+        return 1
+    except h1report.ReportParseError as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        labutil.audit(
+            AUDIT_ACTION_STATUS,
+            exit_code=1,
+            detail="report parse error",
+        )
+        return 1
+    except OSError as e:
+        # B4/B10: catch filesystem permission errors and other OS-level
+        # failures so the CLI exits cleanly with an audit event instead of
+        # crashing with an unhandled traceback.
+        print(f"ERROR: filesystem error: {e}", file=sys.stderr)
+        labutil.audit(
+            AUDIT_ACTION_STATUS,
+            target=str(workspace or ""),
+            exit_code=1,
+            detail="filesystem error",
+        )
+        return 1
+
+    md = status.get("metadata", {}) or {}
+    print(f"report: {status['report_path']}")
+    print(f"title: {md.get('title', '')}")
+    print(f"program: {md.get('program', '')}")
+    sev = md.get("severity", {}) or {}
+    if isinstance(sev, dict):
+        print(f"severity: {sev.get('rating', '')} ({sev.get('score', '')})")
+    else:
+        print(f"severity: {sev}")
+    print(f"asset_id: {md.get('asset_id', '')}")
+    print(f"finding_type: {md.get('finding_type', '')}")
+    print(f"engagement: {md.get('engagement', '')}")
+    print(f"weakness: {md.get('weakness', '')}")
+
+    # C2: validation state — does the report pass `check` right now?
+    vstate = status.get("validation_state")
+    if vstate is None:
+        print("validation: unable to run (report missing or unreadable)")
+    elif vstate == "PASS":
+        print(f"validation: PASS ({status.get('validation_errors', 0)} errors, "
+              f"{status.get('validation_warnings', 0)} warnings)")
+    else:
+        print(f"validation: FAIL ({status.get('validation_errors', 0)} errors, "
+              f"{status.get('validation_warnings', 0)} warnings)")
+
+    # Latest prepared package.
+    latest = status.get("latest_package")
+    if latest:
+        print(f"package: {latest}")
+        summ = status.get("package_summary") or {}
+        if summ:
+            print(f"package_prepared_at: {summ.get('prepared_at', '')}")
+            print(f"package_attachments: {summ.get('attachments', 0)}")
+        # Integrity.
+        ok = status.get("integrity_ok", True)
+        drift = status.get("integrity_drift", []) or []
+        if ok:
+            print("integrity: OK")
+        else:
+            print(f"integrity: DRIFT ({', '.join(drift) if drift else 'unknown'})")
+        # Source drift.
+        if status.get("source_drifted"):
+            print("source_drifted: true (workspace report_h1.md changed since prepare)")
+        else:
+            print("source_drifted: false")
+        # Record.
+        if status.get("record_exists"):
+            print(f"record: {latest}/record.json")
+            rid = status.get("h1_report_id")
+            url = status.get("h1_url")
+            if rid:
+                print(f"h1_report_id: {rid}")
+            if url:
+                print(f"h1_url: {url}")
+            # B9: if record.json exists but has no valid schema/id, warn.
+            # B6/R2: use `not rid` (covers both None and "") — status_report
+            # returns "" (not None) for empty report_id/url.
+            if not rid and not url:
+                print("record_warning: record.json is corrupt or has an unrecognized schema")
+        else:
+            print("record: none")
+    else:
+        print("package: none")
+    # Legacy submission (Task 1 backward-compat path).
+    if status["submission_exists"]:
+        print(f"submission: {status['submission_path']}")
+    else:
+        print("submission: none")
+
+    try:
+        engagement_name = str(md.get("engagement", "") or "")
+    except Exception:  # pragma: no cover — defensive
+        engagement_name = ""
+    labutil.audit(
+        AUDIT_ACTION_STATUS,
+        target=status.get("report_path", ""),
+        engagement=engagement_name,
+        exit_code=0,
+        detail=(
+            f"package={'yes' if latest else 'no'} "
+            f"integrity={'ok' if status.get('integrity_ok') else 'drift'} "
+            f"record={'yes' if status.get('record_exists') else 'no'}"
+        ),
+    )
+    return 0
+
+
+def cmd_prepare(args: list[str]) -> int:
+    """Prepare an immutable submission package. Exit 0 on success, 2 on
+    validation failure, 1 on fs/parse/internal errors."""
+    workspace: str | None = None
+    if len(args) > 1:
+        print(f"prepare takes at most one optional workspace argument; got: {args}", file=sys.stderr)
+        return 1
+    if len(args) == 1:
+        workspace = args[0]
+
+    lab_root = _resolve_lab_root()
+
+    try:
+        result = h1report.prepare_report(workspace, lab_root=lab_root)
+    except h1report.ReportFileError as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        labutil.audit(
+            AUDIT_ACTION_PREPARE,
+            target=str(workspace or ""),
+            exit_code=1,
+            detail="report file not found",
+        )
+        return 1
+    except h1report.ReportParseError as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        labutil.audit(
+            AUDIT_ACTION_PREPARE,
+            exit_code=1,
+            detail="report parse error",
+        )
+        return 1
+    except h1report.ReportValidationError as e:
+        # Print the issues and exit 2 (validation failure).
+        for issue in e.issues:
+            _print_issue(issue)
+        errors, warns, _infos = _summarize(e.issues)
+        print("FAIL")
+        labutil.audit(
+            AUDIT_ACTION_PREPARE,
+            target=str(workspace or ""),
+            exit_code=2,
+            detail=f"validation failed errors={errors} warns={warns}",
+        )
+        return 2
+    except h1report.PackageExistsError as e:
+        # Immutable: never overwrite. Treat as validation failure (exit 2).
+        print(f"ERROR: {e}", file=sys.stderr)
+        labutil.audit(
+            AUDIT_ACTION_PREPARE,
+            target=str(workspace or ""),
+            exit_code=2,
+            detail="package already exists",
+        )
+        return 2
+    except h1report.PackageError as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        labutil.audit(
+            AUDIT_ACTION_PREPARE,
+            target=str(workspace or ""),
+            exit_code=1,
+            detail="filesystem error during prepare",
+        )
+        return 1
+
+    pkg_id = result.get("package_id", "")
+    copied = result.get("attachments_copied", 0)
+    snaps = result.get("scope_snapshots", 0)
+    print(
+        f"SUMMARY: prepared=1 attachments={copied} scope_snapshots={snaps} "
+        f"package={pkg_id}"
+    )
+    print(f"PACKAGE: {result.get('package_path', '')}")
+    labutil.audit(
+        AUDIT_ACTION_PREPARE,
+        target=str(workspace or ""),
+        exit_code=0,
+        detail=f"prepared=1 attachments={copied} package={pkg_id}",
+    )
+    return 0
+
+
+def _parse_record_args(args: list[str]) -> tuple[str | None, dict[str, str], int]:
+    """Parse record-submission args. Returns (workspace, flags, exit_code).
+    exit_code is 0 on success, 1 on usage error. Supports both --flag value
+    and --flag=value syntax (B2, for consistency with lab-scope/lab-new)."""
+    workspace: str | None = None
+    flags: dict[str, str] = {}
+    i = 0
+    # The first positional (if any) is the workspace. Flags are --key value or --key=value.
+    required = ("--package", "--h1-id", "--url", "--submitted-at")
+    optional = ("--submitted-by",)
+    all_flags = required + optional
+    while i < len(args):
+        a = args[i]
+        # B2: handle --flag=value syntax by splitting on the first '='.
+        if a.startswith("--") and "=" in a:
+            name, _, value = a.partition("=")
+            if name in all_flags:
+                flags[name] = value
+                i += 1
+                continue
+            print(f"unknown flag: {a}", file=sys.stderr)
+            return None, {}, 1
+        if a in all_flags:
+            if i + 1 >= len(args):
+                print(f"flag {a} requires a value", file=sys.stderr)
+                return None, {}, 1
+            flags[a] = args[i + 1]
+            i += 2
+            continue
+        if a.startswith("-"):
+            print(f"unknown flag: {a}", file=sys.stderr)
+            return None, {}, 1
+        # Positional -> workspace (only one allowed).
+        if workspace is not None:
+            print(
+                f"record-submission takes at most one workspace argument; got: {args}",
+                file=sys.stderr,
+            )
+            return None, {}, 1
+        workspace = a
+        i += 1
+    # All required flags present?
+    for r in required:
+        if r not in flags:
+            print(f"record-submission requires {r}", file=sys.stderr)
+            return None, {}, 1
+    return workspace, flags, 0
+
+
+def cmd_record_submission(args: list[str]) -> int:
+    """Record a human-submitted HackerOne report. Exit 0 on success, 2 on
+    validation failure, 1 on fs/parse/internal errors."""
+    workspace, flags, parse_rc = _parse_record_args(args)
+    if parse_rc != 0:
+        return parse_rc
+
+    lab_root = _resolve_lab_root()
+
+    try:
+        result = h1report.record_submission(
+            workspace,
+            lab_root=lab_root,
+            package=flags["--package"],
+            h1_id=flags["--h1-id"],
+            url=flags["--url"],
+            submitted_at=flags["--submitted-at"],
+            submitted_by=flags.get("--submitted-by", ""),
+        )
+    except h1report.ReportFileError as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        labutil.audit(
+            AUDIT_ACTION_RECORD,
+            target=str(workspace or ""),
+            exit_code=1,
+            detail="workspace not found",
+        )
+        return 1
+    except h1report.PackageError as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        labutil.audit(
+            AUDIT_ACTION_RECORD,
+            target=str(workspace or ""),
+            exit_code=1,
+            detail="package filesystem error",
+        )
+        return 1
+    except h1report.RecordValidationError as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        labutil.audit(
+            AUDIT_ACTION_RECORD,
+            target=str(workspace or ""),
+            exit_code=2,
+            detail="validation failed",
+        )
+        return 2
+    except h1report.RecordExistsError as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        labutil.audit(
+            AUDIT_ACTION_RECORD,
+            target=str(workspace or ""),
+            exit_code=2,
+            detail="record already exists",
+        )
+        return 2
+
+    rid = result.get("report_id", "")
+    print(f"RECORDED: {result.get('record_path', '')}")
+    print(f"REPORT_ID: {rid}")
+    labutil.audit(
+        AUDIT_ACTION_RECORD,
+        target=str(workspace or ""),
+        exit_code=0,
+        detail=f"recorded report_id={rid}",
+    )
+    return 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = list(argv) if argv is not None else sys.argv[1:]
+    if not args:
+        usage()
+        return 1
+    cmd = args[0]
+    rest = args[1:]
+    if cmd in ("-h", "--help"):
+        usage()
+        return 0
+    if cmd == "check":
+        return cmd_check(rest)
+    if cmd == "prepare":
+        return cmd_prepare(rest)
+    if cmd == "status":
+        return cmd_status(rest)
+    if cmd == "record-submission":
+        return cmd_record_submission(rest)
+    # No submit command exists and never will. Unknown commands fail.
+    if cmd == "submit":
+        print("ERROR: 'submit' is not a command. Final submission is a human action.", file=sys.stderr)
+        return 1
+    print(f"Unknown command: {cmd}", file=sys.stderr)
+    usage()
+    return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

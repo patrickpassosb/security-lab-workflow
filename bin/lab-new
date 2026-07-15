@@ -158,18 +158,51 @@ def parse_args() -> dict[str, Any]:
 
 
 def scope_check(target: str, engagement: str) -> tuple[int, str]:
+    # B2/R3: pass "--" before the target so a target value like "--list" is
+    # treated as a positional arg, not a flag (argument-injection guard).
     result = subprocess.run(
-        [str(LAB / "bin" / "lab-scope"), target, "--engagement", engagement],
+        [str(LAB / "bin" / "lab-scope"), "--", target, "--engagement", engagement],
         capture_output=True,
         text=True,
     )
     return result.returncode, result.stdout.strip()
 
 
+def _yaml_scalar_escape(value: str) -> str:
+    """Escape a string for safe insertion into a double-quoted YAML scalar.
+
+    P2: report_h1.md frontmatter scalars (engagement, program, program_url,
+    title) are now double-quoted in the template, but a value containing a
+    literal double-quote would break the YAML. Escape backslashes and
+    double-quotes so the quoted scalar stays valid regardless of the
+    program/engagement name. Newlines are already rejected upstream for
+    --target; for other fields we replace them with spaces (a YAML
+    double-quoted scalar cannot contain a raw newline without CRLF escaping).
+    """
+    if not value:
+        return ""
+    # Replace newlines with spaces (cannot appear in a single-line quoted scalar).
+    v = value.replace("\r", " ").replace("\n", " ")
+    # Escape backslashes first, then double-quotes.
+    return v.replace("\\", "\\\\").replace('"', '\\"')
+
+
 def fill_template(template_path: Path, dest_path: Path, replacements: dict[str, str]) -> None:
+    """Fill a template by replacing {{KEY}} placeholders with values.
+
+    S7: do a single-pass replacement so a value containing another {{KEY}}
+    (e.g. --target='{{PROGRAM_URL}}') is NOT re-interpreted by a later
+    replacement key. Uses a regex that substitutes all keys in one pass,
+    so replacement values are inserted verbatim and never re-scanned.
+    """
     text = template_path.read_text(encoding="utf-8")
-    for key, value in replacements.items():
-        text = text.replace(f"{{{{{key}}}}}", value)
+    if replacements:
+        # Build a single regex matching any {{KEY}} and substitute in one pass.
+        # Values are inserted literally (no re-scanning for {{...}}).
+        pattern = re.compile(
+            r"\{\{(" + "|".join(re.escape(k) for k in replacements) + r")\}\}"
+        )
+        text = pattern.sub(lambda m: replacements[m.group(1)], text)
     dest_path.write_text(text, encoding="utf-8")
 
 
@@ -177,9 +210,32 @@ def main() -> int:
     args = parse_args()
     cfg = TYPE_CONFIG[args["type"]]
 
+    # S4/R2: reject newlines in --target to prevent YAML injection into the
+    # report_h1.md frontmatter live_targets list (a target like
+    # 'https://evil\n  - https://gov.example.com' would inject an extra entry).
+    if args["type"] == "bounty" and args["target"]:
+        if "\n" in args["target"] or "\r" in args["target"]:
+            print(
+                "ERROR: --target contains a newline; refusing to inject into "
+                "YAML frontmatter (use a single URL)",
+                file=sys.stderr,
+            )
+            return 2
+
     engagement = args["engagement"] or cfg["default_engagement"]
     if not engagement:
         print(f"ERROR: --engagement is required for type '{args['type']}'", file=sys.stderr)
+        return 2
+
+    # S1/R6: validate the engagement name before using it in a path. --name is
+    # already validated (lines 148-155), but --engagement was not, allowing
+    # path traversal (e.g. '../evil') to read/copy a file outside engagements/.
+    if not labutil.validate_name(engagement):
+        print(
+            f"ERROR: invalid engagement name {engagement!r}. Use only letters, "
+            f"numbers, dots, hyphens, underscores. No '..', '/', or '\\'.",
+            file=sys.stderr,
+        )
         return 2
 
     eng_scope_path = ENGAGEMENTS_DIR / f"{engagement}.yaml"
@@ -194,12 +250,22 @@ def main() -> int:
     if args["target"]:
         code, msg = scope_check(args["target"], engagement)
         print(msg)
-        if code == 2:
+        if code == 0:
+            scope_checked = "yes"
+        elif code == 2:
             return 2
-        if code == 3:
+        elif code == 3:
             print("Target not in scope. Add it to the engagement scope file or confirm with human.", file=sys.stderr)
             return 3
-        scope_checked = "yes"
+        else:
+            # S1/R5: fail-closed on any non-0/2/3 exit code (e.g. lab-scope
+            # crashed on malformed YAML -> exit 1). The global denied list is
+            # the lab's hardest safety rail and must NEVER be silently disabled.
+            print(
+                f"ERROR: scope check failed (lab-scope exit {code}): {msg}",
+                file=sys.stderr,
+            )
+            return 2
     elif args["type"] in ("ctf", "bounty"):
         # T2-19: warn when no --target on ctf/bounty (scope not checked)
         print("WARNING: no --target provided, scope not checked. Pass --target <url> to enable scope validation.", file=sys.stderr)
@@ -236,6 +302,8 @@ def main() -> int:
     (work / "web-attack").mkdir(exist_ok=True)
     (work / "work").mkdir(exist_ok=True)
     (work / "evidence").mkdir(exist_ok=True)
+    if args["type"] == "bounty":
+        (work / "submission").mkdir(exist_ok=True)
 
     target = args["target"]
     (work / "target.txt").write_text(target + "\n", encoding="utf-8")
@@ -246,6 +314,16 @@ def main() -> int:
         shutil.copy2(eng_scope_path, work / "engagement_scope_snapshot.yaml")
 
     (work / "engagement.txt").write_text(engagement + "\n", encoding="utf-8")
+
+    # Load the engagement scope to prefill program/program_url in bounty reports.
+    # Fall back to the engagement name / empty string if the fields are absent.
+    eng_scope_data = labutil.load_yaml_file(eng_scope_path) or {}
+    eng_block = eng_scope_data.get("engagement", {}) if isinstance(eng_scope_data, dict) else {}
+    program_name = ""
+    program_url = ""
+    if isinstance(eng_block, dict):
+        program_name = eng_block.get("name", "") or engagement
+        program_url = eng_block.get("program_url", "") or ""
 
     date_utc = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     category = args["category"] or cfg["default_category"]
@@ -262,9 +340,9 @@ def main() -> int:
             "CTF_NAME": engagement,
             "DATE": date_utc,
             "SCOPE_CHECKED": scope_checked,
-            "PROGRAM": args["name"],
+            "PROGRAM": program_name or args["name"],
             "PLATFORM": "hackerone",
-            "PROGRAM_URL": "",
+            "PROGRAM_URL": program_url,
             "ENGAGEMENT": engagement,
             "PROJECT": args["name"],
             "REPO": "",
@@ -306,16 +384,35 @@ def main() -> int:
             if not writeup_template.exists():
                 writeup_template = tmpl_dir / ("report_h1.md" if args["type"] == "bounty" else "advisory_template.md" if args["type"] == "cve" else "")
             if writeup_template and writeup_template.exists() and writeup_template.is_file():
+                # P2: YAML-escape scalar frontmatter values that are inserted
+                # into double-quoted positions in report_h1.md (engagement,
+                # program, program_url, title). A program name like Foo: Bar
+                # or with embedded double-quotes would otherwise break or
+                # change the generated frontmatter. INITIAL_LIVE_TARGET is a
+                # list item, not a quoted scalar, so it's not escaped here.
                 writeup_replacements = {
                     **replacements,
                     "VULN_CLASS": "",
                     "SEVERITY": "",
-                    "TITLE": args["name"],
+                    "TITLE": _yaml_scalar_escape(args["name"]),
                     "VENDOR": "",
                     "AFFECTED_VERSIONS": "",
                     "CVE_ID": "",
                     "CVSS_SCORE": "",
-                    "PROGRAM_URL": "",
+                    "PROGRAM_URL": _yaml_scalar_escape(program_url),
+                    "ENGAGEMENT": _yaml_scalar_escape(engagement),
+                    "PROGRAM": _yaml_scalar_escape(program_name or args["name"]),
+                    # Bounty report_h1.md frontmatter prefilling. The template
+                    # has `live_targets:\n  {{INITIAL_LIVE_TARGET}}` so we can
+                    # inject either a `- <url>` entry or `[]` via simple replace.
+                    # Unknown fields (asset_id, asset_name, weakness, severity,
+                    # finding_type, attachments, testing) are left as the
+                    # explicit-invalid placeholders from the template so a
+                    # fresh workspace FAILS `lab-h1-report check` until the
+                    # author fills them in.
+                    "INITIAL_LIVE_TARGET": (
+                        f"- {target}" if args["type"] == "bounty" and target else "[]"
+                    ),
                 }
                 fill_template(writeup_template, writeup_dest, writeup_replacements)
             else:

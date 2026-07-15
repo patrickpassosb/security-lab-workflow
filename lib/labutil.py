@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import contextlib
 import fcntl
+import fnmatch
 import json
 import os
 import re
@@ -33,6 +34,9 @@ import sys
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
+
+import yaml
 
 # ─── Lab root ─────────────────────────────────────────────────────────────────
 
@@ -161,8 +165,15 @@ def atomic_append_jsonl(path: Path, entry: dict[str, Any]) -> None:
 
     Uses file locking (fcntl.flock) to avoid interleaved writes from
     concurrent agents.
+
+    S5/R3: reject a symlinked audit log path (defense-in-depth — a symlinked
+    audit log could point to /dev/null, swallowing events, or to an attacker-
+    controlled file, redirecting events). Refuse to write and log to stderr.
     """
     path = Path(path)
+    if path.is_symlink():
+        print(f"[!] audit log path is a symlink, refusing to write: {path}", file=sys.stderr)
+        return
     path.parent.mkdir(parents=True, exist_ok=True)
     line = json.dumps(entry, ensure_ascii=False, sort_keys=True) + "\n"
     with open(path, "a", encoding="utf-8") as f:
@@ -265,8 +276,6 @@ def is_safe_url(url: str) -> bool:
 
     Catches the common SSRF vectors (file://, gopher://, 169.254.169.254, etc.).
     """
-    from urllib.parse import urlparse
-
     if not url:
         return False
     parsed = urlparse(url)
@@ -282,6 +291,135 @@ def is_safe_url(url: str) -> bool:
     return True
 
 
+def is_valid_https_url(v: Any) -> bool:
+    """Return True if `v` is a string that parses as an https:// URL with a netloc."""
+    if not isinstance(v, str) or not v:
+        return False
+    try:
+        parsed = urlparse(v)
+    except ValueError:
+        return False
+    return parsed.scheme.lower() == "https" and bool(parsed.netloc)
+
+
+# ─── Scope primitives (shared by bin/lab-scope and lib/h1report.py) ──────────
+# Single source of truth for host extraction and scope matching. Importing
+# modules should call these instead of re-implementing fnmatch-based matching.
+
+def extract_host(target: str) -> str:
+    """Extract a lowercase hostname from a URL or bare host:port string.
+
+    Examples:
+        "https://api.example.com/v1/x" -> "api.example.com"
+        "http://example.com:8080/x"   -> "example.com"
+        "localhost:8983/solr"          -> "localhost"
+        "example.com."                 -> "example.com"
+        ""                             -> ""
+    """
+    if not target:
+        return ""
+    if "://" in target:
+        # P2: urlparse() raises ValueError on malformed bracketed IPv6 URLs
+        # (e.g. "http://[::1,"). Fail closed — return "" so check_target_scope
+        # treats the target as UNKNOWN rather than crashing the check command.
+        try:
+            parsed = urlparse(target)
+        except ValueError:
+            return ""
+        return (parsed.hostname or "").lower().strip(".")
+    host = target.split("/", 1)[0].lower().strip(".")
+    if ":" in host:
+        host = host.split(":", 1)[0]
+    return host
+
+
+def match_pattern(host: str, target: str, pattern: str) -> bool:
+    """Return True if `host` or `target` matches `pattern` (fnmatch, case-insensitive).
+
+    `host` should be pre-extracted via `extract_host`. `target` is the raw
+    target string (URL or bare host). Matching is case-insensitive and
+    trailing dots are stripped from both `host` and `pattern`.
+    """
+    pat = pattern.lower().strip(".")
+    if fnmatch.fnmatch(host, pat):
+        return True
+    return fnmatch.fnmatch(target.lower(), pat)
+
+
+def _pattern_from_item(item: Any) -> str:
+    """Return the `pattern` string from a scope list item (dict or scalar)."""
+    return item.get("pattern", "") if isinstance(item, dict) else str(item)
+
+
+def _reason_from_item(item: Any) -> str:
+    """Return the `reason`/`note` string from a scope list item, or ''."""
+    if isinstance(item, dict):
+        return item.get("reason") or item.get("note") or ""
+    return ""
+
+
+def check_target_scope(
+    target: str,
+    in_scope: list,
+    denied_global: list,
+    denied_eng: list,
+) -> tuple[int, str]:
+    """Check a target against the merged scope (pure, no I/O).
+
+    Returns (code, reason):
+        0 = OK (in-scope; matches an `in_scope` pattern)
+        2 = DENIED (matches a denied pattern — global or engagement)
+        3 = UNKNOWN (no match anywhere — default-deny)
+
+    Order (per AGENTS.md and the scope SKILL docs):
+        1. Global denied → DENIED (always wins, cannot be overridden)
+        2. Engagement in_scope → ALLOW (overrides engagement denied)
+        3. Engagement denied → DENIED
+        4. Otherwise → UNKNOWN (default-deny; ask human)
+    """
+    host = extract_host(target)
+    if not host:
+        return 3, f"UNKNOWN: could not extract host from {target}"
+
+    for item in denied_global:
+        pat = _pattern_from_item(item)
+        if match_pattern(host, target, pat):
+            reason = _reason_from_item(item)
+            return 2, f"DENIED: {host} matches global denied pattern '{pat}' ({reason})"
+
+    for item in in_scope:
+        pat = _pattern_from_item(item)
+        if match_pattern(host, target, pat):
+            note = _reason_from_item(item)
+            return 0, f"OK: {host} matches in-scope pattern '{pat}' ({note})"
+
+    for item in denied_eng:
+        pat = _pattern_from_item(item)
+        if match_pattern(host, target, pat):
+            reason = _reason_from_item(item)
+            return 2, f"DENIED: {host} matches engagement denied pattern '{pat}' ({reason})"
+
+    return 3, f"UNKNOWN: {host} is not in scope"
+
+
+def load_yaml_file(path: Path) -> dict[str, Any] | None:
+    """Load a YAML file with `yaml.safe_load`. Return None if missing or not a mapping.
+
+    Safe wrapper for engagement/scope files. Never raises on YAML errors or
+    missing files — returns None so callers can fall back gracefully.
+    """
+    p = Path(path)
+    if not p.is_file():
+        return None
+    try:
+        data = yaml.safe_load(p.read_text(encoding="utf-8"))
+    except (yaml.YAMLError, OSError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    return data
+
+
 # ─── __all__ ───────────────────────────────────────────────────────────────────
 
 __all__ = [
@@ -294,5 +432,6 @@ __all__ = [
     "atomic_write", "atomic_append_jsonl",
     "audit",
     "minimal_env",
-    "is_safe_url",
+    "is_safe_url", "is_valid_https_url",
+    "extract_host", "match_pattern", "check_target_scope", "load_yaml_file",
 ]

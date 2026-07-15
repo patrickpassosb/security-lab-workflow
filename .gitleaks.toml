@@ -41,4 +41,18 @@ regexes = [
     '''<your[_-]?(key|token|pat|secret|api[_-]?key)>''',
     '''YOUR_KEY_HERE''',
     '''changeme''',
+    # Synthetic private-key fixtures in tests/test_h1_report.py. These are
+    # truncated fake base64 fragments (<=30 chars) used to exercise the
+    # secret-detection code path. A real PEM key has hundreds of base64
+    # chars, so these exact fragments can never be a live secret. The
+    # regexes match against gitleaks' extracted *secret* content, so only
+    # these synthetic blocks are suppressed; a real key with different
+    # base64 is still caught. Do NOT add generic prefixes like "MIIE" here
+    # — that would suppress real RSA keys. Keep these fragments specific.
+    '''MIIBVAIB''',
+    '''MIIEpAIBAAKCAQEA0Z3VS5Jcd6S5''',
+    '''MIIEpAIBAAKCAQEA0Z3[^A-Za-z0-9]''',
+    # PGP private key block fixtures (synthetic fake base64, not real keys).
+    '''lQVYBF2asdfGhjklFakeKeyNotReal''',
+    '''fakeBase64Here''',
 ]
