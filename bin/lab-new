@@ -220,12 +220,22 @@ def main() -> int:
     if args["target"]:
         code, msg = scope_check(args["target"], engagement)
         print(msg)
-        if code == 2:
+        if code == 0:
+            scope_checked = "yes"
+        elif code == 2:
             return 2
-        if code == 3:
+        elif code == 3:
             print("Target not in scope. Add it to the engagement scope file or confirm with human.", file=sys.stderr)
             return 3
-        scope_checked = "yes"
+        else:
+            # S1/R5: fail-closed on any non-0/2/3 exit code (e.g. lab-scope
+            # crashed on malformed YAML -> exit 1). The global denied list is
+            # the lab's hardest safety rail and must NEVER be silently disabled.
+            print(
+                f"ERROR: scope check failed (lab-scope exit {code}): {msg}",
+                file=sys.stderr,
+            )
+            return 2
     elif args["type"] in ("ctf", "bounty"):
         # T2-19: warn when no --target on ctf/bounty (scope not checked)
         print("WARNING: no --target provided, scope not checked. Pass --target <url> to enable scope validation.", file=sys.stderr)

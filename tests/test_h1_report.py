@@ -3038,3 +3038,45 @@ class TestAdversarialRound4:
         assert not any("placeholder" in i.message.lower() for i in errors), (
             f"'(state: production)' is a label, not a placeholder; got {errors}"
         )
+
+
+# ─── Adversarial Round 5 fixes (regression tests) ─────────────────────────────
+
+
+class TestAdversarialRound5:
+    """Regression tests for findings from the fifth adversarial review round."""
+
+    def test_placeholder_with_midphrase_colon_caught(self, tmp_path):
+        """B1/R5: a template instruction with a mid-phrase colon like
+        '(describe the bug: see ticket #123)' must STILL be caught (the B1/R4
+        colon-exclusion was too broad and missed this)."""
+        ws = _make_workspace(tmp_path)
+        lab = _make_engagement(tmp_path)
+        body = (
+            "# Title\n\n## Description\n\n"
+            "(describe the bug: see ticket #123)\n\n"
+            "## Impact\n\nreal impact text\n"
+        )
+        _write_report(ws, body=body)
+        issues = h1report.check_report(ws, lab_root=lab)
+        errors = [i for i in issues if i.level == "ERROR"]
+        assert any("placeholder" in i.message.lower() for i in errors), (
+            f"instruction with mid-phrase colon should be caught; got {errors}"
+        )
+
+    def test_label_form_still_not_flagged(self, tmp_path):
+        """B1/R5: the label form '(state: production)' must still NOT be flagged
+        (the negative lookahead rejects verb: label form)."""
+        ws = _make_workspace(tmp_path)
+        lab = _make_engagement(tmp_path)
+        body = (
+            "# Title\n\n## Description\n\n"
+            "The database (state: production) was queried.\n\n"
+            "## Impact\n\nreal impact text\n"
+        )
+        _write_report(ws, body=body)
+        issues = h1report.check_report(ws, lab_root=lab)
+        errors = [i for i in issues if i.level == "ERROR"]
+        assert not any("placeholder" in i.message.lower() for i in errors), (
+            f"'(state: production)' label should not be flagged; got {errors}"
+        )
