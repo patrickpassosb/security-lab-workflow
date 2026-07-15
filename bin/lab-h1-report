@@ -197,6 +197,18 @@ def cmd_status(args: list[str]) -> int:
             detail="report parse error",
         )
         return 1
+    except OSError as e:
+        # B4/B10: catch filesystem permission errors and other OS-level
+        # failures so the CLI exits cleanly with an audit event instead of
+        # crashing with an unhandled traceback.
+        print(f"ERROR: filesystem error: {e}", file=sys.stderr)
+        labutil.audit(
+            AUDIT_ACTION_STATUS,
+            target=str(workspace or ""),
+            exit_code=1,
+            detail="filesystem error",
+        )
+        return 1
 
     md = status.get("metadata", {}) or {}
     print(f"report: {status['report_path']}")
@@ -211,6 +223,17 @@ def cmd_status(args: list[str]) -> int:
     print(f"finding_type: {md.get('finding_type', '')}")
     print(f"engagement: {md.get('engagement', '')}")
     print(f"weakness: {md.get('weakness', '')}")
+
+    # C2: validation state — does the report pass `check` right now?
+    vstate = status.get("validation_state")
+    if vstate is None:
+        print("validation: unable to run (report missing or unreadable)")
+    elif vstate == "PASS":
+        print(f"validation: PASS ({status.get('validation_errors', 0)} errors, "
+              f"{status.get('validation_warnings', 0)} warnings)")
+    else:
+        print(f"validation: FAIL ({status.get('validation_errors', 0)} errors, "
+              f"{status.get('validation_warnings', 0)} warnings)")
 
     # Latest prepared package.
     latest = status.get("latest_package")
@@ -241,6 +264,9 @@ def cmd_status(args: list[str]) -> int:
                 print(f"h1_report_id: {rid}")
             if url:
                 print(f"h1_url: {url}")
+            # B9: if record.json exists but has no valid schema/id, warn.
+            if rid is None and url is None:
+                print("record_warning: record.json is corrupt or has an unrecognized schema")
         else:
             print("record: none")
     else:
@@ -352,16 +378,27 @@ def cmd_prepare(args: list[str]) -> int:
 
 def _parse_record_args(args: list[str]) -> tuple[str | None, dict[str, str], int]:
     """Parse record-submission args. Returns (workspace, flags, exit_code).
-    exit_code is 0 on success, 1 on usage error."""
+    exit_code is 0 on success, 1 on usage error. Supports both --flag value
+    and --flag=value syntax (B2, for consistency with lab-scope/lab-new)."""
     workspace: str | None = None
     flags: dict[str, str] = {}
     i = 0
-    # The first positional (if any) is the workspace. Flags are --key value.
+    # The first positional (if any) is the workspace. Flags are --key value or --key=value.
     required = ("--package", "--h1-id", "--url", "--submitted-at")
     optional = ("--submitted-by",)
+    all_flags = required + optional
     while i < len(args):
         a = args[i]
-        if a in required or a in optional:
+        # B2: handle --flag=value syntax by splitting on the first '='.
+        if a.startswith("--") and "=" in a:
+            name, _, value = a.partition("=")
+            if name in all_flags:
+                flags[name] = value
+                i += 1
+                continue
+            print(f"unknown flag: {a}", file=sys.stderr)
+            return None, {}, 1
+        if a in all_flags:
             if i + 1 >= len(args):
                 print(f"flag {a} requires a value", file=sys.stderr)
                 return None, {}, 1

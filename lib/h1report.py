@@ -267,6 +267,27 @@ def parse_report_text(path: Path, text: str) -> Report:
         raise ReportParseError(f"{path}: YAML frontmatter not closed (missing '---')")
     fm_text = "\n".join(lines[1:close_idx])
     body_text = "\n".join(lines[close_idx + 1:])
+    # S4: bound frontmatter size + reject YAML alias bombs. PyYAML's
+    # safe_load does NOT reject "billion-laughs" alias expansion (verified:
+    # 10-level deep alias chains OOM/hang on PyYAML 6.0.3). A real report's
+    # frontmatter is a flat mapping with ~15 scalar keys + small lists —
+    # 64KB is generous. Anything larger is almost certainly adversarial.
+    _FRONTMATTER_MAX_BYTES = 64 * 1024
+    if len(fm_text.encode("utf-8")) > _FRONTMATTER_MAX_BYTES:
+        raise ReportParseError(
+            f"{path}: YAML frontmatter exceeds {_FRONTMATTER_MAX_BYTES // 1024}KB "
+            f"(likely adversarial; real report frontmatter is <2KB)"
+        )
+    # S4: reject alias/anchor syntax outright. Real report frontmatter uses
+    # only scalar keys and small inline lists — no anchors (&) or aliases (*).
+    # Presence of a YAML anchor (`&name`) or alias (`*name`) is a strong
+    # adversarial signal (billion-laughs vector). This catches anchors in any
+    # position: block style (`a: &a [...]`), flow style (`*a`), or bare lines.
+    if re.search(r"(?:^|\s|:|,\s*)&[A-Za-z]", fm_text) or \
+       re.search(r"(?:^|\s|:|,\s*)\*[A-Za-z]", fm_text):
+        raise ReportParseError(
+            f"{path}: YAML anchors/aliases are not permitted in report frontmatter"
+        )
     try:
         fm = yaml.safe_load(fm_text)
     except yaml.YAMLError as e:
@@ -297,10 +318,21 @@ def resolve_workspace(workspace: str | Path | None = None) -> Path:
 
 
 def find_report_file(workspace: Path) -> Path:
-    """Return the path to report_h1.md inside the workspace (must exist)."""
+    """Return the path to report_h1.md inside the workspace (must exist).
+
+    B5: refuse a symlinked report_h1.md — `check` reads via read_text (which
+    follows symlinks) but `prepare` opens via O_NOFOLLOW (which rejects them),
+    causing a confusing inconsistency where check passes and prepare fails.
+    Reject the symlink here so check fails fast with a clear error instead.
+    """
     p = workspace / "report_h1.md"
     if not p.is_file():
         raise ReportFileError(f"report_h1.md not found in workspace: {workspace}")
+    if p.is_symlink():
+        raise ReportFileError(
+            "report_h1.md is a symlink (not allowed); refusing to validate "
+            "a symlinked report source"
+        )
     return p
 
 
@@ -364,26 +396,65 @@ def load_global_scope(
 ) -> tuple[dict[str, Any], list[Issue]]:
     """Load global scope, preferring a workspace scope_snapshot.yaml.
 
+    The live ``scope.yaml`` denied list ALWAYS applies and CANNOT be weakened
+    by a workspace snapshot (per AGENTS.md: "Global denied → DENIED (always
+    wins, cannot be overridden)"). When a snapshot is present, its ``denied``
+    list is unioned with the live global ``denied`` list (de-duped by
+    ``pattern``); a snapshot may only ADD global denied entries, never remove
+    them. All other snapshot keys (``default_rate_limits``, ``evidence``,
+    ``notes``) are taken from the snapshot as-is.
+
     Returns (scope_dict, issues). Missing global scope is not an error —
     returns ({}, []) — but missing snapshot triggers a WARN.
     """
     issues: list[Issue] = []
-    if workspace is not None:
-        snap = workspace / "scope_snapshot.yaml"
-        if snap.is_file():
-            data = load_yaml_file(snap)
-            if isinstance(data, dict):
-                return data, issues
-            issues.append(Issue(
-                "WARN", str(snap),
-                "global scope snapshot is not a valid YAML mapping; using live file",
-            ))
-        else:
-            issues.append(Issue("WARN", str(workspace), _SNAPSHOT_WARNING))
     lab = Path(lab_root) if lab_root else LAB_ROOT_DEFAULT
-    path = lab / "scope.yaml"
-    data = load_yaml_file(path)
-    return (data if isinstance(data, dict) else {}), issues
+    live_path = lab / "scope.yaml"
+    live_data = load_yaml_file(live_path)
+    if live_data is None:
+        live_data = {}
+
+    if workspace is None:
+        return live_data, issues
+
+    snap = workspace / "scope_snapshot.yaml"
+    if not snap.is_file():
+        issues.append(Issue("WARN", str(workspace), _SNAPSHOT_WARNING))
+        return live_data, issues
+
+    snap_data = load_yaml_file(snap)
+    if not isinstance(snap_data, dict):
+        issues.append(Issue(
+            "WARN", str(snap),
+            "global scope snapshot is not a valid YAML mapping; using live file",
+        ))
+        return live_data, issues
+
+    # Merge: live global denied ALWAYS wins. Snapshot denied entries are added
+    # on top (union, de-duped by pattern). A snapshot cannot remove a live
+    # global denied entry — this is the critical scope-bypass guard.
+    live_denied = live_data.get("denied") or []
+    snap_denied = snap_data.get("denied") or []
+    if not isinstance(live_denied, list):
+        live_denied = []
+    if not isinstance(snap_denied, list):
+        snap_denied = []
+    seen_patterns: set[str] = set()
+    merged_denied: list = []
+    for item in live_denied:
+        pat = item.get("pattern", "") if isinstance(item, dict) else str(item)
+        key = pat.lower()
+        if key not in seen_patterns:
+            seen_patterns.add(key)
+            merged_denied.append(item)
+    for item in snap_denied:
+        pat = item.get("pattern", "") if isinstance(item, dict) else str(item)
+        key = pat.lower()
+        if key not in seen_patterns:
+            seen_patterns.add(key)
+            merged_denied.append(item)
+    snap_data["denied"] = merged_denied
+    return snap_data, issues
 
 
 # ─── Validation helpers ─────────────────────────────────────────────────────────
@@ -396,6 +467,27 @@ def _is_nonempty_str(v: Any) -> bool:
 # available; the fallback defines a local copy. Keep a thin alias so the rest
 # of this module reads cleanly.
 _is_valid_https_url = is_valid_https_url
+
+
+def _is_safe_engagement_name(name: str) -> bool:
+    """Return True if `name` is safe to use as a single path component for
+    engagements/<name>.yaml. Rejects empty, `..`, `/`, `\\`, null bytes, and
+    any name that would escape the engagements/ directory.
+
+    This mirrors labutil.validate_name but is local to h1report so the
+    engagement-name-in-path guard doesn't depend on labutil being importable.
+    """
+    if not isinstance(name, str) or not name:
+        return False
+    if "\\" in name or "\x00" in name:
+        return False
+    if "/" in name:
+        return False
+    if name in (".", "..") or name.strip(".") == "":
+        return False
+    # Reject any component that resolves outside the engagements dir.
+    p = Path(name)
+    return not (p.is_absolute() or any(part == ".." for part in p.parts))
 
 
 # Severity bucket validation. Per the task spec:
@@ -417,10 +509,19 @@ _PLACEHOLDER_PATTERNS = [
     re.compile(r"\[add[^\]]*\]", re.IGNORECASE),  # [add description here]
     re.compile(r"\bTODO\b", re.IGNORECASE),
     re.compile(r"\bTBD\b", re.IGNORECASE),
+    # Line-anchored parenthesized template instruction (whole-line placeholder).
     re.compile(
         r"^\s*\([^\)]*(describe|what|step|include|reference|paste|suggested|any caveats)"
         r"[^\)]*\)\s*$",
         re.IGNORECASE | re.MULTILINE,
+    ),
+    # R10: unanchored parenthesized template instruction (mid-line placeholder).
+    # Catches "(describe the bug)" embedded in prose like "This is (describe the
+    # bug) the issue." without requiring the whole line to be the instruction.
+    re.compile(
+        r"\([^\)]{0,80}(describe|what|step|include|reference|paste|suggested|any caveats)"
+        r"[^\)]{0,80}\)",
+        re.IGNORECASE,
     ),
 ]
 
@@ -499,7 +600,23 @@ def _has_blocked_token(path_str: str) -> bool:
 
 # ─── Secret detection ──────────────────────────────────────────────────────────
 
-# Private key blocks (PEM-style). Requires the BEGIN/END markers.
+# S3: cap the text size we scan for secrets. A 60KB adversarial input with
+# 10000 BEGIN markers but no END marker caused ~19s of backtracking with the
+# old DOTALL regex. Capping at 256KB is generous for real reports/evidence and
+# bounds the worst case; larger inputs are truncated for scanning (with a note
+# that the tail was not scanned).
+_SECRET_SCAN_MAX_BYTES = 256 * 1024
+
+# Private key blocks (PEM-style). Requires the BEGIN/END markers. S3: we
+# pre-scan for the END marker before running the DOTALL regex — if no END
+# marker is present, the regex would backtrack catastrophically on adversarial
+# input containing many BEGIN markers.
+_PRIVATE_KEY_BEGIN_RE = re.compile(
+    r"-----BEGIN (?:RSA |EC |DSA |OPENSSH |PGP |ENCRYPTED )?PRIVATE KEY-----"
+)
+_PRIVATE_KEY_END_RE = re.compile(
+    r"-----END (?:RSA |EC |DSA |OPENSSH |PGP |ENCRYPTED )?PRIVATE KEY-----"
+)
 _PRIVATE_KEY_RE = re.compile(
     r"-----BEGIN (?:RSA |EC |DSA |OPENSSH |PGP |ENCRYPTED )?PRIVATE KEY-----"
     r".*?-----END (?:RSA |EC |DSA |OPENSSH |PGP |ENCRYPTED )?PRIVATE KEY-----",
@@ -532,17 +649,27 @@ _EXAMPLE_PREFIXES = ("example_", "test_", "demo_", "sample_", "REDACTED", "YOUR_
 def _detect_secrets(text: str) -> list[tuple[str, str]]:
     """Return a list of (kind, snippet) for detected secrets in `text`.
 
-    Redacted/example tokens must not false-positive.
+    Redacted/example tokens must not false-positive. S3: inputs larger than
+    _SECRET_SCAN_MAX_BYTES are truncated for scanning (the tail is not scanned);
+    callers that need full coverage should chunk. S3: the private-key regex is
+    only run when an END marker is present (avoids ReDoS on adversarial input
+    with many BEGIN markers but no END).
     """
     hits: list[tuple[str, str]] = []
+    if not text:
+        return hits
+    # S3: bound the scan size.
+    scan_text = text if len(text) <= _SECRET_SCAN_MAX_BYTES else text[:_SECRET_SCAN_MAX_BYTES]
 
-    # 1. Private key blocks
-    for _m in _PRIVATE_KEY_RE.finditer(text):
-        snippet = "-----BEGIN PRIVATE KEY-----"
-        hits.append(("private key block", snippet))
+    # 1. Private key blocks. S3: pre-scan for END marker to avoid catastrophic
+    # backtracking when only BEGIN markers are present.
+    if _PRIVATE_KEY_END_RE.search(scan_text):
+        for _m in _PRIVATE_KEY_RE.finditer(scan_text):
+            snippet = "-----BEGIN PRIVATE KEY-----"
+            hits.append(("private key block", snippet))
 
     # 2. Bearer tokens with 16+ non-placeholder chars
-    for m in _BEARER_RE.finditer(text):
+    for m in _BEARER_RE.finditer(scan_text):
         token_val = m.group(1)
         if _BEARER_PLACEHOLDER.match(token_val):
             continue
@@ -555,7 +682,7 @@ def _detect_secrets(text: str) -> list[tuple[str, str]]:
     for prefix in _API_KEY_PREFIXES:
         # Match prefix followed by enough chars to look real (>= 10 after prefix).
         pat = re.compile(re.escape(prefix) + r"[A-Za-z0-9_\-]{10,}")
-        for m in pat.finditer(text):
+        for m in pat.finditer(scan_text):
             val = m.group(0)
             if any(val.lower().startswith(p.lower()) for p in _EXAMPLE_PREFIXES):
                 continue
@@ -668,7 +795,10 @@ def _validate_severity(fm: dict[str, Any], path: Path) -> list[Issue]:
         ))
         return issues
     score = sev.get("score")
-    if not isinstance(score, (int, float)):
+    # B3: reject bool explicitly — Python's bool is a subclass of int, so
+    # `isinstance(True, (int, float))` is True and `score: true` would be
+    # silently accepted as 1.0. YAML booleans must not be valid severity scores.
+    if isinstance(score, bool) or not isinstance(score, (int, float)):
         kind = type(score).__name__
         issues.append(Issue("ERROR", loc, f"severity.score must be a number, got {kind}"))
         return issues
@@ -811,6 +941,16 @@ def _find_asset(engagement_scope: dict[str, Any], asset_id: str) -> dict[str, An
 def _validate_asset(
     fm: dict[str, Any], engagement_scope: dict[str, Any] | None, path: Path,
 ) -> list[Issue]:
+    """Validate asset_id, asset_name, eligibility, and finding_type against the
+    engagement's structured assets.
+
+    Per the plan:
+      - asset_id must match one assets[].id exactly.
+      - asset_name must match that asset's display_name exactly.
+      - Reject assets where eligible_for_submission is not true (missing -> reject,
+        since the field is required and "is not true" includes absent).
+      - finding_type must be allowed by finding_types when present.
+    """
     issues: list[Issue] = []
     loc = str(path)
     if engagement_scope is None:
@@ -830,11 +970,30 @@ def _validate_asset(
             "ERROR", loc,
             f"asset_name {asset_name!r} does not match asset display_name {display_name!r}",
         ))
-    eligible = asset.get("eligible_for_submission", True)
-    if eligible is False:
+    # eligible_for_submission is required; missing is NOT eligible (spec: "is
+    # not true" -> reject, and the field is in the required asset schema).
+    eligible = asset.get("eligible_for_submission")
+    if eligible is not True:
         issues.append(Issue(
             "ERROR", loc,
-            f"asset {asset_id!r} is not eligible_for_submission",
+            f"asset {asset_id!r} is not eligible_for_submission "
+            f"(got {eligible!r}; must be true)",
+        ))
+    # finding_type must be allowed by the asset's finding_types list when
+    # that list is present and non-empty (plan: "finding_type must be allowed
+    # by finding_types when present").
+    finding_type = fm.get("finding_type")
+    asset_finding_types = asset.get("finding_types")
+    if (
+        isinstance(asset_finding_types, list)
+        and len(asset_finding_types) > 0
+        and _is_nonempty_str(finding_type)
+        and finding_type not in asset_finding_types
+    ):
+        issues.append(Issue(
+            "ERROR", loc,
+            f"finding_type {finding_type!r} is not allowed for asset "
+            f"{asset_id!r} (allowed: {asset_finding_types})",
         ))
     return issues
 
@@ -1069,6 +1228,24 @@ def check_report(
     issues.extend(_validate_attachments_shape(fm, p))
     issues.extend(_validate_testing(fm, p))
 
+    # 1b. finding_type / live_targets cross-check (C8): live_web findings must
+    # declare at least one live target; source_code findings with live targets
+    # is a WARN (unusual but not necessarily wrong).
+    ft = fm.get("finding_type")
+    lt = fm.get("live_targets")
+    lt_count = len(lt) if isinstance(lt, list) else 0
+    if ft == "live_web" and isinstance(lt, list) and lt_count == 0:
+        issues.append(Issue(
+            "ERROR", str(p),
+            "finding_type 'live_web' requires at least one live_target",
+        ))
+    elif ft == "source_code" and isinstance(lt, list) and lt_count > 0:
+        issues.append(Issue(
+            "WARN", str(p),
+            "finding_type 'source_code' with non-empty live_targets "
+            "(usually live_targets is empty for source-only findings)",
+        ))
+
     # 2. Body sections + placeholders.
     issues.extend(_validate_body(body, p))
 
@@ -1077,22 +1254,41 @@ def check_report(
     engagement_name = fm.get("engagement")
     engagement_scope: dict[str, Any] | None = None
     if _is_nonempty_str(engagement_name):
-        engagement_scope, scope_issues = load_engagement_scope(
-            engagement_name, lab, workspace=ws,
-        )
-        issues.extend(scope_issues)
-        if engagement_scope is None:
+        # B6: validate the engagement name before using it in a path. Reject
+        # `..`, `/`, `\`, and other path separators (scope-bypass guard).
+        if not _is_safe_engagement_name(engagement_name):
             issues.append(Issue(
                 "ERROR", str(p),
-                f"engagement {engagement_name!r} not found in {lab / 'engagements'}",
+                f"engagement name {engagement_name!r} contains invalid path "
+                f"characters (must be a single safe path component)",
             ))
+        else:
+            engagement_scope, scope_issues = load_engagement_scope(
+                engagement_name, lab, workspace=ws,
+            )
+            issues.extend(scope_issues)
+            if engagement_scope is None:
+                issues.append(Issue(
+                    "ERROR", str(p),
+                    f"engagement {engagement_name!r} not found in {lab / 'engagements'}",
+                ))
     else:
         # Missing engagement field already reported.
         pass
 
-    # 3b. Frontmatter engagement must match workspace/engagement.txt (if present).
+    # 3b. Frontmatter engagement must match workspace/engagement.txt (if present
+    # and non-empty). An empty/whitespace engagement.txt is a WARN (B8): the
+    # engagement-identity check is silently skipped, weakening scope-bypass
+    # prevention.
     eng_txt = read_engagement_name(ws)
-    if eng_txt and _is_nonempty_str(engagement_name) and engagement_name != eng_txt:
+    eng_txt_path = ws / "engagement.txt"
+    if eng_txt_path.is_file() and not _is_nonempty_str(eng_txt):
+        issues.append(Issue(
+            "WARN", str(eng_txt_path),
+            "engagement.txt exists but is empty; frontmatter engagement match "
+            "check skipped (cannot verify workspace engagement identity)",
+        ))
+    elif eng_txt and _is_nonempty_str(engagement_name) and engagement_name != eng_txt:
         issues.append(Issue(
             "ERROR", str(p),
             f"frontmatter engagement {engagement_name!r} does not match "
@@ -1190,7 +1386,26 @@ def status_report(
         "h1_report_id": None,
         "h1_url": None,
         "source_drifted": False,
+        # C2: validation state — does the report pass `check` right now?
+        "validation_state": None,  # "PASS" | "FAIL" | None (if check could not run)
+        "validation_errors": 0,
+        "validation_warnings": 0,
     }
+
+    # C2: run check_report (read-only) to capture the current validation state.
+    try:
+        check_issues = check_report(ws, lab_root=lab_root) if lab_root else check_report(ws)
+        errors = sum(1 for i in check_issues if i.level == "ERROR")
+        warns = sum(1 for i in check_issues if i.level == "WARN")
+        result["validation_errors"] = errors
+        result["validation_warnings"] = warns
+        result["validation_state"] = "PASS" if errors == 0 else "FAIL"
+    except (ReportFileError, ReportParseError):
+        # Report is missing/unreadable/corrupt — cannot validate. Leave None.
+        result["validation_state"] = None
+    except OSError:
+        # Filesystem error during check — cannot validate. Leave None.
+        result["validation_state"] = None
 
     # Find the latest prepared package (lexically-last prepared-<timestamp> dir).
     latest_pkg_path, latest_pkg_id = _find_latest_package(ws)
@@ -1226,24 +1441,59 @@ def status_report(
         if not pkg_file.is_file():
             drift.append(rel)
             continue
-        actual = _sha256_file(pkg_file)
+        try:
+            actual = _sha256_file(pkg_file)
+        except OSError:
+            drift.append(rel + " (unreadable)")
+            continue
         if actual != stored:
             drift.append(rel)
-    # Attachment integrity.
-    for att in manifest.get("attachments", []) or []:
-        if not isinstance(att, dict):
-            continue
-        rel = att.get("staged_path", "")
-        stored = att.get("sha256", "")
-        if not rel:
-            continue
-        pkg_file = latest_pkg_path / rel
-        if not pkg_file.is_file():
-            drift.append(rel)
-            continue
-        actual = _sha256_file(pkg_file)
-        if actual != stored:
-            drift.append(rel)
+    # Attachment integrity. B7: validate the manifest's attachments field is a
+    # list; if it's a corrupt non-list (e.g. a string), flag it and skip the
+    # loop (do NOT iterate characters of a string as if they were attachments).
+    manifest_attachments = manifest.get("attachments")
+    if not isinstance(manifest_attachments, list):
+        drift.append("attachments (manifest field not a list)")
+    else:
+        for att in manifest_attachments:
+            if not isinstance(att, dict):
+                continue
+            rel = att.get("staged_path", "")
+            stored = att.get("sha256", "")
+            if not rel:
+                continue
+            pkg_file = latest_pkg_path / rel
+            if not pkg_file.is_file():
+                drift.append(rel)
+                continue
+            try:
+                actual = _sha256_file(pkg_file)
+            except OSError:
+                drift.append(rel + " (unreadable)")
+                continue
+            if actual != stored:
+                drift.append(rel)
+    # S5/R7: cross-check the manifest itself against record.json's stored
+    # manifest_sha256. A self-consistent forgery (tamper files + recompute
+    # manifest hashes) would pass the per-file checks above, but the manifest's
+    # own hash is pinned in record.json at submission time. If they differ,
+    # the manifest was forged after submission.
+    record_path_check = latest_pkg_path / "record.json"
+    if record_path_check.is_file():
+        try:
+            rec_check = json.loads(record_path_check.read_text(encoding="utf-8"))
+            if isinstance(rec_check, dict):
+                stored_manifest_sha = rec_check.get("manifest_sha256", "")
+                if stored_manifest_sha:
+                    try:
+                        actual_manifest_sha = _sha256_file(latest_pkg_path / "manifest.json")
+                    except OSError:
+                        drift.append("manifest.json (unreadable)")
+                    else:
+                        if actual_manifest_sha != stored_manifest_sha:
+                            drift.append("manifest.json (forged after submission)")
+        except (OSError, ValueError):
+            drift.append("record.json (corrupt)")
     result["integrity_drift"] = drift
     result["integrity_ok"] = len(drift) == 0
 
@@ -1268,8 +1518,13 @@ def status_report(
     src_entry = manifest.get("report_source", {}) or {}
     stored_src = src_entry.get("sha256", "")
     if stored_src:
-        actual_src = _sha256_file(report_path)
-        result["source_drifted"] = (actual_src != stored_src)
+        try:
+            actual_src = _sha256_file(report_path)
+        except OSError:
+            actual_src = ""
+            result["source_drifted"] = True  # treat unreadable as drift
+        else:
+            result["source_drifted"] = (actual_src != stored_src)
 
     return result
 
@@ -1555,7 +1810,13 @@ def prepare_report(
 
     # 3. Build in a temp sibling dir.
     tmp_pkg = submission_dir / f".preparing-{timestamp}-{os.getpid()}"
-    # Clean up any stale temp dir (defensive; should not exist).
+    # Clean up any stale temp dir/symlink (defensive; should not exist).
+    # S8: if an attacker pre-created the temp path as a symlink, shutil.rmtree
+    # would fail (suppressed) and mkdir would fail with a confusing error.
+    # Explicitly unlink a symlink before attempting rmtree/mkdir.
+    if tmp_pkg.is_symlink():
+        with contextlib.suppress(OSError):
+            os.unlink(tmp_pkg)
     if tmp_pkg.exists():
         with contextlib.suppress(Exception):
             shutil.rmtree(tmp_pkg)
@@ -1713,19 +1974,48 @@ _H1_HOST = "hackerone.com"
 
 def _resolve_package(workspace: Path, package: str) -> Path:
     """Resolve --package: if it's an ID (prepared-<ts>), look it up under
-    <workspace>/submission/<id>/; if it's a path, use it directly. Requires
-    the package dir to exist."""
+    <workspace>/submission/<id>/; if it's a path, use it directly BUT only if
+    it resolves inside <workspace>/submission/ (S2: prevent writing record.json
+    to arbitrary directories outside the workspace). Requires the package dir
+    to exist and contain a manifest.json."""
+    if not _is_nonempty_str(package):
+        raise PackageError("package argument is empty")
+    # Reject path-traversal/escape characters in the package argument itself
+    # (defense in depth, even before resolving).
+    if "\x00" in package:
+        raise PackageError("package argument contains a null byte")
     pkg = Path(package)
-    if pkg.is_absolute() or (not pkg.is_absolute() and "/" in package):
-        # Treat as a path.
-        if not pkg.is_dir():
+    submission_dir = (workspace / "submission").resolve()
+    if pkg.is_absolute() or "/" in package:
+        # Treat as a path — but it MUST resolve inside <workspace>/submission/.
+        resolved = pkg.resolve()
+        try:
+            resolved.relative_to(submission_dir)
+        except ValueError:
+            raise PackageError(
+                f"package path {package!r} resolves outside the workspace "
+                f"submission directory ({submission_dir}); refusing to record "
+                f"outside the workspace"
+            ) from None
+        if not resolved.is_dir():
             raise PackageError(f"package not found: {package}")
-        return pkg.resolve()
-    # Treat as an ID.
+        return resolved
+    # Treat as an ID (bare name, no path separators). Validate it's a safe
+    # single path component before joining (defense in depth).
+    if ".." in Path(package).parts or package in (".", ".."):
+        raise PackageError(f"package id {package!r} is not a valid id")
     candidate = workspace / "submission" / package
-    if candidate.is_dir():
-        return candidate
-    raise PackageError(f"package not found: {package}")
+    candidate_resolved = candidate.resolve()
+    try:
+        candidate_resolved.relative_to(submission_dir)
+    except ValueError:
+        raise PackageError(
+            f"package id {package!r} resolves outside the workspace "
+            f"submission directory"
+        ) from None
+    if not candidate_resolved.is_dir():
+        raise PackageError(f"package not found: {package}")
+    return candidate_resolved
 
 
 def _parse_h1_url(url: str, expected_id: str) -> None:

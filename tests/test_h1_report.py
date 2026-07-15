@@ -2409,3 +2409,267 @@ class TestNoNetworkSubprocess:
         assert "def submit" not in src.lower()
         assert "def send_to_hackerone" not in src.lower()
         assert "hackerone.com/api" not in src.lower()
+
+
+# ─── Adversarial Round 1 fixes (regression tests) ─────────────────────────────
+
+
+class TestAdversarialRound1:
+    """Regression tests for findings from the first adversarial review round."""
+
+    def test_scope_snapshot_cannot_weaken_global_denied(self, tmp_path):
+        """S1/R1: a workspace scope_snapshot.yaml with empty denied MUST NOT
+        override the live global scope.yaml denied list. Global denied always
+        wins (gov/mil/edu cannot be removed by a snapshot)."""
+        ws = _make_workspace(tmp_path, engagement="example-bounty")
+        lab = _make_engagement(tmp_path)
+        # Craft a snapshot with EMPTY denied and wildcard in_scope.
+        snap_data = {
+            "engagement": {"type": "bounty"},
+            "in_scope": [{"pattern": "*"}],
+            "denied": [],  # attacker tries to remove the global denied list
+            "assets": [
+                {"id": "api", "display_name": "Public API",
+                 "asset_type": "api", "patterns": ["api.example.com"],
+                 "finding_types": ["live_web"],
+                 "eligible_for_submission": True, "eligible_for_bounty": True},
+            ],
+        }
+        (ws / "engagement_scope_snapshot.yaml").write_text(
+            yaml.safe_dump(snap_data, sort_keys=False), encoding="utf-8"
+        )
+        (ws / "scope_snapshot.yaml").write_text(
+            yaml.safe_dump({"denied": []}, sort_keys=False), encoding="utf-8"
+        )
+        # Report targeting whitehouse.gov — must be DENIED despite snapshot.
+        fm = copy.deepcopy(VALID_LIVE_FRONTMATTER)
+        fm["live_targets"] = ["https://whitehouse.gov/"]
+        _write_report(ws, fm)
+        issues = h1report.check_report(ws, lab_root=lab)
+        errors = [i for i in issues if i.level == "ERROR"]
+        assert any("denied" in i.message.lower() for i in errors), (
+            f"global denied must win over snapshot; got {errors}"
+        )
+
+    def test_finding_type_validated_against_asset_finding_types(self, tmp_path):
+        """C1/B1: finding_type must be allowed by the asset's finding_types list."""
+        ws = _make_workspace(tmp_path)
+        # Custom engagement where 'frontend' asset declares finding_types.
+        lab = tmp_path / "lab"
+        (lab / "engagements").mkdir(parents=True)
+        eng_data = {
+            "engagement": {"name": "Example", "type": "bounty",
+                           "platform": "hackerone",
+                           "program_url": "https://hackerone.com/example"},
+            "assets": [
+                {"id": "frontend", "display_name": "Frontend / marketing site",
+                 "asset_type": "url", "patterns": ["example.com"],
+                 "finding_types": ["live_web"],
+                 "eligible_for_submission": True, "eligible_for_bounty": True},
+            ],
+            "in_scope": [{"pattern": "example.com"}],
+            "denied": [],
+        }
+        (lab / "engagements" / "example-bounty.yaml").write_text(
+            yaml.safe_dump(eng_data, sort_keys=False), encoding="utf-8"
+        )
+        (lab / "scope.yaml").write_text(
+            yaml.safe_dump({"denied": [{"pattern": "*.gov"}]}, sort_keys=False),
+            encoding="utf-8",
+        )
+        fm = copy.deepcopy(VALID_SOURCE_FRONTMATTER)
+        # 'frontend' asset declares finding_types: [live_web]; set source_code.
+        fm["finding_type"] = "source_code"
+        _write_report(ws, fm)
+        issues = h1report.check_report(ws, lab_root=lab)
+        errors = [i for i in issues if i.level == "ERROR"]
+        assert any("finding_type" in i.message.lower() and "allowed" in i.message.lower()
+                   for i in errors), (
+            f"expected finding_type not allowed error; got {errors}"
+        )
+
+    def test_eligible_for_submission_missing_rejected(self, tmp_path):
+        """C4: an asset missing eligible_for_submission must be rejected (not
+        defaulted to True)."""
+        ws = _make_workspace(tmp_path)
+        # Engagement with an asset missing eligible_for_submission.
+        lab = tmp_path / "lab"
+        (lab / "engagements").mkdir(parents=True)
+        eng_data = {
+            "engagement": {"name": "Example", "type": "bounty",
+                           "platform": "hackerone",
+                           "program_url": "https://hackerone.com/example"},
+            "assets": [
+                {"id": "frontend", "display_name": "Frontend / marketing site",
+                 "asset_type": "url", "patterns": ["example.com"],
+                 "finding_types": ["live_web"]},
+                # eligible_for_submission intentionally OMITTED.
+            ],
+            "in_scope": [{"pattern": "example.com"}],
+            "denied": [],
+        }
+        (lab / "engagements" / "example-bounty.yaml").write_text(
+            yaml.safe_dump(eng_data, sort_keys=False), encoding="utf-8"
+        )
+        (lab / "scope.yaml").write_text(
+            yaml.safe_dump({"denied": [{"pattern": "*.gov"}]}, sort_keys=False),
+            encoding="utf-8",
+        )
+        fm = copy.deepcopy(VALID_SOURCE_FRONTMATTER)
+        _write_report(ws, fm)
+        issues = h1report.check_report(ws, lab_root=lab)
+        errors = [i for i in issues if i.level == "ERROR"]
+        assert any("eligib" in i.message.lower() for i in errors), (
+            f"expected eligible_for_submission missing error; got {errors}"
+        )
+
+    def test_live_web_requires_live_targets(self, tmp_path):
+        """C8: finding_type 'live_web' with empty live_targets must error."""
+        ws = _make_workspace(tmp_path)
+        lab = _make_engagement(tmp_path)
+        fm = copy.deepcopy(VALID_SOURCE_FRONTMATTER)
+        fm["finding_type"] = "live_web"
+        fm["live_targets"] = []
+        fm["asset_id"] = "api"
+        fm["asset_name"] = "Public API"
+        _write_report(ws, fm)
+        issues = h1report.check_report(ws, lab_root=lab)
+        errors = [i for i in issues if i.level == "ERROR"]
+        assert any("live_web" in i.message.lower() and "live_target" in i.message.lower()
+                   for i in errors), (
+            f"expected live_web-requires-targets error; got {errors}"
+        )
+
+    def test_severity_score_bool_rejected(self, tmp_path):
+        """B3: severity.score: true (YAML bool) must be rejected, not accepted
+        as 1.0."""
+        ws = _make_workspace(tmp_path)
+        lab = _make_engagement(tmp_path)
+        fm = copy.deepcopy(VALID_SOURCE_FRONTMATTER)
+        fm["severity"] = {"rating": "low", "score": True, "vector": "CVSS:3.1/AV:N"}
+        _write_report(ws, fm)
+        issues = h1report.check_report(ws, lab_root=lab)
+        errors = [i for i in issues if i.level == "ERROR"]
+        assert any("score" in i.message.lower() for i in errors), (
+            f"expected bool-score rejection; got {errors}"
+        )
+
+    def test_engagement_name_path_traversal_rejected(self, tmp_path):
+        """B6: frontmatter engagement '../evil' must be rejected (path traversal
+        in engagement name)."""
+        ws = _make_workspace(tmp_path, engagement="example-bounty")
+        lab = _make_engagement(tmp_path)
+        fm = copy.deepcopy(VALID_SOURCE_FRONTMATTER)
+        fm["engagement"] = "../evil"
+        _write_report(ws, fm)
+        # engagement.txt says example-bounty, frontmatter says ../evil — both
+        # the mismatch AND the path-traversal must be caught.
+        issues = h1report.check_report(ws, lab_root=lab)
+        errors = [i for i in issues if i.level == "ERROR"]
+        assert any("invalid path" in i.message.lower() or "engagement" in i.message.lower()
+                   for i in errors), (
+            f"expected engagement path-traversal rejection; got {errors}"
+        )
+
+    def test_empty_engagement_txt_warns(self, tmp_path):
+        """B8: an empty engagement.txt must produce a WARN (not silent skip)."""
+        ws = _make_workspace(tmp_path, engagement="example-bounty")
+        # Overwrite engagement.txt with empty content.
+        (ws / "engagement.txt").write_text("", encoding="utf-8")
+        lab = _make_engagement(tmp_path)
+        _write_report(ws, VALID_SOURCE_FRONTMATTER)
+        issues = h1report.check_report(ws, lab_root=lab)
+        warns = [i for i in issues if i.level == "WARN"]
+        assert any("engagement.txt" in i.message.lower() and "empty" in i.message.lower()
+                   for i in warns), (
+            f"expected empty-engagement.txt WARN; got {warns}"
+        )
+
+    def test_symlinked_report_rejected(self, tmp_path):
+        """B5: a symlinked report_h1.md must be rejected at find_report_file."""
+        ws = _make_workspace(tmp_path)
+        lab = _make_engagement(tmp_path)
+        real = tmp_path / "real-report.md"
+        real.write_text("# real\n", encoding="utf-8")
+        (ws / "report_h1.md").unlink(missing_ok=True)
+        os.symlink(real, ws / "report_h1.md")
+        with pytest.raises(h1report.ReportFileError):
+            h1report.check_report(ws, lab_root=lab)
+
+    def test_parenthesized_placeholder_midline_rejected(self, tmp_path):
+        """R10: a parenthesized template instruction embedded mid-line must be
+        caught, not just whole-line instructions."""
+        ws = _make_workspace(tmp_path)
+        lab = _make_engagement(tmp_path)
+        body = (
+            "# Title\n\n## Description\n\n"
+            "This is (describe the bug) the issue.\n\n"
+            "## Impact\n\nreal impact text\n"
+        )
+        _write_report(ws, body=body)
+        issues = h1report.check_report(ws, lab_root=lab)
+        errors = [i for i in issues if i.level == "ERROR"]
+        assert any("placeholder" in i.message.lower() for i in errors), (
+            f"expected mid-line parenthesized placeholder error; got {errors}"
+        )
+
+    def test_yaml_alias_bomb_rejected(self, tmp_path):
+        """S4: a billion-laughs YAML frontmatter must be rejected at parse time,
+        not OOM the process."""
+        ws = _make_workspace(tmp_path)
+        bomb = (
+            "---\n"
+            "a: &a ['x']\n"
+            "b: &b [*a,*a,*a,*a,*a,*a,*a,*a,*a,*a]\n"
+            "c: &c [*b,*b,*b,*b,*b,*b,*b,*b,*b,*b]\n"
+            "schema: security-lab/hackerone-report/v1\n"
+            "---\n\n# body\n"
+        )
+        (ws / "report_h1.md").write_text(bomb, encoding="utf-8")
+        with pytest.raises(h1report.ReportParseError):
+            h1report.parse_report(ws / "report_h1.md")
+
+    def test_redos_private_key_no_endmarker(self, tmp_path):
+        """S3: 10000 BEGIN markers with no END marker must not hang the secret
+        detector (ReDoS regression)."""
+        evil = "-----BEGIN PRIVATE KEY-----" * 10000 + "a" * 1000
+        # Must return quickly (no hang). If it hangs, the test timeout catches it.
+        hits = h1report._detect_secrets(evil)
+        # No END marker -> no private key block detected (correct behavior).
+        assert not any("private key" in k.lower() for k, _ in hits)
+
+    def test_status_shows_validation_state(self, tmp_path, monkeypatch):
+        """C2: status output must include a validation state line."""
+        ws = _make_workspace(tmp_path)
+        lab = _make_engagement(tmp_path)
+        _write_report(ws, VALID_SOURCE_FRONTMATTER)
+        monkeypatch.setenv("HACKING_LAB", str(lab))
+        cli = _import_cli()
+        import contextlib
+        from io import StringIO
+        out = StringIO()
+        with contextlib.redirect_stdout(out):
+            rc = cli.main(["status", str(ws)])
+        assert rc == 0
+        output = out.getvalue()
+        assert "validation:" in output.lower(), (
+            f"expected validation state in status output; got: {output}"
+        )
+
+    def test_record_submission_package_path_escape_rejected(self, tmp_path):
+        """S2: --package pointing outside <workspace>/submission/ must be
+        rejected (no writing record.json to arbitrary dirs)."""
+        ws = _make_workspace(tmp_path)
+        lab = _make_engagement(tmp_path)
+        _write_report(ws, VALID_SOURCE_FRONTMATTER)
+        # First prepare a valid package inside the workspace.
+        h1report.prepare_report(ws, lab_root=lab)
+        # Try to record with --package pointing to /tmp (outside workspace).
+        with pytest.raises((h1report.PackageError, Exception)):
+            h1report.record_submission(
+                ws, lab_root=lab,
+                package=str(tmp_path / "evil"),
+                h1_id="1234567",
+                url="https://hackerone.com/reports/1234567",
+                submitted_at="2026-07-13T21:30:00Z",
+            )

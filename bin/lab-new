@@ -167,9 +167,21 @@ def scope_check(target: str, engagement: str) -> tuple[int, str]:
 
 
 def fill_template(template_path: Path, dest_path: Path, replacements: dict[str, str]) -> None:
+    """Fill a template by replacing {{KEY}} placeholders with values.
+
+    S7: do a single-pass replacement so a value containing another {{KEY}}
+    (e.g. --target='{{PROGRAM_URL}}') is NOT re-interpreted by a later
+    replacement key. Uses a regex that substitutes all keys in one pass,
+    so replacement values are inserted verbatim and never re-scanned.
+    """
     text = template_path.read_text(encoding="utf-8")
-    for key, value in replacements.items():
-        text = text.replace(f"{{{{{key}}}}}", value)
+    if replacements:
+        # Build a single regex matching any {{KEY}} and substitute in one pass.
+        # Values are inserted literally (no re-scanning for {{...}}).
+        pattern = re.compile(
+            r"\{\{(" + "|".join(re.escape(k) for k in replacements) + r")\}\}"
+        )
+        text = pattern.sub(lambda m: replacements[m.group(1)], text)
     dest_path.write_text(text, encoding="utf-8")
 
 
