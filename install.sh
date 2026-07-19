@@ -42,9 +42,8 @@ if [ ! -d "$INSTALL_DIR" ]; then
       # copy private local state (bounties/, ctfs/, cves/, findings/, engagements/
       # real scope, docs/ with private roadmaps). The allowlist copies ONLY
       # known framework paths; everything else stays in the source clone.
-      # Note: docs/ is deliberately excluded in SI-000 because docs/ may
-      # contain private untracked roadmaps (SELF_IMPROVEMENT_ROADMAP.md,
-      # H1_REPORTING_MVP_PLAN.md). SI-001 sanitizes docs/ and adds it back.
+      # SI-001: docs/ is now sanitized and added to the allowlist. Only
+      # committed, public docs are copied (gitignored docs stay in source).
       if command -v rsync >/dev/null 2>&1; then
         # Build the rsync include list from FRAMEWORK_PATHS.
         # rsync semantics: --include=<path> --include=<path>/ --exclude='*'
@@ -56,6 +55,7 @@ if [ ! -d "$INSTALL_DIR" ]; then
           --include='templates/' --include='templates/**' \
           --include='tests/' --include='tests/**' \
           --include='.github/' --include='.github/**' \
+          --include='docs/' --include='docs/**' \
           --include='engagements/' --include='engagements/example-bounty.yaml' \
           --include='engagements/example-ctf.yaml' \
           --include='engagements/cve-research.yaml' \
@@ -83,7 +83,7 @@ if [ ! -d "$INSTALL_DIR" ]; then
       else
         # cp fallback: copy each allowlisted path individually.
         # dirs are copied recursively; files are copied as-is.
-        for path in bin lib skills templates tests .github; do
+        for path in bin lib skills templates tests .github docs; do
           [ -e "$SCRIPT_DIR/$path" ] && cp -R "$SCRIPT_DIR/$path" "$INSTALL_DIR/"
         done
         mkdir -p "$INSTALL_DIR/engagements"
@@ -121,12 +121,6 @@ if [ ! -d "$INSTALL_DIR" ]; then
             ;;
         esac
       done 2>/dev/null || true
-      # Defensive: ensure docs/ is NOT present in SI-000 (private roadmaps).
-      # SI-001 sanitizes docs/ and adds it back to the allowlist.
-      if [ -d "${INSTALL_DIR:?}/docs" ]; then
-        echo ">> WARN: docs/ present in install dir — removing (private until SI-001)"
-        rm -rf "${INSTALL_DIR:?}/docs"
-      fi
     fi
   else
     echo "git not found and target $INSTALL_DIR does not exist." >&2

@@ -302,3 +302,25 @@ You say: "Solve challenge X, target: <url>"
 ## Post-disclosure migration
 
 After responsible-disclosure windows pass (CVE assigned / bounty closed), engagement-specific findings can be moved from the private engagements repo to a public disclosures repo. This is a manual step, not automated — the human decides when the window has closed.
+
+---
+
+## Self-improvement system
+
+The lab has a detailed self-improvement roadmap design at
+[`docs/SELF_IMPROVEMENT_ROADMAP.md`](SELF_IMPROVEMENT_ROADMAP.md).
+Implementation is in progress; see the roadmap for current phase status.
+
+This is a governed, evidence-backed, recursively self-improving agent system
+inspired by Hermes Agent (procedural memory) and AIDE² (bi-level optimization).
+It covers:
+
+- Platform outcome tracking (HackerOne Duplicate/Informative/Triaged/Resolved)
+- Offline evaluation with hidden private labels
+- Candidate skill generation with fixed-budget optimization
+- Human-gated promotion with rollback
+- Safety invariant enforcement
+- Skill usage telemetry and aging
+- Level 0 (delegated) through Level 3 (inflection) RSI
+
+**Read it before building any learning, evaluation, or improvement feature.**

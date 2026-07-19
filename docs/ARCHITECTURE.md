@@ -273,3 +273,4 @@ This is how you reconstruct what happened in a session — and how you prove you
 - **Extensible.** New engagement type = new YAML file + new template dir. No code changes needed.
 - **Config-driven.** Env vars, not hardcoded paths. Installable by anyone.
 - **Skills are the API.** Each `SKILL.md` is a documented, versioned interface. Community contributes new skills as PRs.
+- **Self-improving (planned).** The lab has a governed self-improvement system design (see [`SELF_IMPROVEMENT_ROADMAP.md`](SELF_IMPROVEMENT_ROADMAP.md)) that records platform outcomes, builds offline evaluation cases, generates candidate skill improvements, and promotes them through human-gated evaluation. Implementation is in progress; see the roadmap for current phase status.
