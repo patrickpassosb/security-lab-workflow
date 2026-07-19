@@ -30,17 +30,30 @@ keywords = ["h1_"]
 
 [allowlist]
 description = "Allowlist for example/template files and .env.example"
+# SI-000: Narrowed the previous blanket '''docs/.*''' allowlist.
+# Rationale: a blanket docs/.* allowlist suppressed any secret pasted into a
+# roadmap, plan, or design doc — exactly where engagement-private material
+# (report IDs, endpoints, expected verdicts) tends to leak. We now scan all
+# docs/ files by default and allowlist only specific synthetic fixture paths
+# that are known-safe. Add new allowlist entries here ONLY for committed
+# synthetic fixture files, never as a broad directory allowlist.
 paths = [
     '''.env\.example''',
     '''engagements/example-.*\.yaml''',
     '''templates/.*''',
-    '''docs/.*''',
+    # Synthetic fixture files only (committed, reviewed, no real secrets):
+    '''docs/EXAMPLES\.md''',
+    '''docs/MULTI_ENGAGEMENT\.md''',
+    '''docs/DEPENDENCIES\.md''',
 ]
 # Placeholder values in examples are fine
 regexes = [
     '''<your[_-]?(key|token|pat|secret|api[_-]?key)>''',
     '''YOUR_KEY_HERE''',
     '''changeme''',
+    # Placeholder Voyage API key form in docs/PLUGINS.md and docs/ARCHITECTURE.md
+    # (e.g. `VOYAGE_API_KEY="pa-..."`). Real keys never match this exact fragment.
+    '''pa-\.\.\.''',
     # Synthetic private-key fixtures in tests/test_h1_report.py. These are
     # truncated fake base64 fragments (<=30 chars) used to exercise the
     # secret-detection code path. A real PEM key has hundreds of base64

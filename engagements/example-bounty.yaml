@@ -1,47 +1,50 @@
-# Engagement scope — Example Bug Bounty
+# Engagement scope — EXAMPLE bounty (synthetic, committable)
 # Type: bounty
-# Copy this file to engagements/bounty-<program>.yaml and edit for your program.
-# Scope details can be pulled from HackerOne via: lab-h1-scope <handle> (planned — see ROADMAP.md)
+#
+# This is a synthetic reference file showing the engagement-scope format.
+# It contains NO real target scope. Copy to engagements/bounty-<program>.yaml
+# and replace example.com placeholders with the real program's scope before
+# use. Real engagement files are gitignored (see .gitignore: engagements/bounty-*.yaml).
+# Scope details can be pulled from HackerOne via: lab-h1-scope <handle> (planned — see ROADMAP.md).
 
 engagement:
-  name: "Example Bug Bounty"
+  name: "Example Bounty Program"
   type: bounty
   platform: hackerone
-  program_url: "https://hackerone.com/<program>"
+  program_url: "https://hackerone.com/example-program"
   safe_harbor: true
-  authorized_by: "<Program operator> (via HackerOne program)"
-  about: "<Program description>"
+  authorized_by: "Example Corp (via HackerOne program)"
+  about: "Example Corp is a synthetic example company used to illustrate the engagement-scope format."
 
-# In-scope assets from HackerOne structured scope.
-# Replace with your program's actual scope.
+# In-scope assets from the program's structured scope.
+# Replace example.com / api.example.com with the real program's hosts.
 in_scope:
-  - pattern: "example.com"
+  - pattern: "www.example.com"
     note: "Frontend / marketing site"
   - pattern: "api.example.com"
-    note: "Public API"
+    note: "Public API — privesc beyond token scope"
+  - pattern: "identity.example.com"
+    note: "Auth service (OAuth2, login, session)"
 
 # Engagement-specific denials (merged with global scope.yaml denied list).
 denied: []
 
-# Structured HackerOne assets. Separate from host-pattern `in_scope` because
-# HackerOne assets may represent repositories, mobile apps, downloadable
-# executables, or broad public artifacts. `asset_id` in a report_h1.md must
-# match one `assets[].id` exactly, and `asset_name` must match the asset's
-# `display_name` exactly. `asset_type` is platform metadata, not a hostname
-# validation rule; existing `in_scope` and `denied` lists continue to govern
-# live targets.
+# Structured HackerOne assets. `asset_id` in a report_h1.md must match one
+# `assets[].id` exactly, and `asset_name` must match the asset's `display_name`
+# exactly. `asset_type` is platform metadata, not a hostname validation rule;
+# existing `in_scope` and `denied` lists continue to govern live targets.
 assets:
-  - id: frontend
-    display_name: Frontend / marketing site
+  - id: example-frontend
+    display_name: Example Frontend
     asset_type: URL
     patterns:
-      - example.com
+      - www.example.com
     finding_types:
       - live_web
     eligible_for_submission: true
     eligible_for_bounty: true
 
-  - id: api
+  - id: example-public-api
     display_name: Public API
     asset_type: API
     patterns:
@@ -52,10 +55,10 @@ assets:
     eligible_for_bounty: true
 
   - id: example-github-public-artifacts
-    display_name: GitHub Repositories or other public artifacts owned by Example
+    display_name: GitHub Repositories or other public artifacts
     asset_type: OTHER
     patterns:
-      - github.com/example/*
+      - github.com/example-org/*
     finding_types:
       - source_code
     eligible_for_submission: true
@@ -70,7 +73,6 @@ rate_limits:
   global_max_parallel: 2
 
 # Techniques allowed without approval.
-# NOTE: Many programs prohibit automated scanning. Check the program rules.
 techniques_allowed:
   - passive_recon
   - active_recon
@@ -90,17 +92,16 @@ techniques_require_approval:
   - file_upload
   - deserialization
   - race_conditions
+  - directory_fuzzing
+  - subdomain_enum
+  - nuclei_template_scans
+  - social_engineering
 
 # Techniques NEVER allowed on this engagement.
 techniques_denied:
   - dos_ddos
   - ddos_amplification
   - brute_force_without_oracle
-  - automated_scanning
-  - directory_fuzzing
-  - subdomain_enum
-  - nuclei_template_scans
-  - social_engineering
 
 # Bounty amounts per asset (replace with your program's actual rewards).
 bounty_table:
@@ -157,7 +158,7 @@ response_targets:
 # Evidence collection.
 evidence:
   audit_log: "~/security-lab/findings/.agent-audit.jsonl"
-  findings_dir: "~/security-lab/bounties/<program>/findings/"
+  findings_dir: "~/security-lab/bounties/example/findings/"
 
 # Reporting.
 reporting:
@@ -166,5 +167,11 @@ reporting:
   rules:
     - "No data exfiltration beyond what proves the bug."
     - "No destructive actions."
-    - "No automated scanning tools (if prohibited)."
-    - "Create testing accounts — use HackerOne username/email."
+    - "No automated exploitation beyond PoC."
+    - "Read the program's full policy page for rules of engagement, safe harbor, and exclusions."
+
+# Program's stated interests (from H1 structured scope).
+interests:
+  - "Product API: injection attacks, RCE, SSRF, IDOR, privilege escalation"
+  - "Public API: ability to escalate privileges beyond the scope of API tokens"
+  - "Privilege Escalation: access pages a user should not access"
