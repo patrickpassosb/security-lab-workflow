@@ -44,6 +44,9 @@ if [ ! -d "$INSTALL_DIR" ]; then
       # known framework paths; everything else stays in the source clone.
       # SI-001: docs/ is now sanitized and added to the allowlist. Only
       # committed, public docs are copied (gitignored docs stay in source).
+      # SI-002: improvement/policy/ and improvement/config/ are tracked TCB
+      # and added to the allowlist. improvement/{state,runs,candidates,private}/
+      # are gitignored runtime/private state and NOT copied.
       if command -v rsync >/dev/null 2>&1; then
         # Build the rsync include list from FRAMEWORK_PATHS.
         # rsync semantics: --include=<path> --include=<path>/ --exclude='*'
@@ -56,6 +59,10 @@ if [ ! -d "$INSTALL_DIR" ]; then
           --include='tests/' --include='tests/**' \
           --include='.github/' --include='.github/**' \
           --include='docs/' --include='docs/**' \
+          --include='improvement/' \
+          --include='improvement/policy/' --include='improvement/policy/**' \
+          --include='improvement/config/' --include='improvement/config/**' \
+          --exclude='improvement/*' \
           --include='engagements/' --include='engagements/example-bounty.yaml' \
           --include='engagements/example-ctf.yaml' \
           --include='engagements/cve-research.yaml' \
@@ -85,6 +92,14 @@ if [ ! -d "$INSTALL_DIR" ]; then
         # dirs are copied recursively; files are copied as-is.
         for path in bin lib skills templates tests .github docs; do
           [ -e "$SCRIPT_DIR/$path" ] && cp -R "$SCRIPT_DIR/$path" "$INSTALL_DIR/"
+        done
+        # improvement/: only policy/ and config/ (tracked TCB), not state/runs/
+        # candidates/private/ (gitignored runtime/private state).
+        mkdir -p "$INSTALL_DIR/improvement"
+        for sub in policy config; do
+          if [ -d "$SCRIPT_DIR/improvement/$sub" ]; then
+            cp -R "$SCRIPT_DIR/improvement/$sub" "$INSTALL_DIR/improvement/"
+          fi
         done
         mkdir -p "$INSTALL_DIR/engagements"
         for f in engagements/example-bounty.yaml engagements/example-ctf.yaml \
@@ -121,6 +136,15 @@ if [ ! -d "$INSTALL_DIR" ]; then
             ;;
         esac
       done 2>/dev/null || true
+      # Defensive: ensure no gitignored improvement/ runtime state leaked
+      # through (SI-002). Only improvement/policy/ and improvement/config/ are
+      # allowlisted; state/, runs/, candidates/, private/ are gitignored.
+      for private_sub in state runs candidates private; do
+        if [ -d "${INSTALL_DIR:?}/improvement/$private_sub" ]; then
+          echo ">> WARN: improvement/$private_sub/ present in install dir — removing (private)"
+          rm -rf "${INSTALL_DIR:?}/improvement/$private_sub"
+        fi
+      done
     fi
   else
     echo "git not found and target $INSTALL_DIR does not exist." >&2

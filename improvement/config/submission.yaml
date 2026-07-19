@@ -1,0 +1,22 @@
+# Self-improvement configuration — submission decision thresholds
+#
+# This file is TRACKED (public, committable). It is TCB: the candidate may
+# read it but NEVER modify it. The outer loop may NEVER modify it either
+# (per roadmap §14 "Files the outer loop may never modify").
+#
+# Per ADR-0001 (docs/adr/0001-tcb-runtime-split.md), this file lives under
+# improvement/config/ (tracked) rather than improvement/ (gitignored).
+
+submission:
+  # Confidence thresholds for H1 report submission decisions.
+  # The `assess` command checks these before recommending submission.
+  trial_report_threshold: 0.85    # trial reports (few remaining) — strict
+  normal_threshold: 0.70          # normal accounts — standard
+  require_impact_demonstrated: true  # response must show actual data, not empty
+  require_novelty_check: true       # must search known_outcomes.yaml for prior reports
+  require_evidence_attachments: true # report must have attached evidence
+
+  # Known Informative precedent check.
+  # If the behavior matches a known_outcomes.yaml entry with state=informative,
+  # `assess` recommends do_not_report regardless of technical verdict.
+  check_known_outcomes: true
