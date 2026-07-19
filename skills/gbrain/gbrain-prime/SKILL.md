@@ -22,20 +22,37 @@ At the start of any session, query the gbrain for the user's recent context, act
 
 ## How to run
 
+> **Trust filter (SI-003):** every gbrain search below MUST exclude
+> `trust: never-prime` pages. These are target-derived lessons
+> (engagement-specific endpoints, report IDs, payloads) that must never
+> surface in session-start context. If the brain's search supports a
+> `--filter` flag, use `--filter 'trust != never-prime'`. Otherwise, after
+> each search, drop any result whose frontmatter has `trust: never-prime`
+> before presenting the prime block. See `docs/PLUGINS.md` for the full
+> trust policy.
+
 ```bash
-# 1. Recent decisions + learnings
+# 1. Recent decisions + learnings (exclude never-prime)
 gbrain search "what was I working on" --limit 5
 
-# 2. Active targets (from past sessions)
+# 2. Active targets (from past sessions) (exclude never-prime)
 gbrain search "active target OR in-progress OR current focus" --limit 5
 
-# 3. Open questions (from gbrain-debrief outputs)
+# 3. Open questions (from gbrain-debrief outputs) (exclude never-prime)
 gbrain search "open question OR TODO OR next step" --limit 5
 
 # 4. Topic-specific (if user says "let's work on the JWT confusion bug")
+#    (exclude never-prime — topic-specific queries are the highest-risk
+#    for surfacing target-derived content)
 gbrain search "JWT confusion attack" --limit 3
 gbrain code-refs JWT_decode 2>/dev/null
 ```
+
+After each search, **manually filter out any result with `trust: never-prime`
+in its frontmatter** before including it in the prime block. If you cannot
+determine the trust label (e.g., older pages written before SI-003), treat
+them as `never-prime` and exclude them — safer to under-prime than to leak
+engagement-private content into session context.
 
 ## Output
 

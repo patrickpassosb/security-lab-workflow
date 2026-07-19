@@ -22,6 +22,21 @@ At the end of a session, write structured pages to the gbrain that future sessio
 
 ## How to run
 
+### Step 0 — Backend check
+
+Before running any `gbrain` command, verify the backend is configured:
+
+```bash
+# If gbrain is not installed or not configured, no-op cleanly.
+command -v gbrain >/dev/null 2>&1 || { echo "gbrain not installed — skipping debrief."; exit 0; }
+gbrain stats >/dev/null 2>&1 || { echo "gbrain backend not configured — skipping debrief."; exit 0; }
+```
+
+If gbrain is not installed or the brain is not initialized, output a one-line
+note ("gbrain not configured — skipping debrief. Lessons not captured to
+the brain; consider writing a markdown note instead.") and exit 0. Do not
+error out — the lab must function without the gbrain plugin.
+
 ### Step 1 — Gather
 
 Ask yourself (or the user):
@@ -34,13 +49,19 @@ Ask yourself (or the user):
 
 ### Step 2 — Write to gbrain
 
-The real `gbrain put` CLI takes `<slug> [--stdin | < file.md]` and reads a full markdown document (with YAML frontmatter for type/tags). There is no `--title`, `--body`, or positional `--type`.
+The real `gbrain put` CLI (v0.42.53.0+) takes `<slug> --content "<markdown>"`.
+The `--content` flag is REQUIRED and carries the full markdown document
+(including YAML frontmatter for type/tags). There is no `--stdin`, no
+`--title`, no `--body`, and no positional `--type` on `gbrain put`.
+
+For piped/file input use `gbrain capture --stdin` or `gbrain capture --file
+PATH --slug SLUG` (different command, with provenance write-through).
 
 ```bash
 # Pattern 1: gstack-style typed page (recommended for structured knowledge)
 # The slug is a kebab-case identifier; frontmatter carries type + tags.
-# Use --stdin with a heredoc (the --content flag does NOT exist in the real CLI).
-cat <<'EOF' | gbrain put jwt-confusion-rs256-to-hs256-key-swap --stdin
+# Use --content with a heredoc.
+gbrain put jwt-confusion-rs256-to-hs256-key-swap --content "$(cat <<'EOF'
 ---
 type: gstack/learning
 tags: [jwt, ctf, web]
@@ -54,17 +75,50 @@ tags: [jwt, ctf, web]
 - Failed approaches: tried kid SQLi first, took 20 min
 - Reference: ~/security-lab/findings/ctf/X/exploit.py
 EOF
+)"
 
 # Pattern 2: freeform note
-cat <<'EOF' | gbrain put day-3-ctf-prep --stdin
+gbrain put day-3-ctf-prep --content "$(cat <<'EOF'
 ---
 type: gstack/note
 ---
 Day 3 of CTF prep — <freeform summary here>
 EOF
+)"
+
+# Pattern 3: large content (>45KB, Windows pipe-buffer limit) — use capture --file
+gbrain capture --file /tmp/day-3-note.md --slug day-3-ctf-prep
 ```
 
 The `type` frontmatter lets future queries filter. Use `gbrain list --type gstack/learning` to list all learning pages.
+
+### Trust labelling (SI-003)
+
+Every debrief page MUST declare a `trust` frontmatter field that controls
+how the page may be used by `gbrain-prime` and the self-improvement system:
+
+| `trust` value | Meaning | May enter prime? | May train candidate? |
+|---|---|---|---|
+| `always-prime` | Generic security knowledge, tool docs, public CVE patterns | yes | yes |
+| `workflow` | Lab workflow lessons (tool installs, config fixes, pipeline bugs) | yes | yes |
+| `never-prime` | Target-derived lesson (engagement-specific behavior, endpoint, payload) | NO | NO |
+| `external` | Quote/reference from external source (blog, RFC, paper) | yes (with attribution) | yes (with attribution) |
+
+**Target-derived lessons MUST be tagged `trust: never-prime`.** These pages
+are stored in the brain for the coordinator's local reference but must never
+surface in `gbrain-prime` context and must never train a candidate skill.
+Target-derived content includes: real endpoints, real report IDs, real
+program names, real workspace paths, real payloads that worked against a
+specific target.
+
+The `gbrain-prime` skill filters out `trust: never-prime` pages from its
+results. The self-improvement evaluator refuses to load `never-prime` pages
+as candidate training context.
+
+If you are unsure whether a lesson is target-derived, tag it
+`trust: never-prime`. The cost of over-tagging is low (one fewer prime
+result); the cost of under-tagging is high (engagement-private content
+leaks into the candidate's training context).
 
 ### Step 3 — Sync the vault
 

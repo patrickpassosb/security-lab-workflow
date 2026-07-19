@@ -89,6 +89,88 @@ The gbrain plugin ships three skills:
 - **When a tool's output contains an unfamiliar concept** — query the brain before reasoning; it may have a note from a previous session.
 - **Weekly** — `gbrain-hygiene` keeps the brain from getting noisy.
 
+### Trust, retention, and external-embedding policy (SI-003)
+
+The brain indexes sensitive content: engagement workspaces, findings
+directories, sandbox practice targets, and the Obsidian vault. Without
+a trust policy, engagement-private content (real endpoints, report IDs,
+payloads that worked against a specific target) could leak into
+`gbrain-prime` context or — worse — into a candidate skill's training
+context during self-improvement evaluation.
+
+#### Trust labels
+
+Every page written to the brain via `gbrain-debrief` MUST declare a
+`trust` frontmatter field:
+
+| `trust` value | Meaning | Prime? | Train candidate? |
+|---|---|---|---|
+| `always-prime` | Generic security knowledge, tool docs, public CVE patterns | yes | yes |
+| `workflow` | Lab workflow lessons (tool installs, config fixes, pipeline bugs) | yes | yes |
+| `never-prime` | Target-derived lesson (engagement-specific behavior, endpoint, payload, report ID) | **NO** | **NO** |
+| `external` | Quote/reference from external source (blog, RFC, paper) | yes (with attribution) | yes (with attribution) |
+
+**Target-derived lessons MUST be tagged `trust: never-prime`.** This
+includes any page mentioning: real endpoints, real report IDs, real
+program names, real workspace paths, real payloads that worked against
+a specific target, or any content derived from interacting with a live
+engagement target.
+
+If unsure, tag `trust: never-prime`. The cost of over-tagging is low
+(one fewer prime result); the cost of under-tagging is high
+(engagement-private content leaks into the candidate's training context).
+
+#### Enforcement
+
+- `gbrain-prime` filters out `trust: never-prime` pages from its results.
+- The self-improvement evaluator (SI-022+) refuses to load `never-prime`
+  pages as candidate training context.
+- `gbrain-debrief` MUST reject pages submitted without a `trust` field
+  (the skill's Step 2 enforces this).
+
+#### Source partitioning
+
+The brain indexes multiple sources. Engagement-private content lives
+under `bounties/`, `ctfs/`, `cves/`, and `findings/` — all gitignored.
+The brain may index these for local query convenience, but:
+
+- Pages written from engagement-private content MUST be tagged
+  `trust: never-prime`.
+- The `gbrain-prime` filter (above) prevents these from surfacing in
+  session-start context.
+- The self-improvement candidate evaluator refuses to load them.
+
+#### External embeddings policy
+
+gbrain may use Voyage API embeddings for semantic search (optional,
+requires `VOYAGE_API_KEY`). Voyage is an external service.
+
+- **Public framework content** (`bin/`, `lib/`, `skills/`, `templates/`,
+  `docs/`, `engagements/example-*.yaml`, `improvement/policy/`,
+  `improvement/config/`): MAY be sent to Voyage for embedding.
+- **Engagement-private content** (`bounties/`, `ctfs/`, `cves/`,
+  `findings/`, real `engagements/*.yaml`, `improvement/private/`):
+  MUST NOT be sent to Voyage. These paths are gitignored and must not
+  leave the local machine.
+- **`trust: never-prime` pages**: MUST NOT be sent to Voyage. The
+  `gbrain-debrief` skill tags these at write time; the embedding pipeline
+  MUST skip pages with this tag.
+- **`trust: external` pages** (quotes from blogs, RFCs, papers): MAY
+  be sent to Voyage (the content is already public).
+
+If you opt out of `VOYAGE_API_KEY`, the brain falls back to keyword-only
+search and no content leaves the local machine. This is the safest
+configuration for engagement-private work.
+
+#### Retention
+
+- **`trust: always-prime` and `workflow` pages**: retained indefinitely.
+- **`trust: never-prime` pages**: retained until the engagement's
+  responsible-disclosure window closes, then archived. The
+  `gbrain-hygiene` skill surfaces expired `never-prime` pages for
+  archival.
+- **`trust: external` pages**: retained indefinitely (with attribution).
+
 ---
 
 ## Obsidian vault — knowledge layer
