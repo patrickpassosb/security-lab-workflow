@@ -1,0 +1,6 @@
+inputs/
+  Dotfile              (no extension, hidden)
+  command_metadata     (no extension, JSON)
+  evidence_notes       (no extension, plaintext)
+  .env.example         (dotfile)
+All four contain secret-like strings. A scanner that only reads .env misses 3/4.

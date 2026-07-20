@@ -1,0 +1,5 @@
+submission/
+└── prepared-20260715T115500Z/
+    ├── manifest.json
+    ├── report.md
+    └── record.json   (submitted_by = "")

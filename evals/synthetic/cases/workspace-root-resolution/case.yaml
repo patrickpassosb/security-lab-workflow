@@ -1,0 +1,11 @@
+schema: security-lab/eval-case/v1
+case_id: synthetic-workspace-root-resolution-001
+suite: synthetic
+split: train
+description: "Workspace-root resolution: nested finding report vs generic legacy template"
+category: workflow
+tags: [h1-reporting, workspace-resolution, path-disambiguation]
+regression_source: handoff-2.6-item-8
+candidate_paths: 2
+correct_path: findings/example-idor-items/report_h1.md
+# No expected answers here - those are in private/labels.json (gitignored)

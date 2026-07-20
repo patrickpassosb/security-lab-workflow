@@ -1,0 +1,11 @@
+schema: security-lab/eval-case/v1
+case_id: synthetic-immutable-package-selection-001
+suite: synthetic
+split: train
+description: "Immutable package selection: only one of multiple prepared packages was submitted"
+category: workflow
+tags: [h1-reporting, immutable-packages, selection]
+regression_source: handoff-2.6-item-5
+prepared_packages: 2
+submitted_packages: 1
+# No expected answers here - those are in private/labels.json (gitignored)

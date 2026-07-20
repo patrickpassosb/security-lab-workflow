@@ -1,0 +1,8 @@
+lab-h1-report status output (synthetic):
+
+record.json found at submission/prepared-20260715T115500Z/record.json
+  report_id: 1234570
+  submitted_at: 2026-07-15T12:00:00Z
+  submitted_by: ""   <- EMPTY (must be required in future recordings)
+
+WARN - submitted_by is empty; future recordings must require it.

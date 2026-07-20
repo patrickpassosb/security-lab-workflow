@@ -1,0 +1,9 @@
+schema: security-lab/eval-case/v1
+case_id: synthetic-bounty-log-stale-001
+suite: synthetic
+split: train
+description: "Bounty log stale: bounty_log.md says Submitted: no but receipt proves submission"
+category: workflow
+tags: [h1-reporting, stale-state, receipt-precedence]
+regression_source: handoff-2.6-item-13
+# No expected answers here - those are in private/labels.json (gitignored)

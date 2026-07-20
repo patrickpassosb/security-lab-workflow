@@ -1,0 +1,5 @@
+submission/
+└── prepared-20260714T022952Z/
+    ├── manifest.json
+    ├── report.md
+    └── record.json

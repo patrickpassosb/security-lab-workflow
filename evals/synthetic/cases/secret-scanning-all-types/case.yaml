@@ -1,0 +1,11 @@
+schema: security-lab/eval-case/v1
+case_id: synthetic-secret-scanning-all-types-001
+suite: synthetic
+split: train
+description: "Secret scanning of all file types: hidden/no-extension files must be scanned"
+category: workflow
+tags: [secret-scanning, file-types, hidden-files]
+regression_source: handoff-2.6-item-6
+secret_bearing_files: 4
+dotenv_only_would_miss: 3
+# No expected answers here - those are in private/labels.json (gitignored)

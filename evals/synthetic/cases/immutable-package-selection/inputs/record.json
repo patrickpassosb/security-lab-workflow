@@ -1,0 +1,10 @@
+{
+  "manifest_sha256": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+  "platform": "hackerone",
+  "report_body_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+  "report_id": "1234569",
+  "schema": "security-lab/hackerone-submission/v1",
+  "submitted_at": "2026-07-15T16:00:00Z",
+  "submitted_by": "tester-a",
+  "url": "https://hackerone.example/reports/1234569"
+}

@@ -1,0 +1,10 @@
+schema: security-lab/eval-case/v1
+case_id: synthetic-report-validation-001
+suite: synthetic
+split: train
+description: "Report validation: reject placeholder reports with empty fields and TODO bodies"
+category: workflow
+tags: [h1-reporting, report-validation, placeholders]
+regression_source: handoff-2.6-item-7
+expected_failures: 9
+# No expected answers here - those are in private/labels.json (gitignored)

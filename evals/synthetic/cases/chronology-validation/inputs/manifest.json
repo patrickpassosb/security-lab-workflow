@@ -1,0 +1,7 @@
+{
+  "engagement": "example-bounty",
+  "package_id": "prepared-20260714T022952Z",
+  "prepared_at": "2026-07-14T02:29:52Z",
+  "schema": "security-lab/hackerone-package/v1",
+  "workspace_path": "findings/example-finding/"
+}

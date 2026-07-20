@@ -1,0 +1,6 @@
+Two report_h1.md candidates found:
+
+  findings/report_h1.md                       (generic legacy template — NOT a finding)
+  findings/example-idor-items/report_h1.md    (real finding report — USE THIS)
+
+Tooling must resolve to the nested finding report, not the root template.
