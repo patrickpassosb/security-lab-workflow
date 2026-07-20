@@ -34,8 +34,8 @@ denied: []
 # exactly. `asset_type` is platform metadata, not a hostname validation rule;
 # existing `in_scope` and `denied` lists continue to govern live targets.
 assets:
-  - id: example-frontend
-    display_name: Example Frontend
+  - id: frontend
+    display_name: Frontend / marketing site
     asset_type: URL
     patterns:
       - www.example.com
@@ -44,7 +44,7 @@ assets:
     eligible_for_submission: true
     eligible_for_bounty: true
 
-  - id: example-public-api
+  - id: api
     display_name: Public API
     asset_type: API
     patterns:
@@ -55,7 +55,7 @@ assets:
     eligible_for_bounty: true
 
   - id: example-github-public-artifacts
-    display_name: GitHub Repositories or other public artifacts
+    display_name: Example GitHub Repositories or other public artifacts
     asset_type: OTHER
     patterns:
       - github.com/example-org/*
