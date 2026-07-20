@@ -737,6 +737,138 @@ def read_engagement_name_from_workspace(workspace_path: Path | str) -> str:
         return ""
 
 
+def resolve_engagement_path(
+    engagement_name: str, lab_root: Path | str | None = None
+) -> Path:
+    """Return the canonical engagement folder path for an engagement name.
+
+    Examples:
+        bounty-notion -> <lab>/bounties/notion
+        ctf-example    -> <lab>/ctfs/example
+        cve-log4j      -> <lab>/cves/log4j
+
+    `lab_root` defaults to $HACKING_LAB or ~/security-lab (labutil.LAB).
+    Used by load_precedents() and the assess command to locate
+    <engagement>/.lab/precedents.yaml.
+    """
+    lab = Path(lab_root) if lab_root else labutil.LAB
+    folder, sub = _engagement_to_folder(engagement_name)
+    return lab / folder / sub
+
+
+def load_precedents(engagement_path: Path | str) -> list[dict[str, Any]]:
+    """Load the private per-program precedent registry for an engagement.
+
+    Reads `<engagement_path>/.lab/precedents.yaml` (gitignored, private —
+    per SI-014 / roadmap section 12.4). Returns a list of precedent dicts,
+    each with keys: program, behavior, report_id, state, date, note.
+
+    Behavior:
+      - Returns [] when the file does not exist (don't error — the absence
+        of precedents is a valid state for a new engagement).
+      - Returns [] when the file is a symlink (defense-in-depth — refuses
+        to follow a symlinked precedents.yaml).
+      - Returns [] when the file is empty or has no `precedents` key.
+      - Raises OutcomeError on read/parse failures (corrupt YAML, I/O
+        error other than NotFound). The caller (assess command) maps this
+        to exit code 3.
+
+    The file format (per improvement/config/precedents.example.yaml):
+      precedents:
+        - program: <program>
+          behavior: "<behavior description>"
+          report_id: <H1_REPORT_ID or null>
+          state: informative          # or candidate_informative, duplicate, etc.
+          date: "YYYY-MM-DD"
+          note: "<free text>"
+    """
+    p = Path(engagement_path) / ".lab" / "precedents.yaml"
+    if not p.is_file():
+        return []
+    if p.is_symlink():
+        # Defense-in-depth — refuse to follow a symlinked precedents.yaml.
+        raise OutcomeSymlinkError(
+            f"precedents.yaml is a symlink (not allowed), refusing to read: {p}"
+        )
+    try:
+        import yaml  # type: ignore[import-not-found]
+    except ImportError as e:
+        # PyYAML is a core lab dependency (lib/h1report.py uses it). If it
+        # is missing, treat as a parse error — the caller decides what to do.
+        raise OutcomeError(f"PyYAML not available to parse precedents: {e}") from e
+    try:
+        text = p.read_text(encoding="utf-8")
+    except OSError as e:
+        raise OutcomeError(f"could not read precedents file {p}: {e}") from e
+    try:
+        data = yaml.safe_load(text)
+    except yaml.YAMLError as e:
+        raise OutcomeParseError(f"precedents.yaml parse error: {e}") from e
+    if data is None:
+        return []
+    if not isinstance(data, dict):
+        raise OutcomeParseError(
+            f"precedents.yaml must be a mapping with a 'precedents' key, got {type(data).__name__}"
+        )
+    precedents = data.get("precedents")
+    if precedents is None:
+        return []
+    if not isinstance(precedents, list):
+        raise OutcomeParseError(
+            f"'precedents' must be a list, got {type(precedents).__name__}"
+        )
+    # Validate each entry is a dict; pass through the fields as-is. We do
+    # NOT enforce a strict schema here (the file is private + gitignored +
+    # human-authored); we only enforce the minimal shape the assess command
+    # relies on (a list of mappings).
+    out: list[dict[str, Any]] = []
+    for i, entry in enumerate(precedents):
+        if not isinstance(entry, dict):
+            raise OutcomeParseError(
+                f"precedents[{i}] must be a mapping, got {type(entry).__name__}"
+            )
+        out.append(entry)
+    return out
+
+
+def derive_finding_status(
+    report_id: str,
+    workspace_path: Path | str | None = None,
+    *,
+    engagement_name: str | None = None,
+    lab_root: Path | str | None = None,
+) -> dict[str, Any]:
+    """Module-level convenience wrapper for OutcomeStore.derive_finding_status().
+
+    Per ADR-0002, OutcomeStore.derive_finding_status() is the SOLE owner of
+    the reducer. This function is a thin wrapper that resolves the store
+    path from the engagement name (or from the workspace's engagement.txt)
+    and delegates to the store. It exists so callers like the assess
+    command can call `finding_events.derive_finding_status(report_id, ws)`
+    without having to construct an OutcomeStore themselves.
+
+    Engagement resolution order:
+      1. `engagement_name` argument, if provided.
+      2. <workspace_path>/engagement.txt, if present.
+      3. Falls back to bounty-notion (the only Phase 1 consumer) — but
+         this is a last resort; callers should pass engagement_name or a
+         workspace with engagement.txt for correctness.
+
+    Returns the finding-status-v1 dict (same as
+    OutcomeStore.derive_finding_status()).
+    """
+    if engagement_name is None and workspace_path is not None:
+        engagement_name = read_engagement_name_from_workspace(workspace_path)
+    if not engagement_name:
+        # Last-resort default — bounty is the only Phase 1 consumer of
+        # the outcome store. This keeps the wrapper usable for ad-hoc
+        # calls without an engagement context.
+        engagement_name = "bounty-notion"
+    store_path = resolve_store_path(engagement_name, lab_root=lab_root)
+    store = OutcomeStore(store_path)
+    return store.derive_finding_status(report_id, workspace_path=workspace_path)
+
+
 # ─── Convenience: build an outcome event ───────────────────────────────────────
 
 
@@ -813,5 +945,8 @@ __all__ = [
     "OutcomeParseError",
     "make_outcome_event",
     "resolve_store_path",
+    "resolve_engagement_path",
     "read_engagement_name_from_workspace",
+    "load_precedents",
+    "derive_finding_status",
 ]

@@ -1,0 +1,63 @@
+# Known Informative precedent registry — SYNTHETIC EXAMPLE (tracked, public)
+#
+# This is a synthetic reference file showing the format of the real
+# per-engagement `precedents.yaml` files (gitignored, private). It contains
+# NO real program names, behaviors, or report IDs.
+#
+# Real precedent files live at:
+#   <engagement>/.lab/precedents.yaml
+# e.g. bounties/notion/.lab/precedents.yaml (gitignored via .gitignore:10)
+#
+# Per SI-014 (handoff section 6.3) + roadmap section 12.4:
+# - This example file = tracked, public, synthetic placeholders.
+# - The real per-engagement file = gitignored, private, real report IDs.
+#
+# The `assess` command (SI-015, `lab-h1-report assess`) loads the
+# engagement's precedents.yaml via finding_events.load_precedents() and
+# BLOCKS submission when the finding's behavior matches an entry with
+# state=informative (or candidate_informative — treated as a soft block
+# when the program has a history of closing similar behaviors as
+# Informative).
+#
+# Entry fields:
+#   program:    the program name (must match the engagement's program)
+#   behavior:   human-readable description of the behavior (matched by
+#               substring against the finding's title/workspace name)
+#   report_id:  real H1 report ID (string) or null when no report was filed
+#   state:      informative | candidate_informative | duplicate | resolved
+#   date:       ISO 8601 date the outcome was observed
+#   note:       free-text context (why it was Informative, what the program
+#               said, etc.)
+
+precedents:
+  # Example: a behavior previously assessed as Informative by a program.
+  - program: <PROGRAM>
+    behavior: "<PROGRAM_ENDPOINT> unauthenticated metadata leak"
+    report_id: <H1_REPORT_ID>
+    state: informative
+    date: "YYYY-MM-DD"
+    note: "Program assessed metadata as acceptable after removing sensitive fields"
+
+  # Example: a behavior suspected to be Informative but not yet confirmed.
+  # The assess command treats candidate_informative as a soft signal —
+  # it surfaces a HOLD rather than a hard BLOCK when the behavior matches,
+  # because the program has not definitively closed it yet.
+  - program: <PROGRAM>
+    behavior: "Client-side telemetry token in error reporting"
+    report_id: null
+    state: candidate_informative
+    date: "YYYY-MM-DD"
+    note: "Likely treated as public client telemetry (like Sentry DSN)"
+
+  # Example: a behavior previously closed as a Duplicate.
+  - program: <PROGRAM>
+    behavior: "<PROGRAM_ENDPOINT> cross-workspace IDOR"
+    report_id: <H1_REPORT_ID>
+    state: duplicate
+    date: "YYYY-MM-DD"
+    note: "Duplicate of an earlier report; original was closed Informative"
+
+# The `assess` command checks this registry before recommending submission.
+# If the finding's behavior (derived from report_h1.md title or workspace
+# name) matches an entry with state=informative, assess returns BLOCK
+# ("Known Informative behavior for this program").

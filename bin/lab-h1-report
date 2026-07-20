@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """lab-h1-report — HackerOne report check, prepare, record-submission, status,
-record-outcome.
+record-outcome, assess.
 
 Read-only and local-only commands for HackerOne report_h1.md workspaces.
 
@@ -8,6 +8,7 @@ Usage:
     lab-h1-report check [workspace]
     lab-h1-report prepare [workspace]
     lab-h1-report status [workspace]
+    lab-h1-report assess [workspace]
     lab-h1-report record-submission [workspace] --package <path|id> \
         --h1-id <num> --url <url> --submitted-at <ts> [--submitted-by <id>]
     lab-h1-report record-outcome [workspace] \
@@ -23,7 +24,11 @@ There is NO submit command. No command makes a network request or subprocess
 call. Final submission is a human action in the HackerOne UI; record-submission
 only records what the human already did. record-outcome appends a platform
 outcome event (e.g. closed-as-duplicate) to the engagement-private
-<engagement>/.lab/outcomes.jsonl (gitignored).
+<engagement>/.lab/outcomes.jsonl (gitignored). assess (SI-015) evaluates
+whether submitting is a good decision — it checks the finding's platform
+state, the engagement's precedent registry, and the submission thresholds
+in improvement/config/submission.yaml. It returns PASS/HOLD/BLOCK and exits
+0/2/1 respectively (3 for filesystem/parse errors).
 
 This CLI is a thin wrapper over lib/h1report.py and lib/finding_events.py.
 Audit events are written via labutil.audit (canonical schema, JSON-safe,
@@ -49,6 +54,14 @@ AUDIT_ACTION_STATUS = "h1-report-status"
 AUDIT_ACTION_PREPARE = "h1-report-prepare"
 AUDIT_ACTION_RECORD = "h1-report-record-submission"
 AUDIT_ACTION_RECORD_OUTCOME = "h1-report-record-outcome"
+AUDIT_ACTION_ASSESS = "h1-report-assess"
+
+# Exit codes for the assess command (SI-015). Kept here as module-level
+# constants so tests can import and assert against them without hardcoding.
+ASSESS_EXIT_PASS = 0
+ASSESS_EXIT_BLOCK = 1
+ASSESS_EXIT_HOLD = 2
+ASSESS_EXIT_ERROR = 3
 
 
 def _resolve_lab_root() -> Path:
@@ -856,6 +869,495 @@ def cmd_record_outcome(args: list[str]) -> int:
     return 0
 
 
+# ─── assess (SI-015) ───────────────────────────────────────────────────────────
+
+
+def _load_submission_thresholds(lab_root: Path) -> dict:
+    """Load submission decision thresholds from improvement/config/submission.yaml.
+
+    Returns a dict with keys:
+      trial_report_threshold, normal_threshold,
+      require_impact_demonstrated, require_novelty_check.
+
+    Falls back to conservative defaults (trial=0.85, normal=0.70,
+    require_impact_demonstrated=true, require_novelty_check=true) when the
+    file is missing or unparseable. The defaults match the tracked
+    improvement/config/submission.yaml so behavior is stable even if the
+    file is temporarily absent.
+    """
+    defaults = {
+        "trial_report_threshold": 0.85,
+        "normal_threshold": 0.70,
+        "require_impact_demonstrated": True,
+        "require_novelty_check": True,
+    }
+    path = lab_root / "improvement" / "config" / "submission.yaml"
+    if not path.is_file() or path.is_symlink():
+        return defaults
+    try:
+        import yaml  # type: ignore[import-not-found]
+        data = yaml.safe_load(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return defaults
+    if not isinstance(data, dict):
+        return defaults
+    sub = data.get("submission")
+    if not isinstance(sub, dict):
+        return defaults
+    out = dict(defaults)
+    for k in defaults:
+        v = sub.get(k)
+        if v is not None:
+            out[k] = v
+    return out
+
+
+def _derive_finding_behavior(workspace: Path) -> str:
+    """Derive a behavior string for the finding in `workspace`.
+
+    For MVP (SI-015), the behavior is derived from the report_h1.md title
+    (preferred) or the workspace directory name (fallback). This is matched
+    by substring against the `behavior` field of each precedent entry in
+    the engagement's precedents.yaml.
+
+    Returns "" when no behavior can be derived (e.g. no report_h1.md and
+    no resolvable workspace name). The assess command treats "" as "no
+    match" — it skips the precedent check rather than BLOCKing.
+    """
+    # Prefer the report title.
+    with contextlib.suppress(Exception):
+        report_path = h1report.find_report_file(workspace)
+        report = h1report.parse_report(report_path)
+        title = str(report.frontmatter.get("title", "") or "").strip()
+        if title:
+            return title
+    # Fall back to the workspace directory name.
+    return workspace.name
+
+
+def _match_precedent(
+    behavior: str, precedents: list[dict]
+) -> tuple[dict | None, str | None]:
+    """Find the first precedent that matches the finding's `behavior`.
+
+    Matching strategy (MVP — per SI-015 task spec, "derive the behavior
+    from the finding's report_h1.md title or workspace name. If no match,
+    skip the precedent check"):
+      1. Substring match in either direction (case-insensitive). Catches
+         exact rewordings like "getPublicPageData metadata leak" vs
+         "...metadata leak via getPublicPageData...".
+      2. Token overlap: if the precedent's behavior and the finding's
+         behavior share enough distinctive tokens (>= 2 distinctive
+         alphanumeric tokens, ignoring common words like "the", "via",
+         "in", "leak", "unauthenticated"), it's a match. This catches
+         "getPublicPageData metadata leak" vs "Unauthenticated workspace
+         metadata leak via getPublicPageData endpoint" (shared tokens:
+         getpublicpagedata, metadata — 2 distinctive tokens).
+
+    Returns (matched_precedent_or_None, block_reason_or_None). When a
+    match is found and the precedent's state is `informative` or
+    `duplicate`, the block_reason is set. When the match is
+    `candidate_informative`, the block_reason is None (the assess command
+    treats candidate_informative as a HOLD signal, not a hard BLOCK —
+    the program has not definitively closed it yet).
+    """
+    if not behavior:
+        return None, None
+    needle = behavior.lower()
+    # Common words to ignore when counting distinctive token overlap.
+    # These are generic security-report words that appear in many
+    # behaviors and would cause false matches if counted.
+    _STOP = {
+        "the", "a", "an", "via", "in", "of", "on", "to", "for", "and",
+        "or", "with", "without", "by", "leak", "unauthenticated",
+        "endpoint", "page", "workspace", "client", "side", "error",
+        "reporting", "disclosure", "information", "vulnerability",
+        "bypass", "issue", "bug", "report", "token",
+    }
+
+    def _distinctive_tokens(s: str) -> set[str]:
+        return {
+            t for t in _tokenize(s)
+            if t not in _STOP and len(t) >= 3
+        }
+
+    needle_tokens = _distinctive_tokens(needle)
+    for p in precedents:
+        pbehavior = str(p.get("behavior", "") or "").strip()
+        if not pbehavior:
+            continue
+        pb = pbehavior.lower()
+        matched = False
+        # 1. Substring match in either direction.
+        if pb in needle or needle in pb:
+            matched = True
+        # 2. Distinctive token overlap (>= 2 shared distinctive tokens).
+        if not matched:
+            pb_tokens = _distinctive_tokens(pb)
+            if pb_tokens and needle_tokens:
+                overlap = pb_tokens & needle_tokens
+                if len(overlap) >= 2:
+                    matched = True
+        if matched:
+            state = str(p.get("state", "") or "").strip().lower()
+            if state in ("informative", "duplicate"):
+                return p, f"Known {state} behavior for this program"
+            # candidate_informative is a soft signal — not a hard BLOCK.
+            return p, None
+    return None, None
+
+
+def _tokenize(s: str) -> list[str]:
+    """Split a string into lowercase alphanumeric tokens."""
+    tokens = []
+    cur = []
+    for ch in s:
+        if ch.isalnum():
+            cur.append(ch.lower())
+        else:
+            if cur:
+                tokens.append("".join(cur))
+                cur = []
+    if cur:
+        tokens.append("".join(cur))
+    return tokens
+
+
+def cmd_assess(args: list[str]) -> int:
+    """Assess whether a finding should be submitted to HackerOne.
+
+    Per roadmap section 12.1-12.2 (SI-015). This is a recommendation,
+    not a guarantee — the human makes the final call. The command is
+    read-only and local-only: no network, no subprocess, no mutation of
+    any file.
+
+    Exit codes:
+      0 = PASS   — evidence and novelty sufficient, submission recommended
+      1 = BLOCK  — known duplicate, Informative precedent, or technical
+                   verdict not confirmed
+      2 = HOLD   — more evidence required (impact not demonstrated or
+                   confidence below threshold)
+      3 = ERROR  — filesystem/parse error (workspace not found, report
+                   unparseable, precedents.yaml corrupt, etc.)
+
+    Behavior (per roadmap section 12.2 assess_submission()):
+      1. Resolve workspace + engagement + report_id (from record.json or
+         frontmatter).
+      2. Call finding_events.derive_finding_status() for the authoritative
+         platform_state, technical_verdict, impact_demonstrated, confidence.
+      3. Load the engagement's precedents via load_precedents().
+      4. BLOCK conditions (hard stops):
+         - platform_state == "duplicate"        -> "Already submitted, closed as duplicate"
+         - platform_state == "informative"      -> "Previously closed as Informative"
+         - behavior matches a known Informative precedent
+                                                  -> "Known Informative behavior for this program"
+         - technical_verdict != "confirmed"     -> "Technical verdict is not 'confirmed'"
+      5. HOLD conditions:
+         - impact_demonstrated == false -> "Impact not demonstrated"
+         - confidence < trial_report_threshold
+                                            -> "Confidence below threshold"
+      6. Otherwise -> PASS ("Evidence and novelty sufficient for submission").
+    """
+    workspace: str | None = None
+    if len(args) > 1:
+        print(f"assess takes at most one optional workspace argument; got: {args}", file=sys.stderr)
+        return ASSESS_EXIT_ERROR
+    if len(args) == 1:
+        workspace = args[0]
+
+    lab_root = _resolve_lab_root()
+
+    # Resolve workspace (filesystem errors -> exit 3).
+    try:
+        ws = h1report.resolve_workspace(workspace)
+    except h1report.ReportFileError as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        labutil.audit(
+            AUDIT_ACTION_ASSESS,
+            target=str(workspace or ""),
+            exit_code=ASSESS_EXIT_ERROR,
+            detail="workspace not found",
+        )
+        return ASSESS_EXIT_ERROR
+
+    # Read the engagement name from the workspace (engagement.txt),
+    # falling back to the report frontmatter. Without an engagement name
+    # we can't resolve the outcomes store or precedents — exit 3.
+    eng_name = finding_events.read_engagement_name_from_workspace(ws)
+    report_path = None
+    report = None
+    if not eng_name:
+        with contextlib.suppress(Exception):
+            report_path = h1report.find_report_file(ws)
+            report = h1report.parse_report(report_path)
+            eng_name = str(report.frontmatter.get("engagement", "") or "")
+    if not eng_name:
+        print(
+            "ERROR: could not determine engagement for workspace "
+            "(no engagement.txt and no frontmatter engagement field)",
+            file=sys.stderr,
+        )
+        labutil.audit(
+            AUDIT_ACTION_ASSESS,
+            target=str(ws),
+            exit_code=ASSESS_EXIT_ERROR,
+            detail="engagement resolution failed",
+        )
+        return ASSESS_EXIT_ERROR
+
+    # Resolve the report_id from the latest record.json, falling back to
+    # the report frontmatter. The assess command needs a report_id to
+    # look up the finding's platform outcome. When no report_id is
+    # resolvable (no record.json, no frontmatter id), we use "" — the
+    # derive_finding_status() call will return platform_state=None, which
+    # falls through to the HOLD/BLOCK-on-technical-verdict checks.
+    report_id = ""
+    # Try the latest record.json first.
+    submission = ws / "submission"
+    if submission.is_dir():
+        pat = __import__("re").compile(r"^prepared-\d{8}T\d{6}Z$")
+        candidates: list[tuple[str, Path]] = []
+        try:
+            for entry in submission.iterdir():
+                if entry.is_symlink() or not entry.is_dir():
+                    continue
+                if pat.match(entry.name):
+                    candidates.append((entry.name, entry))
+        except OSError:
+            pass
+        if candidates:
+            candidates.sort(key=lambda t: t[0])
+            _, latest_pkg = candidates[-1]
+            rpath = latest_pkg / "record.json"
+            if rpath.is_file() and not rpath.is_symlink():
+                try:
+                    import json
+                    rec = json.loads(rpath.read_text(encoding="utf-8"))
+                    if isinstance(rec, dict):
+                        rid = rec.get("report_id")
+                        if isinstance(rid, (str, int)) and str(rid):
+                            report_id = str(rid)
+                except (OSError, ValueError):
+                    pass  # corrupt record.json — fall through
+
+    # If no report_id from record.json, try the report frontmatter (some
+    # engagements record the intended/assigned ID there after submission).
+    if not report_id and report is not None:
+        with contextlib.suppress(Exception):
+            rid = report.frontmatter.get("h1_report_id") or report.frontmatter.get("report_id")
+            if isinstance(rid, (str, int)) and str(rid):
+                report_id = str(rid)
+
+    # Load submission thresholds.
+    thresholds = _load_submission_thresholds(lab_root)
+    trial_threshold = float(thresholds.get("trial_report_threshold", 0.85) or 0.85)
+
+    # Derive the authoritative finding status. This is read-only.
+    try:
+        status = finding_events.derive_finding_status(
+            report_id, workspace_path=ws, engagement_name=eng_name, lab_root=lab_root
+        )
+    except finding_events.OutcomeError as e:
+        print(f"ERROR: could not derive finding status: {e}", file=sys.stderr)
+        labutil.audit(
+            AUDIT_ACTION_ASSESS,
+            target=str(ws),
+            engagement=eng_name,
+            exit_code=ASSESS_EXIT_ERROR,
+            detail="status derivation failed",
+        )
+        return ASSESS_EXIT_ERROR
+
+    # Load precedents (private, gitignored). Missing file = no precedents
+    # (don't error — a new engagement has no precedents yet).
+    eng_path = finding_events.resolve_engagement_path(eng_name, lab_root=lab_root)
+    try:
+        precedents = finding_events.load_precedents(eng_path)
+    except finding_events.OutcomeSymlinkError as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        labutil.audit(
+            AUDIT_ACTION_ASSESS,
+            target=str(ws),
+            engagement=eng_name,
+            exit_code=ASSESS_EXIT_ERROR,
+            detail="precedents.yaml is a symlink (refused)",
+        )
+        return ASSESS_EXIT_ERROR
+    except finding_events.OutcomeParseError as e:
+        print(f"ERROR: precedents.yaml parse error: {e}", file=sys.stderr)
+        labutil.audit(
+            AUDIT_ACTION_ASSESS,
+            target=str(ws),
+            engagement=eng_name,
+            exit_code=ASSESS_EXIT_ERROR,
+            detail="precedents.yaml parse error",
+        )
+        return ASSESS_EXIT_ERROR
+    except finding_events.OutcomeError as e:
+        print(f"ERROR: could not load precedents: {e}", file=sys.stderr)
+        labutil.audit(
+            AUDIT_ACTION_ASSESS,
+            target=str(ws),
+            engagement=eng_name,
+            exit_code=ASSESS_EXIT_ERROR,
+            detail="precedents load failed",
+        )
+        return ASSESS_EXIT_ERROR
+
+    # Derive the finding's behavior for precedent matching.
+    behavior = _derive_finding_behavior(ws)
+
+    # ─── BLOCK conditions (hard stops) ──────────────────────────────────
+    platform_state = status.get("platform_state")
+    technical_verdict = status.get("technical_verdict")
+    duplicate_of = status.get("duplicate_of")
+
+    if platform_state == "duplicate":
+        reason = "Already submitted, closed as duplicate"
+        if duplicate_of:
+            reason += f" (of {duplicate_of})"
+        _print_assess_result("BLOCK", reason, status, report_id, behavior, eng_name)
+        labutil.audit(
+            AUDIT_ACTION_ASSESS,
+            target=str(ws),
+            engagement=eng_name,
+            exit_code=ASSESS_EXIT_BLOCK,
+            detail=f"BLOCK platform_state=duplicate report_id={report_id}",
+        )
+        return ASSESS_EXIT_BLOCK
+
+    if platform_state == "informative":
+        reason = "Previously closed as Informative"
+        _print_assess_result("BLOCK", reason, status, report_id, behavior, eng_name)
+        labutil.audit(
+            AUDIT_ACTION_ASSESS,
+            target=str(ws),
+            engagement=eng_name,
+            exit_code=ASSESS_EXIT_BLOCK,
+            detail=f"BLOCK platform_state=informative report_id={report_id}",
+        )
+        return ASSESS_EXIT_BLOCK
+
+    # Precedent match (behavior against known Informative/Duplicate).
+    matched, precedent_reason = _match_precedent(behavior, precedents)
+    if matched is not None and precedent_reason is not None:
+        _print_assess_result(
+            "BLOCK", precedent_reason, status, report_id, behavior, eng_name,
+            precedent=matched,
+        )
+        labutil.audit(
+            AUDIT_ACTION_ASSESS,
+            target=str(ws),
+            engagement=eng_name,
+            exit_code=ASSESS_EXIT_BLOCK,
+            detail=f"BLOCK precedent_match report_id={report_id}",
+        )
+        return ASSESS_EXIT_BLOCK
+
+    if technical_verdict != "confirmed":
+        reason = f"Technical verdict is not 'confirmed' (got {technical_verdict!r})"
+        _print_assess_result("BLOCK", reason, status, report_id, behavior, eng_name)
+        labutil.audit(
+            AUDIT_ACTION_ASSESS,
+            target=str(ws),
+            engagement=eng_name,
+            exit_code=ASSESS_EXIT_BLOCK,
+            detail=f"BLOCK technical_verdict={technical_verdict} report_id={report_id}",
+        )
+        return ASSESS_EXIT_BLOCK
+
+    # ─── HOLD conditions (need more work) ───────────────────────────────
+    impact_demonstrated = bool(status.get("impact_demonstrated"))
+    confidence = float(status.get("confidence") or 0.0)
+
+    if not impact_demonstrated:
+        reason = "Impact not demonstrated — response is empty or theoretical"
+        _print_assess_result("HOLD", reason, status, report_id, behavior, eng_name)
+        labutil.audit(
+            AUDIT_ACTION_ASSESS,
+            target=str(ws),
+            engagement=eng_name,
+            exit_code=ASSESS_EXIT_HOLD,
+            detail=f"HOLD impact_not_demonstrated report_id={report_id}",
+        )
+        return ASSESS_EXIT_HOLD
+
+    if confidence < trial_threshold:
+        reason = f"Confidence {confidence} below trial threshold {trial_threshold}"
+        _print_assess_result("HOLD", reason, status, report_id, behavior, eng_name)
+        labutil.audit(
+            AUDIT_ACTION_ASSESS,
+            target=str(ws),
+            engagement=eng_name,
+            exit_code=ASSESS_EXIT_HOLD,
+            detail=f"HOLD confidence={confidence}<{trial_threshold} report_id={report_id}",
+        )
+        return ASSESS_EXIT_HOLD
+
+    # candidate_informative precedent match (soft signal) — HOLD, not BLOCK.
+    if matched is not None:
+        state = str(matched.get("state", "") or "").strip().lower()
+        if state == "candidate_informative":
+            reason = (
+                "Behavior matches a candidate_informative precedent — "
+                "confirm program stance before submitting"
+            )
+            _print_assess_result(
+                "HOLD", reason, status, report_id, behavior, eng_name,
+                precedent=matched,
+            )
+            labutil.audit(
+                AUDIT_ACTION_ASSESS,
+                target=str(ws),
+                engagement=eng_name,
+                exit_code=ASSESS_EXIT_HOLD,
+                detail=f"HOLD candidate_informative_precedent report_id={report_id}",
+            )
+            return ASSESS_EXIT_HOLD
+
+    # ─── PASS ───────────────────────────────────────────────────────────
+    reason = "Evidence and novelty sufficient for submission"
+    _print_assess_result("PASS", reason, status, report_id, behavior, eng_name)
+    labutil.audit(
+        AUDIT_ACTION_ASSESS,
+        target=str(ws),
+        engagement=eng_name,
+        exit_code=ASSESS_EXIT_PASS,
+        detail=f"PASS report_id={report_id}",
+    )
+    return ASSESS_EXIT_PASS
+
+
+def _print_assess_result(
+    verdict: str,
+    reason: str,
+    status: dict,
+    report_id: str,
+    behavior: str,
+    engagement: str,
+    *,
+    precedent: dict | None = None,
+) -> None:
+    """Print the assess result block (ASCII only — no secrets)."""
+    print(f"ASSESS: {verdict}")
+    print(f"REASON: {reason}")
+    print(f"ENGAGEMENT: {engagement}")
+    print(f"REPORT_ID: {report_id or '(none)'}")
+    print(f"BEHAVIOR: {behavior or '(none)'}")
+    print("STATUS:")
+    print(f"  platform_state: {status.get('platform_state')}")
+    print(f"  technical_verdict: {status.get('technical_verdict')}")
+    print(f"  impact_demonstrated: {status.get('impact_demonstrated')}")
+    print(f"  confidence: {status.get('confidence')}")
+    print(f"  reportability: {status.get('reportability')}")
+    if precedent is not None:
+        print("PRECEDENT:")
+        print(f"  behavior: {precedent.get('behavior', '')}")
+        print(f"  state: {precedent.get('state', '')}")
+        rid = precedent.get("report_id")
+        print(f"  report_id: {rid if rid else '(none)'}")
+
+
 def main(argv: list[str] | None = None) -> int:
     args = list(argv) if argv is not None else sys.argv[1:]
     if not args:
@@ -876,6 +1378,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_record_submission(rest)
     if cmd == "record-outcome":
         return cmd_record_outcome(rest)
+    if cmd == "assess":
+        return cmd_assess(rest)
     # No submit command exists and never will. Unknown commands fail.
     if cmd == "submit":
         print("ERROR: 'submit' is not a command. Final submission is a human action.", file=sys.stderr)
