@@ -1,0 +1,233 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://security-lab/schemas/lesson-v1.schema.json",
+  "title": "Lesson v1",
+  "description": "A captured lesson from a security research / CTF / bounty / CVE session.\nPer roadmap section 8.2.\n\nMANDATORY `source_kind` and `trust` fields (per handoff section 5\ncontradiction 'Lesson schema omits mandatory source_kind' and per\nSI-003 trust policy):\n  - source_kind controls how the lesson may be used (indexing, prime,\n    promotion). It is the policy gate.\n  - trust mirrors source_kind into the gbrain trust filter vocabulary\n    (never-prime | always-prime | workflow | external). It is the\n    runtime filter hook.\nBoth are required so a lesson cannot enter the brain without an\nexplicit trust decision.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "lesson_id",
+    "claim",
+    "kind",
+    "status",
+    "source_kind",
+    "trust",
+    "captured_at",
+    "captured_by",
+    "applicability"
+  ],
+  "properties": {
+    "schema": {
+      "type": "string",
+      "description": "Schema identifier. Must be exactly 'security-lab/lesson/v1'.",
+      "const": "security-lab/lesson/v1",
+      "examples": ["security-lab/lesson/v1"]
+    },
+    "lesson_id": {
+      "type": "string",
+      "description": "Stable identifier for this lesson. Convention: 'lesson-<uuid>' or\n'lesson-<engagement>-<slug>'. Must be unique within the brain.",
+      "minLength": 1,
+      "examples": ["lesson-f81d4fae-7dec-11d0-a765-00a0c91e6bf6"]
+    },
+    "claim": {
+      "type": "string",
+      "description": "The claim this lesson makes, in one sentence. Should be falsifiable.\nE.g. 'H1 Report Assistant approval is not vulnerability ground truth'.",
+      "minLength": 1,
+      "examples": [
+        "H1 Report Assistant approval is not vulnerability ground truth"
+      ]
+    },
+    "kind": {
+      "type": "string",
+      "description": "What kind of lesson this is.\n- observation: a fact noticed during work.\n- heuristic: a rule-of-thumb that worked.\n- pattern: a recurring structure across engagements.\n- pitfall: a mistake to avoid.\n- fix: a fix that worked.",
+      "enum": ["observation", "heuristic", "pattern", "pitfall", "fix"],
+      "examples": ["observation", "pitfall"]
+    },
+    "status": {
+      "type": "string",
+      "description": "Lifecycle state of the lesson (roadmap section 8.1):\ncandidate -> verified -> replicated -> promotion candidate ->\nevaluated -> canary -> stable -> superseded/retracted.\n'rejected' is a terminal state for lessons that failed validation.",
+      "enum": ["candidate", "verified", "promoted", "rejected"],
+      "examples": ["candidate", "verified"]
+    },
+    "source_kind": {
+      "type": "string",
+      "description": "Origin classification per SI-003 trust policy. Controls how the\nlesson may be used (indexing, prime, promotion). MANDATORY — a lesson\nwithout a source_kind MUST be rejected by the curator.",
+      "enum": ["target_derived", "workflow", "external", "public"],
+      "examples": ["workflow", "external", "target_derived"]
+    },
+    "trust": {
+      "type": "string",
+      "description": "gbrain trust filter vocabulary. Mirrors source_kind for the runtime\nfilter. MANDATORY — a lesson without a trust label MUST be rejected.\n- never-prime: never surfaced in prime (target_derived).\n- always-prime: safe to surface in prime (public, verified external).\n- workflow: workflow-internal, surfaced only in same-engagement contexts.\n- external: from an external source, surfaced with a warning until verified.",
+      "enum": ["never-prime", "always-prime", "workflow", "external"],
+      "examples": ["workflow", "external", "never-prime"]
+    },
+    "captured_at": {
+      "type": "string",
+      "description": "ISO 8601 UTC timestamp the lesson was captured.",
+      "format": "date-time",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(Z|[+-]\\d{2}:\\d{2})$",
+      "examples": ["2026-07-15T16:00:00Z"]
+    },
+    "captured_by": {
+      "type": "object",
+      "description": "Provenance of the capturing agent.",
+      "additionalProperties": false,
+      "required": ["agent", "model", "session_id"],
+      "properties": {
+        "agent": {
+          "type": "string",
+          "description": "Agent name (e.g. 'opencode', 'claude', 'codex').",
+          "examples": ["opencode"]
+        },
+        "model": {
+          "type": "string",
+          "description": "Model identifier (e.g. 'glm-5.2', 'claude-opus-4-6').",
+          "examples": ["glm-5.2"]
+        },
+        "session_id": {
+          "type": "string",
+          "description": "Session identifier (UUID or similar).",
+          "examples": ["sess-2026-07-15-001"]
+        }
+      }
+    },
+    "source": {
+      "type": ["object", "null"],
+      "description": "Where the lesson was derived from. null when the lesson is fully\nabstract (no specific engagement/workspace/artifact).",
+      "additionalProperties": false,
+      "properties": {
+        "engagement": {
+          "type": "string",
+          "description": "Engagement name (matches engagements/<name>.yaml).",
+          "examples": ["bounty-notion"]
+        },
+        "workspace": {
+          "type": "string",
+          "description": "Workspace name (e.g. 'link-share-bypass').",
+          "examples": ["link-share-bypass"]
+        },
+        "artifact": {
+          "type": "string",
+          "description": "Relative path to the artifact that grounded the lesson.",
+          "examples": ["evidence/01_response.txt"]
+        },
+        "artifact_sha256": {
+          "type": "string",
+          "description": "SHA256 of the artifact (for integrity / replay).",
+          "pattern": "^[0-9a-f]{64}$",
+          "examples": [
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+          ]
+        },
+        "platform_outcome": {
+          "type": "string",
+          "description": "Platform outcome state that grounded the lesson, when applicable.",
+          "enum": [
+            "new",
+            "needs_more_info",
+            "triaged",
+            "duplicate",
+            "informative",
+            "not_applicable",
+            "resolved",
+            "bounty_awarded",
+            "bounty_paid"
+          ],
+          "examples": ["duplicate", "informative"]
+        }
+      }
+    },
+    "applicability": {
+      "type": "object",
+      "description": "Where this lesson applies. Used by the curator to decide whether to\nsurface the lesson in a given context.",
+      "additionalProperties": false,
+      "required": ["technologies", "engagement_types", "preconditions"],
+      "properties": {
+        "technologies": {
+          "type": "array",
+          "description": "Technology stack the lesson applies to (e.g. ['notion', 'web']).\nEmpty array means 'applies broadly'.",
+          "items": {"type": "string"},
+          "examples": [["notion"], ["web", "react"]]
+        },
+        "engagement_types": {
+          "type": "array",
+          "description": "Engagement types the lesson applies to (e.g. ['bounty', 'ctf']).\nEmpty array means 'applies to all engagement types'.",
+          "items": {"type": "string"},
+          "examples": [["bounty"], ["bounty", "cve"]]
+        },
+        "preconditions": {
+          "type": "array",
+          "description": "Conditions that must hold for the lesson to apply. Free-form strings.\nEmpty array means 'no preconditions'.",
+          "items": {"type": "string"},
+          "examples": [["unauthenticated endpoint", "metadata in response"]]
+        }
+      }
+    },
+    "evidence": {
+      "type": "array",
+      "description": "Evidence supporting the lesson's claim. Each item is a (claim, support)\npair. Optional — a candidate lesson may have no evidence yet.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["claim", "support"],
+        "properties": {
+          "claim": {
+            "type": "string",
+            "description": "Sub-claim this evidence supports.",
+            "examples": ["Endpoint returns workspace metadata without authentication"]
+          },
+          "support": {
+            "type": "string",
+            "description": "How the sub-claim is supported (artifact path, quote, hash, etc.).",
+            "examples": [
+              "evidence/01_response.txt sha256=e3b0..."
+            ]
+          }
+        }
+      }
+    },
+    "promoted_to": {
+      "type": ["string", "null"],
+      "description": "Path to the skill file this lesson was promoted to, when status='promoted'.\nnull when not promoted.",
+      "examples": ["skills/security/web-attack/SKILL.md", null]
+    },
+    "superseded_by": {
+      "type": ["string", "null"],
+      "description": "lesson_id of a newer lesson that replaces this one. null when not superseded.",
+      "examples": ["lesson-abc123", null]
+    }
+  },
+  "examples": [
+    {
+      "schema": "security-lab/lesson/v1",
+      "lesson_id": "lesson-f81d4fae-7dec-11d0-a765-00a0c91e6bf6",
+      "claim": "H1 Report Assistant approval is not vulnerability ground truth",
+      "kind": "observation",
+      "status": "candidate",
+      "source_kind": "workflow",
+      "trust": "workflow",
+      "captured_at": "2026-07-15T16:00:00Z",
+      "captured_by": {
+        "agent": "opencode",
+        "model": "glm-5.2",
+        "session_id": "sess-2026-07-15-001"
+      },
+      "source": {
+        "engagement": "bounty-notion",
+        "workspace": "link-share-bypass",
+        "artifact": "evidence/01_response.txt",
+        "artifact_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "platform_outcome": "duplicate"
+      },
+      "applicability": {
+        "technologies": ["notion"],
+        "engagement_types": ["bounty"],
+        "preconditions": []
+      },
+      "evidence": [],
+      "promoted_to": null,
+      "superseded_by": null
+    }
+  ]
+}

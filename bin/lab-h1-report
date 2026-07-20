@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""lab-h1-report — HackerOne report check, prepare, record-submission, status.
+"""lab-h1-report — HackerOne report check, prepare, record-submission, status,
+record-outcome.
 
 Read-only and local-only commands for HackerOne report_h1.md workspaces.
 
@@ -9,13 +10,25 @@ Usage:
     lab-h1-report status [workspace]
     lab-h1-report record-submission [workspace] --package <path|id> \
         --h1-id <num> --url <url> --submitted-at <ts> [--submitted-by <id>]
+    lab-h1-report record-outcome [workspace] \
+        --h1-id <report-id> --state <state> \
+        [--duplicate-of <original-report-id>] \
+        [--duplicate-original-state <state>] \
+        [--final-severity <low|medium|high|critical>] \
+        [--bounty-amount <number>] [--bounty-currency <USD|EUR|...>] \
+        [--notes "<free text>"] \
+        [--source <human_h1_import|auto_h1_api|manual>]
 
 There is NO submit command. No command makes a network request or subprocess
 call. Final submission is a human action in the HackerOne UI; record-submission
-only records what the human already did.
+only records what the human already did. record-outcome appends a platform
+outcome event (e.g. closed-as-duplicate) to the engagement-private
+<engagement>/.lab/outcomes.jsonl (gitignored).
 
-This CLI is a thin wrapper over lib/h1report.py. Audit events are written via
-labutil.audit (canonical schema, JSON-safe, no secrets in detail).
+This CLI is a thin wrapper over lib/h1report.py and lib/finding_events.py.
+Audit events are written via labutil.audit (canonical schema, JSON-safe,
+no secrets in detail). Per ADR-0002, derive_finding_status() has ONE owner:
+lib/finding_events.py — this CLI imports and calls it, never reimplements it.
 """
 
 from __future__ import annotations
@@ -27,6 +40,7 @@ from pathlib import Path
 
 # Import shared labutil helpers and the h1report library.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib"))
+import finding_events  # noqa: E402
 import h1report  # noqa: E402
 import labutil  # noqa: E402
 
@@ -34,6 +48,7 @@ AUDIT_ACTION_CHECK = "h1-report-check"
 AUDIT_ACTION_STATUS = "h1-report-status"
 AUDIT_ACTION_PREPARE = "h1-report-prepare"
 AUDIT_ACTION_RECORD = "h1-report-record-submission"
+AUDIT_ACTION_RECORD_OUTCOME = "h1-report-record-outcome"
 
 
 def _resolve_lab_root() -> Path:
@@ -495,6 +510,352 @@ def cmd_record_submission(args: list[str]) -> int:
     return 0
 
 
+# ─── record-outcome ────────────────────────────────────────────────────────────
+
+
+def _parse_record_outcome_args(args: list[str]) -> tuple[str | None, dict[str, str], int]:
+    """Parse record-outcome args. Returns (workspace, flags, exit_code).
+
+    exit_code is 0 on success, 1 on usage error. Supports both --flag value
+    and --flag=value syntax (same convention as record-submission).
+    """
+    workspace: str | None = None
+    flags: dict[str, str] = {}
+    i = 0
+    required = ("--h1-id", "--state")
+    optional = (
+        "--duplicate-of",
+        "--duplicate-original-state",
+        "--final-severity",
+        "--bounty-amount",
+        "--bounty-currency",
+        "--notes",
+        "--source",
+    )
+    all_flags = required + optional
+    while i < len(args):
+        a = args[i]
+        # --flag=value syntax.
+        if a.startswith("--") and "=" in a:
+            name, _, value = a.partition("=")
+            if name in all_flags:
+                flags[name] = value
+                i += 1
+                continue
+            print(f"unknown flag: {a}", file=sys.stderr)
+            return None, {}, 1
+        if a in all_flags:
+            if i + 1 >= len(args):
+                print(f"flag {a} requires a value", file=sys.stderr)
+                return None, {}, 1
+            flags[a] = args[i + 1]
+            i += 2
+            continue
+        if a.startswith("-"):
+            print(f"unknown flag: {a}", file=sys.stderr)
+            return None, {}, 1
+        # Positional -> workspace (only one allowed).
+        if workspace is not None:
+            print(
+                f"record-outcome takes at most one workspace argument; got: {args}",
+                file=sys.stderr,
+            )
+            return None, {}, 1
+        workspace = a
+        i += 1
+    # All required flags present?
+    for r in required:
+        if r not in flags:
+            print(f"record-outcome requires {r}", file=sys.stderr)
+            return None, {}, 1
+    return workspace, flags, 0
+
+
+def _resolve_workspace_engagement(
+    workspace: str | None, lab_root: Path
+) -> tuple[Path, str, int]:
+    """Resolve (workspace_path, engagement_name, exit_code).
+
+    exit_code is 0 on success, 1 on resolution failure. The engagement name
+    is read from <workspace>/engagement.txt (mirrors h1report.read_engagement_name
+    — rejects symlinked engagement.txt). The workspace is resolved via
+    h1report.resolve_workspace.
+    """
+    try:
+        ws = h1report.resolve_workspace(workspace)
+    except h1report.ReportFileError as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        return Path(), "", 1
+    # Read the engagement name from the workspace (engagement.txt).
+    eng_name = finding_events.read_engagement_name_from_workspace(ws)
+    if not eng_name:
+        # Fall back to the report frontmatter's engagement field, if present.
+        with contextlib.suppress(Exception):
+            report_path = h1report.find_report_file(ws)
+            report = h1report.parse_report(report_path)
+            eng_name = str(report.frontmatter.get("engagement", "") or "")
+    if not eng_name:
+        print(
+            "ERROR: could not determine engagement for workspace "
+            "(no engagement.txt and no frontmatter engagement field)",
+            file=sys.stderr,
+        )
+        return Path(), "", 1
+    return ws, eng_name, 0
+
+
+def cmd_record_outcome(args: list[str]) -> int:
+    """Record a platform outcome event for a finding. Exit 0 on success,
+    2 on validation failure (invalid state, no submission found, duplicate
+    without --duplicate-of), 1 on fs/parse/internal errors.
+
+    Per roadmap section 7.3 + ADR-0002:
+      1. Resolve the workspace's latest submission package (best-effort —
+         we don't hard-require a record.json, since an outcome can be
+         recorded before the submission receipt is filed).
+      2. Validate --state against the supported enum (finding_events).
+      3. If --state duplicate, require --duplicate-of.
+      4. Append the outcome event to <engagement>/.lab/outcomes.jsonl
+         (engagement-private, gitignored — NOT the workspace).
+      5. Emit an audit event.
+      6. Print the outcome_id.
+      7. Never modify the immutable record.json.
+    """
+    workspace, flags, parse_rc = _parse_record_outcome_args(args)
+    if parse_rc != 0:
+        return parse_rc
+
+    lab_root = _resolve_lab_root()
+
+    # Resolve workspace + engagement.
+    ws, eng_name, resolve_rc = _resolve_workspace_engagement(workspace, lab_root)
+    if resolve_rc != 0:
+        labutil.audit(
+            AUDIT_ACTION_RECORD_OUTCOME,
+            target=str(workspace or ""),
+            exit_code=1,
+            detail="workspace/engagement resolution failed",
+        )
+        return 1
+
+    # Validate --state.
+    state = flags["--state"]
+    if state not in finding_events.OUTCOME_STATES:
+        print(
+            f"ERROR: invalid state {state!r}. Must be one of: "
+            f"{', '.join(sorted(finding_events.OUTCOME_STATES))}",
+            file=sys.stderr,
+        )
+        labutil.audit(
+            AUDIT_ACTION_RECORD_OUTCOME,
+            target=str(ws),
+            engagement=eng_name,
+            exit_code=2,
+            detail=f"invalid state={state}",
+        )
+        return 2
+
+    # If state=duplicate, require --duplicate-of.
+    duplicate_of = flags.get("--duplicate-of") or None
+    if state == "duplicate" and not duplicate_of:
+        print(
+            "ERROR: --state duplicate requires --duplicate-of <original-report-id>",
+            file=sys.stderr,
+        )
+        labutil.audit(
+            AUDIT_ACTION_RECORD_OUTCOME,
+            target=str(ws),
+            engagement=eng_name,
+            exit_code=2,
+            detail="duplicate state without --duplicate-of",
+        )
+        return 2
+
+    # Validate --duplicate-original-state, if provided.
+    duplicate_original_state = flags.get("--duplicate-original-state") or None
+    if (
+        duplicate_original_state is not None
+        and duplicate_original_state not in finding_events.OUTCOME_STATES
+    ):
+        print(
+            f"ERROR: invalid --duplicate-original-state {duplicate_original_state!r}. "
+            f"Must be one of: {', '.join(sorted(finding_events.OUTCOME_STATES))}",
+            file=sys.stderr,
+        )
+        labutil.audit(
+            AUDIT_ACTION_RECORD_OUTCOME,
+            target=str(ws),
+            engagement=eng_name,
+            exit_code=2,
+            detail=f"invalid duplicate_original_state={duplicate_original_state}",
+        )
+        return 2
+
+    # Validate --final-severity, if provided.
+    final_severity = flags.get("--final-severity") or None
+    if (
+        final_severity is not None
+        and final_severity not in ("low", "medium", "high", "critical")
+    ):
+        print(
+            f"ERROR: invalid --final-severity {final_severity!r}. "
+            "Must be one of: low, medium, high, critical",
+            file=sys.stderr,
+        )
+        labutil.audit(
+            AUDIT_ACTION_RECORD_OUTCOME,
+            target=str(ws),
+            engagement=eng_name,
+            exit_code=2,
+            detail=f"invalid final_severity={final_severity}",
+        )
+        return 2
+
+    # Validate --source, if provided.
+    source = flags.get("--source") or "human_h1_import"
+    if source not in ("human_h1_import", "auto_h1_api", "manual"):
+        print(
+            f"ERROR: invalid --source {source!r}. "
+            "Must be one of: human_h1_import, auto_h1_api, manual",
+            file=sys.stderr,
+        )
+        labutil.audit(
+            AUDIT_ACTION_RECORD_OUTCOME,
+            target=str(ws),
+            engagement=eng_name,
+            exit_code=2,
+            detail=f"invalid source={source}",
+        )
+        return 2
+
+    # Validate --bounty-amount, if provided (must parse as a number).
+    bounty_amount: float | None = None
+    bounty_amount_raw = flags.get("--bounty-amount")
+    if bounty_amount_raw:
+        try:
+            bounty_amount = float(bounty_amount_raw)
+            if bounty_amount < 0:
+                raise ValueError("negative")
+        except ValueError:
+            print(
+                f"ERROR: invalid --bounty-amount {bounty_amount_raw!r}. "
+                "Must be a non-negative number.",
+                file=sys.stderr,
+            )
+            labutil.audit(
+                AUDIT_ACTION_RECORD_OUTCOME,
+                target=str(ws),
+                engagement=eng_name,
+                exit_code=2,
+                detail=f"invalid bounty_amount={bounty_amount_raw}",
+            )
+            return 2
+    bounty_currency = flags.get("--bounty-currency") or None
+
+    notes = flags.get("--notes") or ""
+    report_id = flags["--h1-id"]
+
+    # Resolve the outcomes store path from the engagement name.
+    # The store lives at <lab_root>/bounties/<program>/.lab/outcomes.jsonl
+    # (engagement-private, gitignored — NOT in the workspace).
+    try:
+        outcomes_path = finding_events.resolve_store_path(eng_name, lab_root=lab_root)
+    except ValueError as e:
+        print(f"ERROR: could not resolve outcomes path: {e}", file=sys.stderr)
+        labutil.audit(
+            AUDIT_ACTION_RECORD_OUTCOME,
+            target=str(ws),
+            engagement=eng_name,
+            exit_code=1,
+            detail="outcomes path resolution failed",
+        )
+        return 1
+
+    # Build the outcome event via the helper (validates the full shape).
+    try:
+        event = finding_events.make_outcome_event(
+            report_id=report_id,
+            state=state,
+            source=source,
+            duplicate_of=duplicate_of,
+            duplicate_original_state=duplicate_original_state,
+            final_severity=final_severity,
+            bounty_amount=bounty_amount,
+            bounty_currency=bounty_currency,
+            notes=notes,
+        )
+    except finding_events.OutcomeValidationError as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        labutil.audit(
+            AUDIT_ACTION_RECORD_OUTCOME,
+            target=str(ws),
+            engagement=eng_name,
+            exit_code=2,
+            detail="event validation failed",
+        )
+        return 2
+
+    # Append to the store. OutcomeStore.append handles locking, symlink
+    # rejection, idempotency, and duplicate-event detection.
+    store = finding_events.OutcomeStore(outcomes_path)
+    try:
+        outcome_id = store.append(event)
+    except finding_events.OutcomeSymlinkError as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        labutil.audit(
+            AUDIT_ACTION_RECORD_OUTCOME,
+            target=str(ws),
+            engagement=eng_name,
+            exit_code=1,
+            detail="outcomes path is a symlink (refused)",
+        )
+        return 1
+    except finding_events.OutcomeError as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        labutil.audit(
+            AUDIT_ACTION_RECORD_OUTCOME,
+            target=str(ws),
+            engagement=eng_name,
+            exit_code=1,
+            detail="outcome store error",
+        )
+        return 1
+
+    # Derive the post-record status for the human (read-only).
+    try:
+        status = store.derive_finding_status(report_id, workspace_path=ws)
+    except Exception as e:  # noqa: BLE001 — defensive; status is best-effort
+        print(f"RECORDED: outcome_id={outcome_id} (status derivation failed: {e})")
+        labutil.audit(
+            AUDIT_ACTION_RECORD_OUTCOME,
+            target=str(ws),
+            engagement=eng_name,
+            exit_code=0,
+            detail=f"recorded state={state} outcome_id={outcome_id}",
+        )
+        return 0
+
+    print(f"RECORDED: outcome_id={outcome_id}")
+    print(f"STATE: {state}")
+    if duplicate_of:
+        print(f"DUPLICATE_OF: {duplicate_of}")
+    print(f"OUTCOMES_PATH: {outcomes_path}")
+    print("DERIVED_STATUS:")
+    print(f"  submission_state: {status.get('submission_state')}")
+    print(f"  platform_state: {status.get('platform_state')}")
+    print(f"  reportability: {status.get('reportability')}")
+    print(f"  last_event_ts: {status.get('last_event_ts')}")
+
+    labutil.audit(
+        AUDIT_ACTION_RECORD_OUTCOME,
+        target=str(ws),
+        engagement=eng_name,
+        exit_code=0,
+        detail=f"recorded state={state} outcome_id={outcome_id}",
+    )
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     args = list(argv) if argv is not None else sys.argv[1:]
     if not args:
@@ -513,6 +874,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_status(rest)
     if cmd == "record-submission":
         return cmd_record_submission(rest)
+    if cmd == "record-outcome":
+        return cmd_record_outcome(rest)
     # No submit command exists and never will. Unknown commands fail.
     if cmd == "submit":
         print("ERROR: 'submit' is not a command. Final submission is a human action.", file=sys.stderr)

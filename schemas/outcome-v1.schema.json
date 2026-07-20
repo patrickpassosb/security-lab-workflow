@@ -1,0 +1,141 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://security-lab/schemas/outcome-v1.schema.json",
+  "title": "Finding Outcome Event v1",
+  "description": "Canonical schema for a single line in an engagement's outcomes.jsonl\n(append-only, gitignored). Per roadmap section 7.2 and ADR-0002, the outcome\nevent stream is the highest-authority source for platform state in the\nfinding status reducer (lib/finding_events.derive_finding_status).\n\nThe store lives at <engagement>/.lab/outcomes.jsonl (e.g.\nbounties/notion/.lab/outcomes.jsonl) and is written exclusively via\nlib/finding_events.OutcomeStore.append, which uses fcntl.flock +\nsymlink rejection + idempotency on outcome_id and on\n(report_id, state, occurred_at).\n\nField note (handoff section 5 contradiction): use the FLAT\n`bounty_amount` + `bounty_currency` fields, NOT a nested `bounty` object.\nThe roadmap section 7.2 example showed `\"bounty\": null`; the API and\ntests use `bounty_amount` + `bounty_currency`. This schema codifies the\nflat form.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "outcome_id",
+    "report_id",
+    "state",
+    "occurred_at",
+    "source"
+  ],
+  "properties": {
+    "schema": {
+      "type": "string",
+      "description": "Schema identifier. Must be exactly 'security-lab/finding-outcome/v1'.",
+      "const": "security-lab/finding-outcome/v1",
+      "examples": ["security-lab/finding-outcome/v1"]
+    },
+    "outcome_id": {
+      "type": "string",
+      "description": "UUIDv4 for this outcome event. Idempotency key: appending an event\nwith an outcome_id that already exists in the store is a no-op.",
+      "format": "uuid",
+      "examples": ["f81d4fae-7dec-11d0-a765-00a0c91e6bf6"]
+    },
+    "report_id": {
+      "type": "string",
+      "description": "HackerOne report ID this outcome pertains to. Digits only as a string\n(e.g. '3865854'). MUST match a report_id recorded in some workspace's\nrecord.json (loose linkage — the store does not enforce it, the\nrecord-outcome command does).",
+      "minLength": 1,
+      "examples": ["3865854", "3485596"]
+    },
+    "state": {
+      "type": "string",
+      "description": "Platform state observed at occurred_at. The reducer takes the latest\nnon-null state as platform_state. Unknown states are rejected by the\nschema (enum).",
+      "enum": [
+        "new",
+        "needs_more_info",
+        "triaged",
+        "duplicate",
+        "informative",
+        "not_applicable",
+        "resolved",
+        "bounty_awarded",
+        "bounty_paid"
+      ],
+      "examples": ["duplicate", "informative", "triaged", "resolved"]
+    },
+    "duplicate_of": {
+      "type": ["string", "null"],
+      "description": "HackerOne report ID of the ORIGINAL report when state='duplicate'.\nRequired when state='duplicate' (enforced by the record-outcome command\nand by the reducer's contract; the schema allows null for non-duplicate\nstates).",
+      "examples": ["3485596", null]
+    },
+    "duplicate_original_state": {
+      "type": ["string", "null"],
+      "description": "State of the original report at the time this was closed as a duplicate.\nUseful for the reducer's reportability decision (e.g. duplicate of an\nInformative => do_not_report). Must be one of the outcome state enum\nvalues, or null when state != 'duplicate'.",
+      "enum": [
+        "new",
+        "needs_more_info",
+        "triaged",
+        "duplicate",
+        "informative",
+        "not_applicable",
+        "resolved",
+        "bounty_awarded",
+        "bounty_paid",
+        null
+      ],
+      "examples": ["informative", null]
+    },
+    "occurred_at": {
+      "type": "string",
+      "description": "ISO 8601 UTC timestamp the platform state was observed.\nUsed for ordering events in the reducer (latest non-null state wins).",
+      "format": "date-time",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(Z|[+-]\\d{2}:\\d{2})$",
+      "examples": ["2026-07-15T15:55:00Z"]
+    },
+    "source": {
+      "type": "string",
+      "description": "How the outcome was observed. 'human_h1_import' = a human read the H1\nUI and recorded it. 'auto_h1_api' = pulled from the H1 API (future).\n'manual' = recorded directly for testing or recovery.",
+      "enum": ["human_h1_import", "auto_h1_api", "manual"],
+      "examples": ["human_h1_import", "manual"]
+    },
+    "final_severity": {
+      "type": ["string", "null"],
+      "description": "Final severity assessment by the platform, if any. null when the\nplatform did not assign a severity (e.g. duplicate closures).",
+      "enum": ["low", "medium", "high", "critical", null],
+      "examples": ["low", null]
+    },
+    "bounty_amount": {
+      "type": ["number", "null"],
+      "description": "Bounty amount awarded, if any. null when no bounty was awarded.\nUse bounty_currency for the ISO 4217 currency code.",
+      "minimum": 0,
+      "examples": [250, 5000, null]
+    },
+    "bounty_currency": {
+      "type": ["string", "null"],
+      "description": "ISO 4217 currency code for bounty_amount. Defaults to 'USD' when\nbounty_amount is non-null and bounty_currency is omitted. null when\nno bounty was awarded.",
+      "examples": ["USD", "EUR", null]
+    },
+    "notes": {
+      "type": "string",
+      "description": "Free-text notes. MUST NOT contain secrets, tokens, credentials, or\nPII (the store does not enforce this; the recorder is responsible).",
+      "examples": [
+        "Metadata leak previously assessed as Informative. Recorded via SI-013 first data migration."
+      ]
+    }
+  },
+  "examples": [
+    {
+      "schema": "security-lab/finding-outcome/v1",
+      "outcome_id": "f81d4fae-7dec-11d0-a765-00a0c91e6bf6",
+      "report_id": "3865854",
+      "state": "duplicate",
+      "duplicate_of": "3485596",
+      "duplicate_original_state": "informative",
+      "occurred_at": "2026-07-15T15:55:00Z",
+      "source": "human_h1_import",
+      "final_severity": null,
+      "bounty_amount": null,
+      "bounty_currency": "USD",
+      "notes": "Metadata leak previously assessed as Informative. Recorded via SI-013 first data migration."
+    },
+    {
+      "schema": "security-lab/finding-outcome/v1",
+      "outcome_id": "11111111-2222-3333-4444-555555555555",
+      "report_id": "9999999",
+      "state": "bounty_awarded",
+      "duplicate_of": null,
+      "duplicate_original_state": null,
+      "occurred_at": "2026-08-01T10:00:00Z",
+      "source": "human_h1_import",
+      "final_severity": "high",
+      "bounty_amount": 2000,
+      "bounty_currency": "USD",
+      "notes": ""
+    }
+  ]
+}
