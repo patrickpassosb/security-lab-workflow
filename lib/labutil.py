@@ -224,7 +224,14 @@ def audit(
     if challenge:
         entry["challenge"] = challenge
     for k, v in extra.items():
-        if v:
+        # SI-018: numeric instrument fields (duration_ms, exit) should be
+        # written whenever they are not None — a 0ms command is still a
+        # valid duration and must be recorded for the "every command logs
+        # duration" guarantee. String extras keep the truthy guard so
+        # empty strings (e.g. no workspace_id) are dropped cleanly.
+        if v is None:
+            continue
+        if isinstance(v, (int, float, bool)) or v:
             entry[k] = v
     try:
         atomic_append_jsonl(AUDIT_LOG_PATH, entry)

@@ -41,6 +41,7 @@ from __future__ import annotations
 import contextlib
 import os
 import sys
+import time
 from pathlib import Path
 
 # Import shared labutil helpers and the h1report library.
@@ -48,6 +49,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib"))
 import finding_events  # noqa: E402
 import h1report  # noqa: E402
 import labutil  # noqa: E402
+import workspace  # noqa: E402
 
 AUDIT_ACTION_CHECK = "h1-report-check"
 AUDIT_ACTION_STATUS = "h1-report-status"
@@ -62,6 +64,48 @@ ASSESS_EXIT_PASS = 0
 ASSESS_EXIT_BLOCK = 1
 ASSESS_EXIT_HOLD = 2
 ASSESS_EXIT_ERROR = 3
+
+
+def _ws_id(workspace_path: Path | str | None) -> str:
+    """Read the workspace UUID from <workspace>/.lab/workspace.json.
+
+    Returns "" when the workspace has no workspace.json (older workspaces,
+    or workspaces that predate SI-016). Never raises.
+    """
+    if not workspace_path:
+        return ""
+    try:
+        return workspace.read_workspace_id(Path(workspace_path))
+    except Exception:  # noqa: BLE001 — defensive; audit must never break
+        return ""
+
+
+def _audit_h1(
+    action: str,
+    target: str,
+    engagement: str,
+    exit_code: int,
+    duration_ms: int,
+    workspace_path: Path | str | None,
+    *,
+    detail: str = "",
+) -> None:
+    """Write an h1-report audit entry with the SI-018 instrument fields.
+
+    Single helper so every h1-* subcommand records action, target,
+    engagement, exit, duration_ms, and workspace_id with the same shape.
+    `workspace_path` is the resolved workspace Path (or None on resolution
+    failure) — the UUID is read from <workspace>/.lab/workspace.json.
+    """
+    labutil.audit(
+        action,
+        target=target,
+        engagement=engagement,
+        exit_code=exit_code,
+        detail=detail,
+        duration_ms=duration_ms,
+        workspace_id=_ws_id(workspace_path),
+    )
 
 
 def _resolve_lab_root() -> Path:
@@ -110,6 +154,7 @@ def cmd_check(args: list[str]) -> int:
         workspace = args[0]
 
     lab_root = _resolve_lab_root()
+    start_time = time.monotonic()
 
     # Resolve workspace + report file first (filesystem errors -> exit 1).
     try:
@@ -117,10 +162,9 @@ def cmd_check(args: list[str]) -> int:
         report_path = h1report.find_report_file(ws)
     except h1report.ReportFileError as e:
         print(f"ERROR: {e}", file=sys.stderr)
-        labutil.audit(
-            AUDIT_ACTION_CHECK,
-            target=str(workspace or ""),
-            exit_code=1,
+        _audit_h1(
+            AUDIT_ACTION_CHECK, str(workspace or ""), "", 1,
+            int((time.monotonic() - start_time) * 1000), None,
             detail="report file not found",
         )
         return 1
@@ -130,10 +174,9 @@ def cmd_check(args: list[str]) -> int:
         report = h1report.parse_report(report_path)
     except h1report.ReportParseError as e:
         print(f"ERROR: {e}", file=sys.stderr)
-        labutil.audit(
-            AUDIT_ACTION_CHECK,
-            target=str(report_path),
-            exit_code=1,
+        _audit_h1(
+            AUDIT_ACTION_CHECK, str(report_path), "", 1,
+            int((time.monotonic() - start_time) * 1000), ws,
             detail="report parse error",
         )
         return 1
@@ -143,19 +186,17 @@ def cmd_check(args: list[str]) -> int:
         issues = h1report.check_report(ws, lab_root=lab_root)
     except h1report.ReportFileError as e:
         print(f"ERROR: {e}", file=sys.stderr)
-        labutil.audit(
-            AUDIT_ACTION_CHECK,
-            target=str(report_path),
-            exit_code=1,
+        _audit_h1(
+            AUDIT_ACTION_CHECK, str(report_path), "", 1,
+            int((time.monotonic() - start_time) * 1000), ws,
             detail="filesystem error during check",
         )
         return 1
     except h1report.ReportParseError as e:
         print(f"ERROR: {e}", file=sys.stderr)
-        labutil.audit(
-            AUDIT_ACTION_CHECK,
-            target=str(report_path),
-            exit_code=1,
+        _audit_h1(
+            AUDIT_ACTION_CHECK, str(report_path), "", 1,
+            int((time.monotonic() - start_time) * 1000), ws,
             detail="parse error during check",
         )
         return 1
@@ -171,24 +212,19 @@ def cmd_check(args: list[str]) -> int:
     with contextlib.suppress(Exception):  # pragma: no cover — defensive
         engagement_name = str(report.frontmatter.get("engagement", "") or "")
 
+    duration_ms = int((time.monotonic() - start_time) * 1000)
     if errors == 0:
         print("PASS")
-        labutil.audit(
-            AUDIT_ACTION_CHECK,
-            target=str(report_path),
-            engagement=engagement_name,
-            exit_code=0,
-            detail=f"pass errors={errors} warns={warns}",
+        _audit_h1(
+            AUDIT_ACTION_CHECK, str(report_path), engagement_name, 0,
+            duration_ms, ws, detail=f"pass errors={errors} warns={warns}",
         )
         return 0
     print("FAIL")
     # Do NOT put secret-bearing text into the audit detail. Only counts.
-    labutil.audit(
-        AUDIT_ACTION_CHECK,
-        target=str(report_path),
-        engagement=engagement_name,
-        exit_code=2,
-        detail=f"errors={errors} warns={warns}",
+    _audit_h1(
+        AUDIT_ACTION_CHECK, str(report_path), engagement_name, 2,
+        duration_ms, ws, detail=f"errors={errors} warns={warns}",
     )
     return 2
 
@@ -204,24 +240,24 @@ def cmd_status(args: list[str]) -> int:
         workspace = args[0]
 
     lab_root = _resolve_lab_root()
+    start_time = time.monotonic()
 
     try:
         ws = h1report.resolve_workspace(workspace)
         status = h1report.status_report(ws, lab_root=lab_root)
     except h1report.ReportFileError as e:
         print(f"ERROR: {e}", file=sys.stderr)
-        labutil.audit(
-            AUDIT_ACTION_STATUS,
-            target=str(workspace or ""),
-            exit_code=1,
+        _audit_h1(
+            AUDIT_ACTION_STATUS, str(workspace or ""), "", 1,
+            int((time.monotonic() - start_time) * 1000), None,
             detail="report file not found",
         )
         return 1
     except h1report.ReportParseError as e:
         print(f"ERROR: {e}", file=sys.stderr)
-        labutil.audit(
-            AUDIT_ACTION_STATUS,
-            exit_code=1,
+        _audit_h1(
+            AUDIT_ACTION_STATUS, "", "", 1,
+            int((time.monotonic() - start_time) * 1000), None,
             detail="report parse error",
         )
         return 1
@@ -230,10 +266,9 @@ def cmd_status(args: list[str]) -> int:
         # failures so the CLI exits cleanly with an audit event instead of
         # crashing with an unhandled traceback.
         print(f"ERROR: filesystem error: {e}", file=sys.stderr)
-        labutil.audit(
-            AUDIT_ACTION_STATUS,
-            target=str(workspace or ""),
-            exit_code=1,
+        _audit_h1(
+            AUDIT_ACTION_STATUS, str(workspace or ""), "", 1,
+            int((time.monotonic() - start_time) * 1000), None,
             detail="filesystem error",
         )
         return 1
@@ -311,11 +346,9 @@ def cmd_status(args: list[str]) -> int:
         engagement_name = str(md.get("engagement", "") or "")
     except Exception:  # pragma: no cover — defensive
         engagement_name = ""
-    labutil.audit(
-        AUDIT_ACTION_STATUS,
-        target=status.get("report_path", ""),
-        engagement=engagement_name,
-        exit_code=0,
+    _audit_h1(
+        AUDIT_ACTION_STATUS, status.get("report_path", ""), engagement_name, 0,
+        int((time.monotonic() - start_time) * 1000), ws,
         detail=(
             f"package={'yes' if latest else 'no'} "
             f"integrity={'ok' if status.get('integrity_ok') else 'drift'} "
@@ -336,23 +369,23 @@ def cmd_prepare(args: list[str]) -> int:
         workspace = args[0]
 
     lab_root = _resolve_lab_root()
+    start_time = time.monotonic()
 
     try:
         result = h1report.prepare_report(workspace, lab_root=lab_root)
     except h1report.ReportFileError as e:
         print(f"ERROR: {e}", file=sys.stderr)
-        labutil.audit(
-            AUDIT_ACTION_PREPARE,
-            target=str(workspace or ""),
-            exit_code=1,
+        _audit_h1(
+            AUDIT_ACTION_PREPARE, str(workspace or ""), "", 1,
+            int((time.monotonic() - start_time) * 1000), None,
             detail="report file not found",
         )
         return 1
     except h1report.ReportParseError as e:
         print(f"ERROR: {e}", file=sys.stderr)
-        labutil.audit(
-            AUDIT_ACTION_PREPARE,
-            exit_code=1,
+        _audit_h1(
+            AUDIT_ACTION_PREPARE, "", "", 1,
+            int((time.monotonic() - start_time) * 1000), None,
             detail="report parse error",
         )
         return 1
@@ -362,29 +395,26 @@ def cmd_prepare(args: list[str]) -> int:
             _print_issue(issue)
         errors, warns, _infos = _summarize(e.issues)
         print("FAIL")
-        labutil.audit(
-            AUDIT_ACTION_PREPARE,
-            target=str(workspace or ""),
-            exit_code=2,
+        _audit_h1(
+            AUDIT_ACTION_PREPARE, str(workspace or ""), "", 2,
+            int((time.monotonic() - start_time) * 1000), None,
             detail=f"validation failed errors={errors} warns={warns}",
         )
         return 2
     except h1report.PackageExistsError as e:
         # Immutable: never overwrite. Treat as validation failure (exit 2).
         print(f"ERROR: {e}", file=sys.stderr)
-        labutil.audit(
-            AUDIT_ACTION_PREPARE,
-            target=str(workspace or ""),
-            exit_code=2,
+        _audit_h1(
+            AUDIT_ACTION_PREPARE, str(workspace or ""), "", 2,
+            int((time.monotonic() - start_time) * 1000), None,
             detail="package already exists",
         )
         return 2
     except h1report.PackageError as e:
         print(f"ERROR: {e}", file=sys.stderr)
-        labutil.audit(
-            AUDIT_ACTION_PREPARE,
-            target=str(workspace or ""),
-            exit_code=1,
+        _audit_h1(
+            AUDIT_ACTION_PREPARE, str(workspace or ""), "", 1,
+            int((time.monotonic() - start_time) * 1000), None,
             detail="filesystem error during prepare",
         )
         return 1
@@ -397,10 +427,16 @@ def cmd_prepare(args: list[str]) -> int:
         f"package={pkg_id}"
     )
     print(f"PACKAGE: {result.get('package_path', '')}")
-    labutil.audit(
-        AUDIT_ACTION_PREPARE,
-        target=str(workspace or ""),
-        exit_code=0,
+    # Resolve the workspace Path for workspace_id attribution (best-effort;
+    # prepare_report already resolved it internally, so this only fails if
+    # the workspace was removed between the prepare and now — extremely
+    # unlikely, and workspace_id is purely attribution metadata).
+    ws_path: Path | None = None
+    with contextlib.suppress(Exception):
+        ws_path = h1report.resolve_workspace(workspace)
+    _audit_h1(
+        AUDIT_ACTION_PREPARE, str(workspace or ""), "", 0,
+        int((time.monotonic() - start_time) * 1000), ws_path,
         detail=f"prepared=1 attachments={copied} package={pkg_id}",
     )
     return 0
@@ -463,6 +499,7 @@ def cmd_record_submission(args: list[str]) -> int:
         return parse_rc
 
     lab_root = _resolve_lab_root()
+    start_time = time.monotonic()
 
     try:
         result = h1report.record_submission(
@@ -476,37 +513,33 @@ def cmd_record_submission(args: list[str]) -> int:
         )
     except h1report.ReportFileError as e:
         print(f"ERROR: {e}", file=sys.stderr)
-        labutil.audit(
-            AUDIT_ACTION_RECORD,
-            target=str(workspace or ""),
-            exit_code=1,
+        _audit_h1(
+            AUDIT_ACTION_RECORD, str(workspace or ""), "", 1,
+            int((time.monotonic() - start_time) * 1000), None,
             detail="workspace not found",
         )
         return 1
     except h1report.PackageError as e:
         print(f"ERROR: {e}", file=sys.stderr)
-        labutil.audit(
-            AUDIT_ACTION_RECORD,
-            target=str(workspace or ""),
-            exit_code=1,
+        _audit_h1(
+            AUDIT_ACTION_RECORD, str(workspace or ""), "", 1,
+            int((time.monotonic() - start_time) * 1000), None,
             detail="package filesystem error",
         )
         return 1
     except h1report.RecordValidationError as e:
         print(f"ERROR: {e}", file=sys.stderr)
-        labutil.audit(
-            AUDIT_ACTION_RECORD,
-            target=str(workspace or ""),
-            exit_code=2,
+        _audit_h1(
+            AUDIT_ACTION_RECORD, str(workspace or ""), "", 2,
+            int((time.monotonic() - start_time) * 1000), None,
             detail="validation failed",
         )
         return 2
     except h1report.RecordExistsError as e:
         print(f"ERROR: {e}", file=sys.stderr)
-        labutil.audit(
-            AUDIT_ACTION_RECORD,
-            target=str(workspace or ""),
-            exit_code=2,
+        _audit_h1(
+            AUDIT_ACTION_RECORD, str(workspace or ""), "", 2,
+            int((time.monotonic() - start_time) * 1000), None,
             detail="record already exists",
         )
         return 2
@@ -514,10 +547,15 @@ def cmd_record_submission(args: list[str]) -> int:
     rid = result.get("report_id", "")
     print(f"RECORDED: {result.get('record_path', '')}")
     print(f"REPORT_ID: {rid}")
-    labutil.audit(
-        AUDIT_ACTION_RECORD,
-        target=str(workspace or ""),
-        exit_code=0,
+    # Resolve the workspace Path for workspace_id attribution (best-effort;
+    # record_submission may have succeeded even if resolve_workspace now
+    # fails, so wrap it).
+    ws_path: Path | None = None
+    with contextlib.suppress(Exception):
+        ws_path = h1report.resolve_workspace(workspace)
+    _audit_h1(
+        AUDIT_ACTION_RECORD, str(workspace or ""), "", 0,
+        int((time.monotonic() - start_time) * 1000), ws_path,
         detail=f"recorded report_id={rid}",
     )
     return 0
@@ -639,14 +677,14 @@ def cmd_record_outcome(args: list[str]) -> int:
         return parse_rc
 
     lab_root = _resolve_lab_root()
+    start_time = time.monotonic()
 
     # Resolve workspace + engagement.
     ws, eng_name, resolve_rc = _resolve_workspace_engagement(workspace, lab_root)
     if resolve_rc != 0:
-        labutil.audit(
-            AUDIT_ACTION_RECORD_OUTCOME,
-            target=str(workspace or ""),
-            exit_code=1,
+        _audit_h1(
+            AUDIT_ACTION_RECORD_OUTCOME, str(workspace or ""), "", 1,
+            int((time.monotonic() - start_time) * 1000), None,
             detail="workspace/engagement resolution failed",
         )
         return 1
@@ -659,11 +697,9 @@ def cmd_record_outcome(args: list[str]) -> int:
             f"{', '.join(sorted(finding_events.OUTCOME_STATES))}",
             file=sys.stderr,
         )
-        labutil.audit(
-            AUDIT_ACTION_RECORD_OUTCOME,
-            target=str(ws),
-            engagement=eng_name,
-            exit_code=2,
+        _audit_h1(
+            AUDIT_ACTION_RECORD_OUTCOME, str(ws), eng_name, 2,
+            int((time.monotonic() - start_time) * 1000), ws,
             detail=f"invalid state={state}",
         )
         return 2
@@ -675,11 +711,9 @@ def cmd_record_outcome(args: list[str]) -> int:
             "ERROR: --state duplicate requires --duplicate-of <original-report-id>",
             file=sys.stderr,
         )
-        labutil.audit(
-            AUDIT_ACTION_RECORD_OUTCOME,
-            target=str(ws),
-            engagement=eng_name,
-            exit_code=2,
+        _audit_h1(
+            AUDIT_ACTION_RECORD_OUTCOME, str(ws), eng_name, 2,
+            int((time.monotonic() - start_time) * 1000), ws,
             detail="duplicate state without --duplicate-of",
         )
         return 2
@@ -695,11 +729,9 @@ def cmd_record_outcome(args: list[str]) -> int:
             f"Must be one of: {', '.join(sorted(finding_events.OUTCOME_STATES))}",
             file=sys.stderr,
         )
-        labutil.audit(
-            AUDIT_ACTION_RECORD_OUTCOME,
-            target=str(ws),
-            engagement=eng_name,
-            exit_code=2,
+        _audit_h1(
+            AUDIT_ACTION_RECORD_OUTCOME, str(ws), eng_name, 2,
+            int((time.monotonic() - start_time) * 1000), ws,
             detail=f"invalid duplicate_original_state={duplicate_original_state}",
         )
         return 2
@@ -715,11 +747,9 @@ def cmd_record_outcome(args: list[str]) -> int:
             "Must be one of: low, medium, high, critical",
             file=sys.stderr,
         )
-        labutil.audit(
-            AUDIT_ACTION_RECORD_OUTCOME,
-            target=str(ws),
-            engagement=eng_name,
-            exit_code=2,
+        _audit_h1(
+            AUDIT_ACTION_RECORD_OUTCOME, str(ws), eng_name, 2,
+            int((time.monotonic() - start_time) * 1000), ws,
             detail=f"invalid final_severity={final_severity}",
         )
         return 2
@@ -732,11 +762,9 @@ def cmd_record_outcome(args: list[str]) -> int:
             "Must be one of: human_h1_import, auto_h1_api, manual",
             file=sys.stderr,
         )
-        labutil.audit(
-            AUDIT_ACTION_RECORD_OUTCOME,
-            target=str(ws),
-            engagement=eng_name,
-            exit_code=2,
+        _audit_h1(
+            AUDIT_ACTION_RECORD_OUTCOME, str(ws), eng_name, 2,
+            int((time.monotonic() - start_time) * 1000), ws,
             detail=f"invalid source={source}",
         )
         return 2
@@ -755,11 +783,9 @@ def cmd_record_outcome(args: list[str]) -> int:
                 "Must be a non-negative number.",
                 file=sys.stderr,
             )
-            labutil.audit(
-                AUDIT_ACTION_RECORD_OUTCOME,
-                target=str(ws),
-                engagement=eng_name,
-                exit_code=2,
+            _audit_h1(
+                AUDIT_ACTION_RECORD_OUTCOME, str(ws), eng_name, 2,
+                int((time.monotonic() - start_time) * 1000), ws,
                 detail=f"invalid bounty_amount={bounty_amount_raw}",
             )
             return 2
@@ -775,11 +801,9 @@ def cmd_record_outcome(args: list[str]) -> int:
         outcomes_path = finding_events.resolve_store_path(eng_name, lab_root=lab_root)
     except ValueError as e:
         print(f"ERROR: could not resolve outcomes path: {e}", file=sys.stderr)
-        labutil.audit(
-            AUDIT_ACTION_RECORD_OUTCOME,
-            target=str(ws),
-            engagement=eng_name,
-            exit_code=1,
+        _audit_h1(
+            AUDIT_ACTION_RECORD_OUTCOME, str(ws), eng_name, 1,
+            int((time.monotonic() - start_time) * 1000), ws,
             detail="outcomes path resolution failed",
         )
         return 1
@@ -799,11 +823,9 @@ def cmd_record_outcome(args: list[str]) -> int:
         )
     except finding_events.OutcomeValidationError as e:
         print(f"ERROR: {e}", file=sys.stderr)
-        labutil.audit(
-            AUDIT_ACTION_RECORD_OUTCOME,
-            target=str(ws),
-            engagement=eng_name,
-            exit_code=2,
+        _audit_h1(
+            AUDIT_ACTION_RECORD_OUTCOME, str(ws), eng_name, 2,
+            int((time.monotonic() - start_time) * 1000), ws,
             detail="event validation failed",
         )
         return 2
@@ -815,21 +837,17 @@ def cmd_record_outcome(args: list[str]) -> int:
         outcome_id = store.append(event)
     except finding_events.OutcomeSymlinkError as e:
         print(f"ERROR: {e}", file=sys.stderr)
-        labutil.audit(
-            AUDIT_ACTION_RECORD_OUTCOME,
-            target=str(ws),
-            engagement=eng_name,
-            exit_code=1,
+        _audit_h1(
+            AUDIT_ACTION_RECORD_OUTCOME, str(ws), eng_name, 1,
+            int((time.monotonic() - start_time) * 1000), ws,
             detail="outcomes path is a symlink (refused)",
         )
         return 1
     except finding_events.OutcomeError as e:
         print(f"ERROR: {e}", file=sys.stderr)
-        labutil.audit(
-            AUDIT_ACTION_RECORD_OUTCOME,
-            target=str(ws),
-            engagement=eng_name,
-            exit_code=1,
+        _audit_h1(
+            AUDIT_ACTION_RECORD_OUTCOME, str(ws), eng_name, 1,
+            int((time.monotonic() - start_time) * 1000), ws,
             detail="outcome store error",
         )
         return 1
@@ -839,11 +857,9 @@ def cmd_record_outcome(args: list[str]) -> int:
         status = store.derive_finding_status(report_id, workspace_path=ws)
     except Exception as e:  # noqa: BLE001 — defensive; status is best-effort
         print(f"RECORDED: outcome_id={outcome_id} (status derivation failed: {e})")
-        labutil.audit(
-            AUDIT_ACTION_RECORD_OUTCOME,
-            target=str(ws),
-            engagement=eng_name,
-            exit_code=0,
+        _audit_h1(
+            AUDIT_ACTION_RECORD_OUTCOME, str(ws), eng_name, 0,
+            int((time.monotonic() - start_time) * 1000), ws,
             detail=f"recorded state={state} outcome_id={outcome_id}",
         )
         return 0
@@ -859,11 +875,9 @@ def cmd_record_outcome(args: list[str]) -> int:
     print(f"  reportability: {status.get('reportability')}")
     print(f"  last_event_ts: {status.get('last_event_ts')}")
 
-    labutil.audit(
-        AUDIT_ACTION_RECORD_OUTCOME,
-        target=str(ws),
-        engagement=eng_name,
-        exit_code=0,
+    _audit_h1(
+        AUDIT_ACTION_RECORD_OUTCOME, str(ws), eng_name, 0,
+        int((time.monotonic() - start_time) * 1000), ws,
         detail=f"recorded state={state} outcome_id={outcome_id}",
     )
     return 0
@@ -1066,16 +1080,16 @@ def cmd_assess(args: list[str]) -> int:
         workspace = args[0]
 
     lab_root = _resolve_lab_root()
+    start_time = time.monotonic()
 
     # Resolve workspace (filesystem errors -> exit 3).
     try:
         ws = h1report.resolve_workspace(workspace)
     except h1report.ReportFileError as e:
         print(f"ERROR: {e}", file=sys.stderr)
-        labutil.audit(
-            AUDIT_ACTION_ASSESS,
-            target=str(workspace or ""),
-            exit_code=ASSESS_EXIT_ERROR,
+        _audit_h1(
+            AUDIT_ACTION_ASSESS, str(workspace or ""), "", ASSESS_EXIT_ERROR,
+            int((time.monotonic() - start_time) * 1000), None,
             detail="workspace not found",
         )
         return ASSESS_EXIT_ERROR
@@ -1097,10 +1111,9 @@ def cmd_assess(args: list[str]) -> int:
             "(no engagement.txt and no frontmatter engagement field)",
             file=sys.stderr,
         )
-        labutil.audit(
-            AUDIT_ACTION_ASSESS,
-            target=str(ws),
-            exit_code=ASSESS_EXIT_ERROR,
+        _audit_h1(
+            AUDIT_ACTION_ASSESS, str(ws), "", ASSESS_EXIT_ERROR,
+            int((time.monotonic() - start_time) * 1000), ws,
             detail="engagement resolution failed",
         )
         return ASSESS_EXIT_ERROR
@@ -1159,11 +1172,9 @@ def cmd_assess(args: list[str]) -> int:
         )
     except finding_events.OutcomeError as e:
         print(f"ERROR: could not derive finding status: {e}", file=sys.stderr)
-        labutil.audit(
-            AUDIT_ACTION_ASSESS,
-            target=str(ws),
-            engagement=eng_name,
-            exit_code=ASSESS_EXIT_ERROR,
+        _audit_h1(
+            AUDIT_ACTION_ASSESS, str(ws), eng_name, ASSESS_EXIT_ERROR,
+            int((time.monotonic() - start_time) * 1000), ws,
             detail="status derivation failed",
         )
         return ASSESS_EXIT_ERROR
@@ -1175,31 +1186,25 @@ def cmd_assess(args: list[str]) -> int:
         precedents = finding_events.load_precedents(eng_path)
     except finding_events.OutcomeSymlinkError as e:
         print(f"ERROR: {e}", file=sys.stderr)
-        labutil.audit(
-            AUDIT_ACTION_ASSESS,
-            target=str(ws),
-            engagement=eng_name,
-            exit_code=ASSESS_EXIT_ERROR,
+        _audit_h1(
+            AUDIT_ACTION_ASSESS, str(ws), eng_name, ASSESS_EXIT_ERROR,
+            int((time.monotonic() - start_time) * 1000), ws,
             detail="precedents.yaml is a symlink (refused)",
         )
         return ASSESS_EXIT_ERROR
     except finding_events.OutcomeParseError as e:
         print(f"ERROR: precedents.yaml parse error: {e}", file=sys.stderr)
-        labutil.audit(
-            AUDIT_ACTION_ASSESS,
-            target=str(ws),
-            engagement=eng_name,
-            exit_code=ASSESS_EXIT_ERROR,
+        _audit_h1(
+            AUDIT_ACTION_ASSESS, str(ws), eng_name, ASSESS_EXIT_ERROR,
+            int((time.monotonic() - start_time) * 1000), ws,
             detail="precedents.yaml parse error",
         )
         return ASSESS_EXIT_ERROR
     except finding_events.OutcomeError as e:
         print(f"ERROR: could not load precedents: {e}", file=sys.stderr)
-        labutil.audit(
-            AUDIT_ACTION_ASSESS,
-            target=str(ws),
-            engagement=eng_name,
-            exit_code=ASSESS_EXIT_ERROR,
+        _audit_h1(
+            AUDIT_ACTION_ASSESS, str(ws), eng_name, ASSESS_EXIT_ERROR,
+            int((time.monotonic() - start_time) * 1000), ws,
             detail="precedents load failed",
         )
         return ASSESS_EXIT_ERROR
@@ -1217,11 +1222,9 @@ def cmd_assess(args: list[str]) -> int:
         if duplicate_of:
             reason += f" (of {duplicate_of})"
         _print_assess_result("BLOCK", reason, status, report_id, behavior, eng_name)
-        labutil.audit(
-            AUDIT_ACTION_ASSESS,
-            target=str(ws),
-            engagement=eng_name,
-            exit_code=ASSESS_EXIT_BLOCK,
+        _audit_h1(
+            AUDIT_ACTION_ASSESS, str(ws), eng_name, ASSESS_EXIT_BLOCK,
+            int((time.monotonic() - start_time) * 1000), ws,
             detail=f"BLOCK platform_state=duplicate report_id={report_id}",
         )
         return ASSESS_EXIT_BLOCK
@@ -1229,11 +1232,9 @@ def cmd_assess(args: list[str]) -> int:
     if platform_state == "informative":
         reason = "Previously closed as Informative"
         _print_assess_result("BLOCK", reason, status, report_id, behavior, eng_name)
-        labutil.audit(
-            AUDIT_ACTION_ASSESS,
-            target=str(ws),
-            engagement=eng_name,
-            exit_code=ASSESS_EXIT_BLOCK,
+        _audit_h1(
+            AUDIT_ACTION_ASSESS, str(ws), eng_name, ASSESS_EXIT_BLOCK,
+            int((time.monotonic() - start_time) * 1000), ws,
             detail=f"BLOCK platform_state=informative report_id={report_id}",
         )
         return ASSESS_EXIT_BLOCK
@@ -1245,11 +1246,9 @@ def cmd_assess(args: list[str]) -> int:
             "BLOCK", precedent_reason, status, report_id, behavior, eng_name,
             precedent=matched,
         )
-        labutil.audit(
-            AUDIT_ACTION_ASSESS,
-            target=str(ws),
-            engagement=eng_name,
-            exit_code=ASSESS_EXIT_BLOCK,
+        _audit_h1(
+            AUDIT_ACTION_ASSESS, str(ws), eng_name, ASSESS_EXIT_BLOCK,
+            int((time.monotonic() - start_time) * 1000), ws,
             detail=f"BLOCK precedent_match report_id={report_id}",
         )
         return ASSESS_EXIT_BLOCK
@@ -1257,11 +1256,9 @@ def cmd_assess(args: list[str]) -> int:
     if technical_verdict != "confirmed":
         reason = f"Technical verdict is not 'confirmed' (got {technical_verdict!r})"
         _print_assess_result("BLOCK", reason, status, report_id, behavior, eng_name)
-        labutil.audit(
-            AUDIT_ACTION_ASSESS,
-            target=str(ws),
-            engagement=eng_name,
-            exit_code=ASSESS_EXIT_BLOCK,
+        _audit_h1(
+            AUDIT_ACTION_ASSESS, str(ws), eng_name, ASSESS_EXIT_BLOCK,
+            int((time.monotonic() - start_time) * 1000), ws,
             detail=f"BLOCK technical_verdict={technical_verdict} report_id={report_id}",
         )
         return ASSESS_EXIT_BLOCK
@@ -1273,11 +1270,9 @@ def cmd_assess(args: list[str]) -> int:
     if not impact_demonstrated:
         reason = "Impact not demonstrated — response is empty or theoretical"
         _print_assess_result("HOLD", reason, status, report_id, behavior, eng_name)
-        labutil.audit(
-            AUDIT_ACTION_ASSESS,
-            target=str(ws),
-            engagement=eng_name,
-            exit_code=ASSESS_EXIT_HOLD,
+        _audit_h1(
+            AUDIT_ACTION_ASSESS, str(ws), eng_name, ASSESS_EXIT_HOLD,
+            int((time.monotonic() - start_time) * 1000), ws,
             detail=f"HOLD impact_not_demonstrated report_id={report_id}",
         )
         return ASSESS_EXIT_HOLD
@@ -1285,11 +1280,9 @@ def cmd_assess(args: list[str]) -> int:
     if confidence < trial_threshold:
         reason = f"Confidence {confidence} below trial threshold {trial_threshold}"
         _print_assess_result("HOLD", reason, status, report_id, behavior, eng_name)
-        labutil.audit(
-            AUDIT_ACTION_ASSESS,
-            target=str(ws),
-            engagement=eng_name,
-            exit_code=ASSESS_EXIT_HOLD,
+        _audit_h1(
+            AUDIT_ACTION_ASSESS, str(ws), eng_name, ASSESS_EXIT_HOLD,
+            int((time.monotonic() - start_time) * 1000), ws,
             detail=f"HOLD confidence={confidence}<{trial_threshold} report_id={report_id}",
         )
         return ASSESS_EXIT_HOLD
@@ -1306,11 +1299,9 @@ def cmd_assess(args: list[str]) -> int:
                 "HOLD", reason, status, report_id, behavior, eng_name,
                 precedent=matched,
             )
-            labutil.audit(
-                AUDIT_ACTION_ASSESS,
-                target=str(ws),
-                engagement=eng_name,
-                exit_code=ASSESS_EXIT_HOLD,
+            _audit_h1(
+                AUDIT_ACTION_ASSESS, str(ws), eng_name, ASSESS_EXIT_HOLD,
+                int((time.monotonic() - start_time) * 1000), ws,
                 detail=f"HOLD candidate_informative_precedent report_id={report_id}",
             )
             return ASSESS_EXIT_HOLD
@@ -1318,11 +1309,9 @@ def cmd_assess(args: list[str]) -> int:
     # ─── PASS ───────────────────────────────────────────────────────────
     reason = "Evidence and novelty sufficient for submission"
     _print_assess_result("PASS", reason, status, report_id, behavior, eng_name)
-    labutil.audit(
-        AUDIT_ACTION_ASSESS,
-        target=str(ws),
-        engagement=eng_name,
-        exit_code=ASSESS_EXIT_PASS,
+    _audit_h1(
+        AUDIT_ACTION_ASSESS, str(ws), eng_name, ASSESS_EXIT_PASS,
+        int((time.monotonic() - start_time) * 1000), ws,
         detail=f"PASS report_id={report_id}",
     )
     return ASSESS_EXIT_PASS
