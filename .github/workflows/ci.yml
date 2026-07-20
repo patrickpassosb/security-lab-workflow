@@ -54,7 +54,7 @@ jobs:
           shellcheck -S warning install.sh "${FILES[@]}"
 
   ruff:
-    name: ruff (python scripts)
+    name: ruff (python lint, full repo)
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -64,11 +64,67 @@ jobs:
           python-version: '3.11'
       - name: Install ruff
         run: pip install -r requirements.txt
-      - name: Ruff check
-        # Only lint actual Python files. install.sh and the extensionless
-        # bin/ scripts are bash — ruff parses them as Python and throws a wall
-        # of syntax errors. They are covered by the shellcheck job instead.
-        run: ruff check bin/ templates/
+      - name: Ruff check (full repo)
+        # SI-009: upgraded from `ruff check bin/ templates/` to `ruff check .`
+        # to lint the whole tree (lib/, tests/, schemas/ if any .py, etc.).
+        # install.sh and the extensionless bin/ scripts are bash — ruff's
+        # extend-exclude in ruff.toml plus file-extension detection keeps them
+        # out. ruff.toml is the single source of truth for rule selection and
+        # per-file ignores (e.g. bin/* E402 for sys.path hacks).
+        run: ruff check .
+
+  pytest:
+    name: pytest (unit tests)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+      - uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b  # v5.3.0
+        with:
+          python-version: '3.11'
+      - name: Install Python deps
+        # requirements.txt pins ruff + pyyaml + requests. pytest is added
+        # explicitly (not in requirements.txt — it's a CI/test-only dep).
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pytest
+      - name: Run pytest
+        # PYTHONPATH=lib is critical so tests can import labutil, h1report,
+        # and (Phase 1) finding_events directly from lib/ without packaging.
+        env:
+          PYTHONPATH: lib
+        run: pytest tests/ -v --tb=short
+      - name: Upload test results on failure
+        if: failure()
+        uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882  # v4.4.3
+        with:
+          name: pytest-output
+          path: |
+            .pytest_cache/
+            **/__pycache__/
+          if-no-files-found: ignore
+
+  schema-validate:
+    name: schema validation (JSON syntax)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+      - uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b  # v5.3.0
+        with:
+          python-version: '3.11'
+      - name: Validate JSON schemas
+        # SI-009: schemas/ just got audit-event-v1; this step guards against
+        # malformed JSON (trailing commas, unescaped quotes, etc.) that would
+        # break runtime loaders. Syntax-only check; semantic validation is
+        # done by the consumers (lib/labutil.py, etc.) at read time.
+        # No-op when schemas/ has no .json files yet — glob returns [].
+        run: |
+          python3 -c "import json, glob; \
+          files = glob.glob('schemas/*.json'); \
+          [json.load(open(f)) for f in files]; \
+          print(f'validated {len(files)} schema file(s)')"
 
   gitleaks:
     name: gitleaks (secrets scan)

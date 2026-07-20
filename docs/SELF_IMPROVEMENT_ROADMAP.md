@@ -269,8 +269,8 @@ any of these:
 scope.yaml                          # Global denied list
 engagements/*.yaml                  # Per-engagement scope, rate limits, techniques
 lib/labutil.py                      # Audit logging (canonical schema)
-lib/h1report.py                     # H1 report validation and packaging
-lib/finding_events.py               # Outcome event store (Phase 1)
+lib/h1report.py                     # H1 report validation and packaging (delegates to finding_events for status)
+lib/finding_events.py               # Outcome event store + SOLE owner of derive_finding_status() (Phase 1; ADR-0002)
 lib/labeval.py                      # Offline evaluator (Phase 3)
 bin/lab-scope                       # Scope enforcement
 bin/lab-h1-report                   # H1 report workflow
@@ -585,9 +585,15 @@ Exit codes:
 ### 7.4. Finding status reducer
 
 A read-only function that derives the current authoritative state of a finding
-from immutable sources:
+from immutable sources. Per ADR-0002, this function has exactly **one owner**:
+`lib/finding_events.py`. `lib/h1report.py` does NOT reimplement it; it calls
+`finding_events.derive_finding_status()` and layers H1-specific presentation
+on top. CTF handoff (`bin/lab-handoff`) does NOT use this reducer — CTF has
+its own status vocabulary (unsolved/in-progress/solved/pivoted/stuck) that
+lives in `solve_log.md`, not in `outcomes.jsonl`.
 
 ```python
+# lib/finding_events.py — sole owner of derive_finding_status()
 def derive_finding_status(workspace: Path) -> dict:
     """
     Precedence (highest to lowest):
@@ -1610,10 +1616,19 @@ accepted flag.
 
 **Tasks:**
 
-- `lib/h1report.py`: add `derive_finding_status()` (see 7.4).
+- `lib/finding_events.py`: add `derive_finding_status()` (see 7.4).
+  Per ADR-0002, `derive_finding_status()` has exactly one owner:
+  `lib/finding_events.py`. `lib/h1report.py` does NOT implement it; it
+  delegates to `finding_events.derive_finding_status()` for authoritative
+  status and layers H1-specific presentation on top.
 - `bin/lab-h1-report status`: display the derived status, noting when it
   contradicts the editable log.
-- `bin/lab-handoff`: read the derived status before writing the handoff block.
+- `bin/lab-handoff`: CTF handoff is a separate flow (per ADR-0002). It does
+  NOT call `finding_events.derive_finding_status()`; it reads `solve_log.md`
+  and writes `HANDOFF.md` with CTF-specific status
+  (unsolved/in-progress/solved/pivoted/stuck). The original suggestion to
+  "read the derived status before writing the handoff block" applied only
+  to bounty findings and is dropped from the CTF handoff path.
 
 ---
 
@@ -1638,10 +1653,14 @@ trial reports.**
 | File | Change |
 |------|--------|
 | `bin/lab-h1-report` | Add `record-outcome` subcommand |
-| `lib/h1report.py` | Add `derive_finding_status()` function |
+| `lib/h1report.py` | Call `finding_events.derive_finding_status()` (do NOT reimplement); layer H1-specific presentation on top. Per ADR-0002. |
 | `bin/lab-h1-report` | `status` command shows derived status + outcome history |
 
 ### 20.3. `lib/finding_events.py` API
+
+> **Owner note (ADR-0002):** `lib/finding_events.py` is the **sole owner** of
+> `derive_finding_status()`. `lib/h1report.py` imports and calls it; it does
+> not reimplement it. CTF handoff does not use this API at all.
 
 ```python
 def record_outcome(
@@ -2777,7 +2796,7 @@ agent can pick up.
 | 0.7 | Fix `gbrain-debrief` CLI commands to match installed CLI | `skills/gbrain/gbrain-debrief/SKILL.md` | manual |
 | 0.8 | Fix `gbrain-prime` to use `gbrain query` for semantic search | `skills/gbrain/gbrain-prime/SKILL.md` | manual |
 | 0.9 | Make gbrain skills detect backend availability | `skills/gbrain/*/SKILL.md` | manual |
-| 0.10 | Add `derive_finding_status()` to `lib/h1report.py` | `lib/h1report.py` | `test_h1_report.py` |
+| 0.10 | Specify reducer ownership (ADR-0002): `derive_finding_status()` has ONE owner (`lib/finding_events.py`); `h1report.py` delegates; CTF handoff is separate. Implementation moves to Phase 1 task 1.2. | `docs/adrs/0002-reducer-ownership.md` | — |
 | 0.11 | `lab-h1-report status` shows derived status + outcome history | `bin/lab-h1-report` | `test_h1_report.py` |
 | 0.12 | Add `.pytest_cache` exclusion to audit log | `lib/labutil.py` | `test_audit_schema.py` |
 
