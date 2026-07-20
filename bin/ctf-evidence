@@ -197,22 +197,25 @@ TARGET=""
 [ -f "$WORK/target.txt" ] && TARGET="$(tr -d '\r' < "$WORK/target.txt" | head -n 1)"
 ENGAGEMENT=""
 [ -f "$WORK/engagement.txt" ] && ENGAGEMENT="$(tr -d '\r' < "$WORK/engagement.txt" | head -n 1)"
-# T2-08: use python json.dumps instead of printf to avoid JSON injection
-python3 -c 'import json,sys,os
-from datetime import datetime, timezone
-entry = {
-    "ts": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-    "agent": os.environ.get("USER", os.environ.get("LOGNAME", "agent")),
-    "action": "ctf-evidence",
-    "challenge": sys.argv[1],
-    "target": sys.argv[2],
-    "engagement": sys.argv[3],
-    "label": sys.argv[4],
-    "exit": int(sys.argv[5]),
-}
-print(json.dumps(entry, ensure_ascii=False))
-' "$CHALLENGE" "$TARGET" "$ENGAGEMENT" "$LABEL" "$EXIT_CODE" \
-  >> "$LAB/findings/.agent-audit.jsonl"
+# SI-005: write the audit entry through the canonical lib/labutil.audit()
+# so we get file locking (fcntl.flock), symlink rejection, the `agent`
+# field, and json.dumps safety. Previously this opened the audit log
+# directly with `>> ... .agent-audit.jsonl`, which had none of those
+# guarantees and could lose the `agent` field if the inline python was
+# edited. Per-writer extras `challenge` and `label` are passed through
+# the canonical writer's **extra channel.
+PYTHONPATH="$LAB/lib" python3 -c '
+import sys
+import labutil
+labutil.audit(
+    "ctf-evidence",
+    target=sys.argv[1],
+    engagement=sys.argv[2],
+    challenge=sys.argv[3],
+    label=sys.argv[4],
+    exit_code=int(sys.argv[5]),
+)
+' "$TARGET" "$ENGAGEMENT" "$CHALLENGE" "$LABEL" "$EXIT_CODE"
 
 echo "[+] evidence: $OUTPUT_PATH"
 echo "[+] metadata: $META_PATH"
