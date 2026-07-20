@@ -76,7 +76,7 @@
     "target": {
       "type": ["string", "null"],
       "description": "Target host or URL the event pertained to. null when not target-specific.",
-      "examples": ["https://www.notion.so/api/v3/getPublicPageData", null]
+      "examples": ["<PROGRAM_HOST>/api/v3/endpointA", null]
     },
     "action": {
       "type": ["object", "null"],
@@ -172,7 +172,7 @@
       "event": "hypothesis.evaluated",
       "ts": "2026-07-15T15:10:00Z",
       "actor": "opencode",
-      "target": "https://www.notion.so/api/v3/getPublicPageData",
+      "target": "<PROGRAM_HOST>/api/v3/endpointA",
       "action": {"tool": "curl", "exit": 0, "duration_ms": 1200},
       "artifacts": [
         {

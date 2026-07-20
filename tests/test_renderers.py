@@ -64,7 +64,7 @@ def _event(
 
 def _outcome(
     *,
-    report_id: str = "3865854",
+    report_id: str = "1234567",
     state: str = "triaged",
     occurred_at: str = "2026-07-15T15:00:00Z",
     source: str = "manual",
@@ -214,7 +214,7 @@ class TestRenderOutcomesOnly:
             _outcome(state="new", occurred_at="2026-07-15T10:00:00Z"),
             _outcome(state="triaged", occurred_at="2026-07-15T12:00:00Z"),
             _outcome(state="duplicate", occurred_at="2026-07-15T15:00:00Z",
-                     duplicate_of="3485596", duplicate_original_state="informative"),
+                     duplicate_of="7654321", duplicate_original_state="informative"),
         ]
         summary = renderers.render_finding_summary([], outcomes)
         assert summary["platform_state"] == "duplicate"
@@ -222,7 +222,7 @@ class TestRenderOutcomesOnly:
         assert summary["reportability"] == "do_not_report"  # derived from outcome
 
     def test_reportability_do_not_report_for_duplicate(self):
-        outcomes = [_outcome(state="duplicate", duplicate_of="3485596",
+        outcomes = [_outcome(state="duplicate", duplicate_of="7654321",
                              duplicate_original_state="informative")]
         summary = renderers.render_finding_summary([], outcomes)
         assert summary["reportability"] == "do_not_report"
@@ -315,16 +315,16 @@ class TestRenderBoth:
             ),
         ]
         outcomes = [
-            _outcome(report_id="3865854", state="triaged",
+            _outcome(report_id="1234567", state="triaged",
                      occurred_at="2026-07-15T11:00:00Z"),
-            _outcome(report_id="3865854", state="duplicate",
+            _outcome(report_id="1234567", state="duplicate",
                      occurred_at="2026-07-15T16:00:00Z",
-                     duplicate_of="3485596",
+                     duplicate_of="7654321",
                      duplicate_original_state="informative"),
         ]
         summary = renderers.render_finding_summary(events, outcomes)
         assert summary["workspace_id"] == "wid-aaa"  # from event
-        assert summary["report_id"] == "3865854"  # from outcome
+        assert summary["report_id"] == "1234567"  # from outcome
         assert summary["platform_state"] == "duplicate"  # latest outcome
         assert summary["technical_verdict"] == "confirmed"  # latest event
         # reportability: latest event says "report"; outcome says
@@ -378,7 +378,7 @@ class TestDeterminism:
         outcomes = [
             _outcome(state="triaged", occurred_at="2026-07-15T11:00:00Z"),
             _outcome(state="duplicate", occurred_at="2026-07-15T16:00:00Z",
-                     duplicate_of="3485596",
+                     duplicate_of="7654321",
                      duplicate_original_state="informative"),
         ]
         s1 = renderers.render_finding_summary(events, outcomes)
@@ -450,7 +450,7 @@ class TestNoContradictions:
             _event(ts="2026-07-15T10:00:00Z", technical_verdict="confirmed",
                    reportability="do_not_report"),
         ]
-        outcomes = [_outcome(state="duplicate", duplicate_of="3485596",
+        outcomes = [_outcome(state="duplicate", duplicate_of="7654321",
                               duplicate_original_state="informative",
                               occurred_at="2026-07-15T15:00:00Z")]
         # The outcome is duplicate and the event says do_not_report —
@@ -528,7 +528,7 @@ class TestReportabilityConflict:
             _event(ts="2026-07-15T10:00:00Z", reportability="report"),
         ]
         outcomes = [
-            _outcome(state="duplicate", duplicate_of="3485596",
+            _outcome(state="duplicate", duplicate_of="7654321",
                      duplicate_original_state="informative",
                      occurred_at="2026-07-15T15:00:00Z"),
         ]
@@ -559,7 +559,7 @@ class TestReportabilityConflict:
         """Event says 'do_not_report' and outcome is 'duplicate' —
         consistent, no reportability_conflict."""
         events = [_event(ts="2026-07-15T10:00:00Z", reportability="do_not_report")]
-        outcomes = [_outcome(state="duplicate", duplicate_of="3485596",
+        outcomes = [_outcome(state="duplicate", duplicate_of="7654321",
                              duplicate_original_state="informative",
                              occurred_at="2026-07-15T15:00:00Z")]
         contradictions = renderers.detect_contradictions(events, outcomes)
@@ -658,7 +658,7 @@ class TestImpactConflict:
                    reportability="do_not_report"),
         ]
         outcomes = [
-            _outcome(state="duplicate", duplicate_of="3485596",
+            _outcome(state="duplicate", duplicate_of="7654321",
                      duplicate_original_state="informative",
                      occurred_at="2026-07-15T15:00:00Z"),
         ]

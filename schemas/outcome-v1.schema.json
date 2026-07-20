@@ -2,7 +2,7 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "$id": "https://security-lab/schemas/outcome-v1.schema.json",
   "title": "Finding Outcome Event v1",
-  "description": "Canonical schema for a single line in an engagement's outcomes.jsonl\n(append-only, gitignored). Per roadmap section 7.2 and ADR-0002, the outcome\nevent stream is the highest-authority source for platform state in the\nfinding status reducer (lib/finding_events.derive_finding_status).\n\nThe store lives at <engagement>/.lab/outcomes.jsonl (e.g.\nbounties/notion/.lab/outcomes.jsonl) and is written exclusively via\nlib/finding_events.OutcomeStore.append, which uses fcntl.flock +\nsymlink rejection + idempotency on outcome_id and on\n(report_id, state, occurred_at).\n\nField note (handoff section 5 contradiction): use the FLAT\n`bounty_amount` + `bounty_currency` fields, NOT a nested `bounty` object.\nThe roadmap section 7.2 example showed `\"bounty\": null`; the API and\ntests use `bounty_amount` + `bounty_currency`. This schema codifies the\nflat form.",
+  "description": "Canonical schema for a single line in an engagement's outcomes.jsonl\n(append-only, gitignored). Per roadmap section 7.2 and ADR-0002, the outcome\nevent stream is the highest-authority source for platform state in the\nfinding status reducer (lib/finding_events.derive_finding_status).\n\nThe store lives at <engagement>/.lab/outcomes.jsonl (e.g.\n<engagement>/.lab/outcomes.jsonl) and is written exclusively via\nlib/finding_events.OutcomeStore.append, which uses fcntl.flock +\nsymlink rejection + idempotency on outcome_id and on\n(report_id, state, occurred_at).\n\nField note (handoff section 5 contradiction): use the FLAT\n`bounty_amount` + `bounty_currency` fields, NOT a nested `bounty` object.\nThe roadmap section 7.2 example showed `\"bounty\": null`; the API and\ntests use `bounty_amount` + `bounty_currency`. This schema codifies the\nflat form.",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -28,9 +28,9 @@
     },
     "report_id": {
       "type": "string",
-      "description": "HackerOne report ID this outcome pertains to. Digits only as a string\n(e.g. '3865854'). MUST match a report_id recorded in some workspace's\nrecord.json (loose linkage — the store does not enforce it, the\nrecord-outcome command does).",
+      "description": "HackerOne report ID this outcome pertains to. Digits only as a string\n(e.g. '1234567'). MUST match a report_id recorded in some workspace's\nrecord.json (loose linkage — the store does not enforce it, the\nrecord-outcome command does).",
       "minLength": 1,
-      "examples": ["3865854", "3485596"]
+      "examples": ["1234567", "7654321"]
     },
     "state": {
       "type": "string",
@@ -51,7 +51,7 @@
     "duplicate_of": {
       "type": ["string", "null"],
       "description": "HackerOne report ID of the ORIGINAL report when state='duplicate'.\nRequired when state='duplicate' (enforced by the record-outcome command\nand by the reducer's contract; the schema allows null for non-duplicate\nstates).",
-      "examples": ["3485596", null]
+      "examples": ["7654321", null]
     },
     "duplicate_original_state": {
       "type": ["string", "null"],
@@ -112,9 +112,9 @@
     {
       "schema": "security-lab/finding-outcome/v1",
       "outcome_id": "f81d4fae-7dec-11d0-a765-00a0c91e6bf6",
-      "report_id": "3865854",
+      "report_id": "1234567",
       "state": "duplicate",
-      "duplicate_of": "3485596",
+      "duplicate_of": "7654321",
       "duplicate_original_state": "informative",
       "occurred_at": "2026-07-15T15:55:00Z",
       "source": "human_h1_import",

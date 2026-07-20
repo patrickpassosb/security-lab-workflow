@@ -104,8 +104,8 @@
         },
         "workspace": {
           "type": "string",
-          "description": "Workspace name (e.g. 'link-share-bypass').",
-          "examples": ["link-share-bypass"]
+          "description": "Workspace name (e.g. 'case-002').",
+          "examples": ["case-002"]
         },
         "artifact": {
           "type": "string",
@@ -215,7 +215,7 @@
       },
       "source": {
         "engagement": "bounty-notion",
-        "workspace": "link-share-bypass",
+        "workspace": "case-002",
         "artifact": "evidence/01_response.txt",
         "artifact_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
         "platform_outcome": "duplicate"

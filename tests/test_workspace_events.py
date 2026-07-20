@@ -663,7 +663,7 @@ class TestWorkspaceIntegration:
 
         ws = tmp_path / "ws"
         wid = ws_mod.get_or_create_workspace_id(
-            ws, workspace_type="bounty", name="link-share-bypass",
+            ws, workspace_type="bounty", name="case-002",
             engagement="bounty-notion",
         )
         ledger = fe.WorkspaceEventLedger(ws / ".lab" / "events.jsonl")

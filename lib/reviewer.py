@@ -210,7 +210,7 @@ def _check_mutation_allowlist(patch_text: str) -> dict[str, Any]:
         )
     try:
         import tempfile
-        import labutil
+
         # Write the patch to a temp file so we can call validate_candidate_patch
         with tempfile.NamedTemporaryFile(mode="w", suffix=".patch", delete=False) as tf:
             tf.write(patch_text)

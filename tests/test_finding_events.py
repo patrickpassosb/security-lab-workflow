@@ -11,7 +11,7 @@ Covers (per SI-012 / roadmap section 20.5):
   - derive_finding_status() returns the correct latest state
 
 All tests use isolated temp logs (tmp_path fixture) — the real
-bounties/notion/.lab/outcomes.jsonl is NEVER touched by this suite.
+<engagement>/.lab/outcomes.jsonl is NEVER touched by this suite.
 
 Run: PYTHONPATH=lib pytest tests/test_finding_events.py -v
 """
@@ -53,7 +53,7 @@ def store(store_path: Path) -> fe.OutcomeStore:
 
 def _make_event(
     *,
-    report_id: str = "3865854",
+    report_id: str = "1234567",
     state: str = "triaged",
     occurred_at: str = "2026-07-15T15:00:00Z",
     source: str = "manual",
@@ -93,8 +93,8 @@ def workspace_with_record(tmp_path: Path) -> Path:
     pkg.mkdir(parents=True)
     record = {
         "schema": "security-lab/hackerone-submission/v1",
-        "report_id": "3865854",
-        "url": "https://hackerone.com/reports/3865854",
+        "report_id": "1234567",
+        "url": "https://hackerone.com/reports/1234567",
         "submitted_at": "2026-07-15T15:42:00Z",
         "submitted_by": "",
         "manifest_sha256": "abc",
@@ -516,7 +516,7 @@ class TestInvalidEvent:
             store.append(event)
 
     def test_bad_duplicate_original_state_rejected(self, store: fe.OutcomeStore):
-        event = _make_event(state="duplicate", duplicate_of="3485596")
+        event = _make_event(state="duplicate", duplicate_of="7654321")
         event["duplicate_original_state"] = "bogus"
         with pytest.raises(fe.OutcomeValidationError):
             store.append(event)
@@ -545,7 +545,7 @@ class TestInvalidEvent:
         events = store.list_events()
         assert len(events) == 2
         # Reducer takes the latest.
-        status = store.derive_finding_status("3865854")
+        status = store.derive_finding_status("1234567")
         assert status["platform_state"] == "new"
 
 
@@ -559,18 +559,18 @@ class TestReceiptLinkage:
         """An outcome event references a report_id that has a record.json in
         the workspace. derive_finding_status() should link them and return
         submission_state='recorded'."""
-        report_id = "3865854"
+        report_id = "1234567"
         store.append(_make_event(
             report_id=report_id,
             state="duplicate",
-            duplicate_of="3485596",
+            duplicate_of="7654321",
             duplicate_original_state="informative",
             occurred_at="2026-07-15T15:55:00Z",
         ))
         status = store.derive_finding_status(report_id, workspace_path=workspace_with_record)
         assert status["submission_state"] == "recorded"
         assert status["platform_state"] == "duplicate"
-        assert status["duplicate_of"] == "3485596"
+        assert status["duplicate_of"] == "7654321"
         assert status["duplicate_original_state"] == "informative"
 
     def test_event_with_no_record_is_not_submitted(self, store: fe.OutcomeStore, tmp_path: Path):
@@ -590,7 +590,7 @@ class TestReceiptLinkage:
         compat — the human may have recorded a different ID)."""
         store.append(_make_event(report_id="OTHER-ID"))
         status = store.derive_finding_status("OTHER-ID", workspace_path=workspace_with_record)
-        # record.json has report_id='3865854' but we're asking about 'OTHER-ID'.
+        # record.json has report_id='1234567' but we're asking about 'OTHER-ID'.
         # The status reducer reads record.json from the workspace; the report_id
         # mismatch downgrades submission_state to 'submitted'.
         assert status["submission_state"] in ("submitted", "not_submitted")
@@ -616,30 +616,30 @@ class TestDeriveFindingStatus:
     def test_latest_state_wins(self, store: fe.OutcomeStore):
         store.append(_make_event(state="new", occurred_at="2026-07-15T10:00:00Z"))
         store.append(_make_event(state="triaged", occurred_at="2026-07-15T12:00:00Z"))
-        store.append(_make_event(state="duplicate", duplicate_of="3485596",
+        store.append(_make_event(state="duplicate", duplicate_of="7654321",
                                  duplicate_original_state="informative",
                                  occurred_at="2026-07-15T15:55:00Z"))
-        status = store.derive_finding_status("3865854")
+        status = store.derive_finding_status("1234567")
         assert status["platform_state"] == "duplicate"
         assert status["platform_state_at"] == "2026-07-15T15:55:00Z"
-        assert status["duplicate_of"] == "3485596"
+        assert status["duplicate_of"] == "7654321"
         assert status["duplicate_original_state"] == "informative"
         assert status["last_event_ts"] == "2026-07-15T15:55:00Z"
 
     def test_duplicate_state_is_do_not_report(self, store: fe.OutcomeStore):
-        store.append(_make_event(state="duplicate", duplicate_of="3485596",
+        store.append(_make_event(state="duplicate", duplicate_of="7654321",
                                  duplicate_original_state="informative"))
-        status = store.derive_finding_status("3865854")
+        status = store.derive_finding_status("1234567")
         assert status["reportability"] == "do_not_report"
 
     def test_informative_state_is_do_not_report(self, store: fe.OutcomeStore):
         store.append(_make_event(state="informative"))
-        status = store.derive_finding_status("3865854")
+        status = store.derive_finding_status("1234567")
         assert status["reportability"] == "do_not_report"
 
     def test_resolved_state_is_do_not_report(self, store: fe.OutcomeStore):
         store.append(_make_event(state="resolved"))
-        status = store.derive_finding_status("3865854")
+        status = store.derive_finding_status("1234567")
         assert status["reportability"] == "do_not_report"
 
     def test_triaged_state_is_gather_more_evidence(self, store: fe.OutcomeStore):
@@ -647,25 +647,25 @@ class TestDeriveFindingStatus:
         returns 'gather_more_evidence' (conservative — the Phase 2
         event-ledger reducer will tighten this)."""
         store.append(_make_event(state="triaged"))
-        status = store.derive_finding_status("3865854")
+        status = store.derive_finding_status("1234567")
         assert status["reportability"] == "gather_more_evidence"
 
     def test_new_state_is_gather_more_evidence(self, store: fe.OutcomeStore):
         store.append(_make_event(state="new"))
-        status = store.derive_finding_status("3865854")
+        status = store.derive_finding_status("1234567")
         assert status["reportability"] == "gather_more_evidence"
 
     def test_bounty_awarded_is_gather_more_evidence(self, store: fe.OutcomeStore):
         """bounty_awarded is NOT in the do_not_report set (the platform has
         accepted it, but we may want to record the bounty amount)."""
         store.append(_make_event(state="bounty_awarded", bounty_amount=250))
-        status = store.derive_finding_status("3865854")
+        status = store.derive_finding_status("1234567")
         assert status["reportability"] == "gather_more_evidence"
         assert status["platform_state"] == "bounty_awarded"
 
     def test_bounty_paid_is_do_not_report(self, store: fe.OutcomeStore):
         store.append(_make_event(state="bounty_paid", bounty_amount=250))
-        status = store.derive_finding_status("3865854")
+        status = store.derive_finding_status("1234567")
         assert status["reportability"] == "do_not_report"
 
     def test_filters_by_report_id_for_reducer(self, store: fe.OutcomeStore):
@@ -696,14 +696,14 @@ class TestDeriveFindingStatus:
             encoding="utf-8",
         )
         store.append(_make_event())
-        status = store.derive_finding_status("3865854", workspace_path=ws)
+        status = store.derive_finding_status("1234567", workspace_path=ws)
         assert status["workspace_id"] == wid
 
     def test_workspace_id_none_when_no_workspace_json(self, store: fe.OutcomeStore, tmp_path: Path):
         ws = tmp_path / "ws"
         ws.mkdir()
         store.append(_make_event())
-        status = store.derive_finding_status("3865854", workspace_path=ws)
+        status = store.derive_finding_status("1234567", workspace_path=ws)
         assert status["workspace_id"] is None
 
     def test_workspace_id_none_for_symlinked_workspace_json(self, store: fe.OutcomeStore,
@@ -715,7 +715,7 @@ class TestDeriveFindingStatus:
         evil.write_text(json.dumps({"workspace_id": "evil"}), encoding="utf-8")
         os.symlink(evil, ws / ".lab" / "workspace.json")
         store.append(_make_event())
-        status = store.derive_finding_status("3865854", workspace_path=ws)
+        status = store.derive_finding_status("1234567", workspace_path=ws)
         assert status["workspace_id"] is None
 
 
@@ -814,12 +814,12 @@ class TestEndToEnd:
     def test_record_duplicate_and_derive(
         self, store: fe.OutcomeStore, workspace_with_record: Path
     ):
-        """End-to-end: record a Duplicate outcome for the H1 #3865854 finding
+        """End-to-end: record a Duplicate outcome for the H1 #1234567 finding
         (the SI-013 FIRST DATA MIGRATION scenario) and derive the status."""
         event = fe.make_outcome_event(
-            report_id="3865854",
+            report_id="1234567",
             state="duplicate",
-            duplicate_of="3485596",
+            duplicate_of="7654321",
             duplicate_original_state="informative",
             occurred_at="2026-07-15T15:55:00Z",
             source="human_h1_import",
@@ -828,12 +828,12 @@ class TestEndToEnd:
         oid = store.append(event)
         assert oid == event["outcome_id"]
 
-        status = store.derive_finding_status("3865854", workspace_path=workspace_with_record)
+        status = store.derive_finding_status("1234567", workspace_path=workspace_with_record)
         assert status["schema"] == fe.FINDING_STATUS_SCHEMA
-        assert status["report_id"] == "3865854"
+        assert status["report_id"] == "1234567"
         assert status["platform_state"] == "duplicate"
         assert status["platform_state_at"] == "2026-07-15T15:55:00Z"
-        assert status["duplicate_of"] == "3485596"
+        assert status["duplicate_of"] == "7654321"
         assert status["duplicate_original_state"] == "informative"
         assert status["submission_state"] == "recorded"
         assert status["reportability"] == "do_not_report"
@@ -853,7 +853,7 @@ class TestEndToEnd:
         before_mtime = record_path.stat().st_mtime_ns
 
         store.append(fe.make_outcome_event(
-            report_id="3865854", state="duplicate", duplicate_of="3485596",
+            report_id="1234567", state="duplicate", duplicate_of="7654321",
             duplicate_original_state="informative",
             occurred_at="2026-07-15T15:55:00Z",
         ))
@@ -871,10 +871,10 @@ class TestEndToEnd:
         validator = jsonschema.Draft7Validator(schema)
 
         store.append(fe.make_outcome_event(
-            report_id="3865854", state="duplicate", duplicate_of="3485596",
+            report_id="1234567", state="duplicate", duplicate_of="7654321",
             duplicate_original_state="informative",
             occurred_at="2026-07-15T15:55:00Z",
         ))
-        status = store.derive_finding_status("3865854", workspace_path=workspace_with_record)
+        status = store.derive_finding_status("1234567", workspace_path=workspace_with_record)
         errors = list(validator.iter_errors(status))
         assert not errors, f"status fails schema: {errors}"

@@ -1,0 +1,11 @@
+# Engagement scope — valid-ctf-eng
+# Auto-created by lab-new. Update with the full scope from the program page.
+
+engagement:
+  name: "valid-ctf-eng"
+  type: "ctf"
+
+in_scope: []
+# Add in-scope targets manually, e.g.:
+#  - pattern: "example.com"
+#    note: "Main web app"

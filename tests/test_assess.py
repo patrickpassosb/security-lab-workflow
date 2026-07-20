@@ -12,7 +12,7 @@ Covers (per roadmap section 12.1-12.2 + handoff section 6.3 SI-015):
   - Exit codes: 0=PASS, 1=BLOCK, 2=HOLD, 3=error
 
 All tests use tmp_path fixtures and build isolated engagement trees. The
-real bounties/notion/.lab/ and improvement/config/submission.yaml are
+real <engagement>/.lab/ and improvement/config/submission.yaml are
 NEVER touched by this suite.
 
 Run: PYTHONPATH=lib pytest tests/test_assess.py -v
@@ -56,8 +56,8 @@ def lab(tmp_path: Path, monkeypatch) -> Path:
     Creates:
       <lab>/
         improvement/config/submission.yaml   (tracked thresholds)
-        bounties/notion/.lab/                (engagement-private store)
-        bounties/notion/findings/<ws>/       (the finding workspace)
+        <engagement>/.lab/                (engagement-private store)
+        <engagement>/findings/<ws>/       (the finding workspace)
     """
     lab = tmp_path / "lab"
     (lab / "improvement" / "config").mkdir(parents=True)
@@ -91,7 +91,7 @@ submission:
 def _write_report(
     ws: Path,
     *,
-    title: str = "Unauthenticated workspace metadata leak via getPublicPageData endpoint",
+    title: str = "Unauthenticated workspace metadata leak via endpointA endpoint",
     engagement: str = "bounty-notion",
     h1_report_id: str | None = None,
 ) -> Path:
@@ -100,15 +100,15 @@ def _write_report(
         "schema": "security-lab/hackerone-report/v1",
         "engagement": engagement,
         "platform": "hackerone",
-        "program": "Notion",
+        "program": "<PROGRAM>",
         "program_url": "https://hackerone.com/notion",
         "title": title,
         "asset_id": "notion-frontend",
-        "asset_name": "Notion Frontend",
+        "asset_name": "<PROGRAM> Frontend",
         "weakness": "Information Disclosure",
         "severity": {"rating": "low", "score": 3.7},
         "finding_type": "live_web",
-        "live_targets": ["https://www.notion.so"],
+        "live_targets": ["<PROGRAM_HOST>"],
         "attachments": [],
         "testing": {"manual_only": True},
     }
@@ -124,7 +124,7 @@ def _write_report(
 
 
 def _make_workspace(
-    lab: Path, name: str = "link-share-bypass"
+    lab: Path, name: str = "case-002"
 ) -> Path:
     """Create a finding workspace under the lab's engagement."""
     ws = lab / "bounties" / "notion" / "findings" / name
@@ -232,10 +232,10 @@ class TestAssessBlock:
         """BLOCK (exit 1) when the latest outcome is duplicate."""
         ws = _make_workspace(lab)
         _write_report(ws)
-        _write_record(ws, "3865854")
+        _write_record(ws, "1234567")
         _append_outcome(
-            lab, "3865854", "duplicate",
-            duplicate_of="3485596",
+            lab, "1234567", "duplicate",
+            duplicate_of="7654321",
             duplicate_original_state="informative",
         )
         rc = cli.main(["assess", str(ws)])
@@ -243,7 +243,7 @@ class TestAssessBlock:
         assert rc == cli.ASSESS_EXIT_BLOCK == 1
         assert "ASSESS: BLOCK" in out
         assert "closed as duplicate" in out
-        assert "3485596" in out
+        assert "7654321" in out
 
     def test_block_when_platform_state_informative(self, lab, submission_config, capsys):
         """BLOCK (exit 1) when the latest outcome is informative."""
@@ -265,14 +265,14 @@ class TestAssessBlock:
         ws = _make_workspace(lab)
         _write_report(
             ws,
-            title="Unauthenticated workspace metadata leak via getPublicPageData endpoint",
+            title="Unauthenticated workspace metadata leak via endpointA endpoint",
         )
         _write_record(ws, "999")
         _write_precedents(lab, [
             {
                 "program": "notion",
-                "behavior": "getPublicPageData metadata leak",
-                "report_id": "3485596",
+                "behavior": "endpointA metadata leak",
+                "report_id": "7654321",
                 "state": "informative",
                 "date": "2026-07-15",
                 "note": "Program assessed metadata as acceptable",
@@ -358,7 +358,7 @@ class TestAssessHold:
     ):
         """HOLD (exit 2) when the behavior matches a candidate_informative
         precedent (soft signal — not a hard BLOCK)."""
-        ws = _make_workspace(lab, name="splunk-hec-token-leak")
+        ws = _make_workspace(lab, name="case-004-workspace")
         _write_report(
             ws,
             title=(
@@ -401,9 +401,9 @@ class TestAssessPass:
         """PASS (exit 0) when all conditions are met: technical_verdict
         confirmed, impact demonstrated, confidence >= threshold, no
         precedent match."""
-        ws = _make_workspace(lab, name="sdk-path-traversal-bypass")
+        ws = _make_workspace(lab, name="case-001-workspace")
         _write_report(ws, title="SDK path traversal bypass via %zz encoding")
-        _write_record(ws, "3861868")
+        _write_record(ws, "1111111")
         # No precedents — no precedent match.
         _patch_status(
             monkeypatch,
@@ -460,9 +460,9 @@ class TestAssessExitCodes:
     def test_exit_1_block_duplicate(self, lab, submission_config):
         ws = _make_workspace(lab)
         _write_report(ws)
-        _write_record(ws, "3865854")
+        _write_record(ws, "1234567")
         _append_outcome(
-            lab, "3865854", "duplicate", duplicate_of="3485596",
+            lab, "1234567", "duplicate", duplicate_of="7654321",
             duplicate_original_state="informative",
         )
         assert cli.main(["assess", str(ws)]) == 1
@@ -504,10 +504,10 @@ class TestAssessExitCodes:
         fm = {
             "schema": "security-lab/hackerone-report/v1",
             "platform": "hackerone",
-            "program": "Notion",
+            "program": "<PROGRAM>",
             "title": "test",
             "asset_id": "notion-frontend",
-            "asset_name": "Notion Frontend",
+            "asset_name": "<PROGRAM> Frontend",
             "weakness": "Information Disclosure",
             "severity": {"rating": "low", "score": 3.7},
             "finding_type": "live_web",
@@ -560,8 +560,8 @@ class TestLoadPrecedents:
             "precedents": [
                 {
                     "program": "notion",
-                    "behavior": "getPublicPageData metadata leak",
-                    "report_id": "3485596",
+                    "behavior": "endpointA metadata leak",
+                    "report_id": "7654321",
                     "state": "informative",
                     "date": "2026-07-15",
                     "note": "Program assessed as acceptable",
@@ -581,7 +581,7 @@ class TestLoadPrecedents:
         )
         precedents = fe.load_precedents(eng)
         assert len(precedents) == 2
-        assert precedents[0]["behavior"] == "getPublicPageData metadata leak"
+        assert precedents[0]["behavior"] == "endpointA metadata leak"
         assert precedents[0]["state"] == "informative"
         assert precedents[1]["state"] == "candidate_informative"
         assert precedents[1]["report_id"] is None
@@ -706,7 +706,7 @@ class TestDeriveFindingStatusWrapper:
         assert status["reportability"] == "gather_more_evidence"
 
 
-# ─── Integration: assess against the real link-share-bypass scenario ──────────
+# ─── Integration: assess against the real case-002 scenario ──────────
 
 
 class TestAssessIntegration:
@@ -714,23 +714,23 @@ class TestAssessIntegration:
         self, lab, submission_config, capsys
     ):
         """End-to-end: simulate the SI-013 first data migration scenario
-        (record the #3865854 Duplicate outcome) and confirm assess BLOCKs.
+        (record the #1234567 Duplicate outcome) and confirm assess BLOCKs.
 
         This mirrors the manual verification step from the task:
             PYTHONPATH=lib python3 bin/lab-h1-report assess \
-                bounties/notion/findings/link-share-bypass/
+                <engagement>/findings/case-002/
             Expected: BLOCK (platform_state=duplicate)
         """
-        ws = _make_workspace(lab, name="link-share-bypass")
+        ws = _make_workspace(lab, name="case-002")
         _write_report(
             ws,
-            title="Unauthenticated workspace metadata leak via getPublicPageData endpoint",
+            title="Unauthenticated workspace metadata leak via endpointA endpoint",
         )
-        _write_record(ws, "3865854")
+        _write_record(ws, "1234567")
         # Record the Duplicate outcome (SI-013 first data migration).
         _append_outcome(
-            lab, "3865854", "duplicate",
-            duplicate_of="3485596",
+            lab, "1234567", "duplicate",
+            duplicate_of="7654321",
             duplicate_original_state="informative",
             occurred_at="2026-07-15T15:55:00Z",
         )
@@ -740,8 +740,8 @@ class TestAssessIntegration:
         _write_precedents(lab, [
             {
                 "program": "notion",
-                "behavior": "getPublicPageData metadata leak",
-                "report_id": "3485596",
+                "behavior": "endpointA metadata leak",
+                "report_id": "7654321",
                 "state": "informative",
                 "date": "2026-07-15",
                 "note": "Program assessed as acceptable",
@@ -753,7 +753,7 @@ class TestAssessIntegration:
         assert "ASSESS: BLOCK" in out
         # The BLOCK reason is the duplicate outcome, not the precedent.
         assert "closed as duplicate" in out
-        assert "3485596" in out
+        assert "7654321" in out
 
     def test_blocks_on_precedent_when_no_outcome(
         self, lab, submission_config, capsys, monkeypatch
@@ -761,17 +761,17 @@ class TestAssessIntegration:
         """When there is no platform outcome yet (platform_state=None),
         but the behavior matches a known Informative precedent, assess
         BLOCKs on the precedent match."""
-        ws = _make_workspace(lab, name="link-share-bypass")
+        ws = _make_workspace(lab, name="case-002")
         _write_report(
             ws,
-            title="Unauthenticated workspace metadata leak via getPublicPageData endpoint",
+            title="Unauthenticated workspace metadata leak via endpointA endpoint",
         )
         _write_record(ws, "999")  # different report_id, no outcome
         _write_precedents(lab, [
             {
                 "program": "notion",
-                "behavior": "getPublicPageData metadata leak",
-                "report_id": "3485596",
+                "behavior": "endpointA metadata leak",
+                "report_id": "7654321",
                 "state": "informative",
                 "date": "2026-07-15",
                 "note": "Program assessed as acceptable",

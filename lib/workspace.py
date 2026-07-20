@@ -156,12 +156,12 @@ def get_or_create_workspace_id(
 
     Args:
         workspace_path: Path to the workspace directory (e.g.
-            `bounties/notion/findings/link-share-bypass`). The `.lab/`
+            `<engagement>/findings/case-002`). The `.lab/`
             subdirectory is created inside it if missing.
         workspace_type: One of "bounty", "ctf", "cve". Used only when
             creating a new `workspace.json`; ignored when reading an
             existing one.
-        name: Workspace name (e.g. "link-share-bypass"). Stored as-is when
+        name: Workspace name (e.g. "case-002"). Stored as-is when
             creating; ignored when reading.
         engagement: Engagement name (e.g. "bounty-notion"). Stored as-is
             when creating; ignored when reading.

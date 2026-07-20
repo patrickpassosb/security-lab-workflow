@@ -958,14 +958,14 @@ def _match_precedent(
     from the finding's report_h1.md title or workspace name. If no match,
     skip the precedent check"):
       1. Substring match in either direction (case-insensitive). Catches
-         exact rewordings like "getPublicPageData metadata leak" vs
-         "...metadata leak via getPublicPageData...".
+         exact rewordings like "endpointA metadata leak" vs
+         "...metadata leak via endpointA...".
       2. Token overlap: if the precedent's behavior and the finding's
          behavior share enough distinctive tokens (>= 2 distinctive
          alphanumeric tokens, ignoring common words like "the", "via",
          "in", "leak", "unauthenticated"), it's a match. This catches
-         "getPublicPageData metadata leak" vs "Unauthenticated workspace
-         metadata leak via getPublicPageData endpoint" (shared tokens:
+         "endpointA metadata leak" vs "Unauthenticated workspace
+         metadata leak via endpointA endpoint" (shared tokens:
          getpublicpagedata, metadata — 2 distinctive tokens).
 
     Returns (matched_precedent_or_None, block_reason_or_None). When a

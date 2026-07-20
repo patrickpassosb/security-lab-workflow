@@ -190,7 +190,7 @@ class TestLazyMigration:
         (ws / "engagement.txt").write_text("bounty-notion\n", encoding="utf-8")
 
         ws_mod.get_or_create_workspace_id(
-            ws, workspace_type="bounty", name="link-share-bypass",
+            ws, workspace_type="bounty", name="case-002",
             engagement="bounty-notion",
         )
 

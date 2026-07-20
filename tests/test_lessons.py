@@ -160,7 +160,7 @@ class TestCaptureBasic:
     def test_capture_with_source(self, lessons_path, captured_by):
         source = {
             "engagement": "bounty-notion",
-            "workspace": "link-share-bypass",
+            "workspace": "case-002",
             "artifact": "evidence/01_response.txt",
             "artifact_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
             "platform_outcome": "duplicate",
@@ -682,7 +682,7 @@ class TestCaptureListIntegration:
             captured_by=captured_by,
             source={
                 "engagement": "bounty-notion",
-                "workspace": "link-share-bypass",
+                "workspace": "case-002",
                 "platform_outcome": "duplicate",
             },
             applicability={

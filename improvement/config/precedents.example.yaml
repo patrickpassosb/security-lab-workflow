@@ -6,7 +6,7 @@
 #
 # Real precedent files live at:
 #   <engagement>/.lab/precedents.yaml
-# e.g. bounties/notion/.lab/precedents.yaml (gitignored via .gitignore:10)
+# e.g. <engagement>/.lab/precedents.yaml (gitignored via .gitignore:10)
 #
 # Per SI-014 (handoff section 6.3) + roadmap section 12.4:
 # - This example file = tracked, public, synthetic placeholders.

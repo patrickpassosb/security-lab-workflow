@@ -34,7 +34,7 @@
       "type": "string",
       "description": "HackerOne report ID this status pertains to. Matches the report_id in\nthe outcome events and in the workspace's record.json.",
       "minLength": 1,
-      "examples": ["3865854"]
+      "examples": ["1234567"]
     },
     "technical_verdict": {
       "type": "string",
@@ -100,7 +100,7 @@
     "duplicate_of": {
       "type": ["string", "null"],
       "description": "Populated when platform_state='duplicate' — the H1 report ID of the\noriginal. Mirrored from the latest outcome event for convenience.",
-      "examples": ["3485596", null]
+      "examples": ["7654321", null]
     },
     "duplicate_original_state": {
       "type": ["string", "null"],
@@ -124,7 +124,7 @@
     {
       "schema": "security-lab/finding-status/v1",
       "workspace_id": null,
-      "report_id": "3865854",
+      "report_id": "1234567",
       "technical_verdict": "inconclusive",
       "reportability": "do_not_report",
       "platform_state": "duplicate",
@@ -133,7 +133,7 @@
       "confidence": 0.0,
       "submission_state": "recorded",
       "last_event_ts": "2026-07-15T15:55:00Z",
-      "duplicate_of": "3485596",
+      "duplicate_of": "7654321",
       "duplicate_original_state": "informative"
     },
     {

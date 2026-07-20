@@ -17,7 +17,7 @@ Phase 1 MVP scope:
 
 Storage layout (per handoff section 6.2 and SI-013):
   <engagement>/.lab/outcomes.jsonl   (gitignored, engagement-private)
-  e.g. bounties/notion/.lab/outcomes.jsonl
+  e.g. <engagement>/.lab/outcomes.jsonl
 
 The store does NOT live in the workspace (<finding>/submission/). It
 lives at the engagement level so multiple findings under the same
@@ -389,7 +389,7 @@ class OutcomeStore:
         Engagement names follow the `bounty-<program>` / `ctf-<name>` /
         `cve-<project>` convention. The program folder is the engagement
         name with the type prefix stripped:
-            bounty-notion  -> bounties/notion/.lab/outcomes.jsonl
+            bounty-notion  -> <engagement>/.lab/outcomes.jsonl
             ctf-example    -> ctfs/example/.lab/outcomes.jsonl
             cve-log4j      -> cves/log4j/.lab/outcomes.jsonl
 
