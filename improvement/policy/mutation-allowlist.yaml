@@ -1,0 +1,104 @@
+# Mutation allowlist — files a candidate MAY modify
+#
+# Per ADR-0001 (docs/adr/0001-tcb-runtime-split.md), this file is TCB:
+# tracked, public, human-reviewed. The candidate may read it but NEVER
+# modify it. The outer loop may NEVER modify it either.
+#
+# Per roadmap section 14: "The outer loop may modify: skills (the
+# candidate skill only), templates (the candidate's templates only),
+# subagent prompt templates, context reduction policies, submission
+# decision rubric, strategy selection policy."
+#
+# Everything else is implicitly DENIED. If a path is not listed here,
+# the candidate cannot modify it.
+#
+# The allowlist uses POSIX-style relative paths from the repo root.
+# Patterns may be exact paths or fnmatch-style globs (e.g. "engagements/*.yaml").
+# Matching is case-sensitive. A path is allowed iff it matches at least
+# one entry in `allowed` and matches NO entry in `denied_safety_critical`
+# (denied wins on conflict — safety-critical paths are never modifiable
+# even if they also happen to match an allow pattern).
+
+# ─── Allowed skill files (candidate may modify ONLY these) ───
+allowed:
+  # Bounty attack skill — the primary optimization target
+  - path: "skills/security/bounty-attack/SKILL.md"
+    description: "Bounty attack skill — the primary candidate optimization target"
+
+  # CTF skills — secondary optimization targets (after bounty MVP)
+  - path: "skills/security/recon/SKILL.md"
+    description: "Recon skill"
+  - path: "skills/security/web-attack/SKILL.md"
+    description: "Web attack skill"
+  - path: "skills/security/binary-attack/SKILL.md"
+    description: "Binary attack skill"
+  - path: "skills/security/crack/SKILL.md"
+    description: "Crack skill"
+  - path: "skills/security/stego-forensics/SKILL.md"
+    description: "Stego/forensics skill"
+  - path: "skills/security/report-ctf/SKILL.md"
+    description: "CTF report skill"
+
+  # Templates that the candidate may refine
+  - path: "templates/bounty/report_h1.md"
+    description: "Bounty report template"
+  - path: "templates/bounty/exploit.py"
+    description: "Bounty exploit template"
+  - path: "templates/ctf/exploit.py"
+    description: "CTF exploit template"
+
+# ─── Explicitly DENIED (safety-critical — never modifiable) ───
+# These are listed for documentation; the allowlist above is what matters
+# (default-deny: if not in allowed, it's denied). But these are called out
+# because modifying them would be a hard-failure safety violation.
+denied_safety_critical:
+  - path: "scope.yaml"
+    reason: "Global denied list — safety-critical"
+  - path: "engagements/*.yaml"
+    reason: "Engagement scope — safety-critical"
+  - path: "skills/security/scope/SKILL.md"
+    reason: "Scope skill — safety-critical (per handoff section 5)"
+  - path: "lib/labutil.py"
+    reason: "Audit logging — TCB"
+  - path: "lib/h1report.py"
+    reason: "H1 workflow — TCB"
+  - path: "lib/finding_events.py"
+    reason: "Outcome store — TCB"
+  - path: "lib/labeval.py"
+    reason: "Evaluator — TCB"
+  - path: "lib/labimprove.py"
+    reason: "Improvement runner — TCB"
+  - path: "lib/scoring.py"
+    reason: "Scoring engine — TCB"
+  - path: "lib/baseline.py"
+    reason: "Baseline freeze — TCB"
+  - path: "lib/renderers.py"
+    reason: "Renderers — TCB"
+  - path: "lib/lessons.py"
+    reason: "Lesson capture — TCB"
+  - path: "lib/workspace.py"
+    reason: "Workspace IDs — TCB"
+  - path: "bin/lab-scope"
+    reason: "Scope checker — TCB"
+  - path: "bin/lab-h1-report"
+    reason: "H1 report CLI — TCB"
+  - path: "bin/lab-eval"
+    reason: "Evaluation runner — TCB"
+  - path: "bin/lab-improve"
+    reason: "Improvement runner — TCB"
+  - path: "bin/lab-preflight"
+    reason: "Preflight gate — TCB"
+  - path: "improvement/policy/mutation-allowlist.yaml"
+    reason: "This file — TCB (cannot modify the allowlist)"
+  - path: "improvement/policy/safety-invariants.yaml"
+    reason: "Safety invariants — TCB"
+  - path: "improvement/config/*.yaml"
+    reason: "All config — TCB"
+  - path: "AGENTS.md"
+    reason: "Lab master document — TCB"
+  - path: "docs/SELF_IMPROVEMENT_ROADMAP.md"
+    reason: "Roadmap — TCB"
+  - path: "docs/adrs/*.md"
+    reason: "ADRs — TCB"
+  - path: "schemas/*.json"
+    reason: "Schemas — TCB"
