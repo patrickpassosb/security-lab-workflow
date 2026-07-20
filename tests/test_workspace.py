@@ -370,7 +370,7 @@ class TestReadWorkspaceId:
 
     def test_returns_none_when_missing(self, workspace_path: Path):
         """read_workspace_id() returns None when workspace.json is missing."""
-        assert ws_mod.read_workspace_id(workspace_path) is None
+        assert ws_mod.read_workspace_id(workspace_path) == ""
 
     def test_returns_none_for_symlink(self, workspace_path: Path, tmp_path: Path):
         """read_workspace_id() returns None when workspace.json is a symlink
@@ -379,7 +379,7 @@ class TestReadWorkspaceId:
         evil = tmp_path / "evil.json"
         evil.write_text(json.dumps({"workspace_id": "evil"}), encoding="utf-8")
         os.symlink(evil, workspace_path / ".lab" / "workspace.json")
-        assert ws_mod.read_workspace_id(workspace_path) is None
+        assert ws_mod.read_workspace_id(workspace_path) == ""
 
     def test_returns_none_for_corrupt_json(self, workspace_path: Path):
         """read_workspace_id() returns None when workspace.json is corrupt."""
@@ -387,7 +387,7 @@ class TestReadWorkspaceId:
         (workspace_path / ".lab" / "workspace.json").write_text(
             "{not json", encoding="utf-8"
         )
-        assert ws_mod.read_workspace_id(workspace_path) is None
+        assert ws_mod.read_workspace_id(workspace_path) == ""
 
     def test_returns_none_for_invalid_uuid(self, workspace_path: Path):
         """read_workspace_id() returns None when workspace_id is not a UUID."""
@@ -400,7 +400,7 @@ class TestReadWorkspaceId:
             "engagement": "",
             "created_at": "2026-07-15T15:08:20Z",
         }), encoding="utf-8")
-        assert ws_mod.read_workspace_id(workspace_path) is None
+        assert ws_mod.read_workspace_id(workspace_path) == ""
 
 
 # ─── Round-trip with finding_events ────────────────────────────────────────────

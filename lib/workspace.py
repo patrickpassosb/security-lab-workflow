@@ -234,7 +234,7 @@ def get_or_create_workspace_id(
     return new_uuid
 
 
-def read_workspace_id(workspace_path: Path | str) -> str | None:
+def read_workspace_id(workspace_path: Path | str) -> str:
     """Read the workspace UUID from `<workspace>/.lab/workspace.json`.
 
     Returns None when the file is missing, a symlink (defense-in-depth), or
@@ -249,16 +249,16 @@ def read_workspace_id(workspace_path: Path | str) -> str | None:
     ws = Path(workspace_path)
     wj = ws / WORKSPACE_FILE
     if not wj.is_file() or wj.is_symlink():
-        return None
+        return ""
     try:
         data = json.loads(wj.read_text(encoding="utf-8"))
     except (OSError, ValueError):
-        return None
+        return ""
     if not isinstance(data, dict):
-        return None
+        return ""
     wid = data.get("workspace_id")
     if not _is_valid_uuid(wid):
-        return None
+        return ""
     return str(wid)
 
 
