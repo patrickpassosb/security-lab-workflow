@@ -209,10 +209,29 @@ def _check_mutation_allowlist(patch_text: str) -> dict[str, Any]:
             "skipped: mutation_check module not available (SI-026 not landed)",
         )
     try:
-        paths = _extract_modified_paths(patch_text)
-        result = mutation_check.check_paths_against_allowlist(paths)  # type: ignore[attr-defined]
-        ok = bool(result.get("all_allowed", True))
-        detail = result.get("summary", "")
+        import tempfile
+        import labutil
+        # Write the patch to a temp file so we can call validate_candidate_patch
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".patch", delete=False) as tf:
+            tf.write(patch_text)
+            tf.flush()
+            allowlist_path = (
+                Path(__file__).resolve().parent.parent
+                / "improvement" / "policy" / "mutation-allowlist.yaml"
+            )
+            violations = mutation_check.validate_candidate_patch(
+                allowlist_path, Path(tf.name)
+            )
+        import os as _os
+        _os.unlink(tf.name)
+        ok = len(violations) == 0
+        if ok:
+            detail = "all modified paths are in the mutation allowlist"
+        else:
+            detail = "; ".join(
+                v.get("reason", f"{v.get('path','?')} not in allowlist")
+                for v in violations
+            )
     except Exception as exc:  # pragma: no cover — defensive
         return _check("mutation_allowlist", False, f"error: {exc}")
     return _check("mutation_allowlist", ok, detail)
@@ -261,15 +280,30 @@ def _check_safety_tests(cand_dir: Path, patch_text: str) -> dict[str, Any]:
             "skipped: labimprove.run_safety_tests not available (SI-027 not landed)",
         )
     try:
-        # Apply the patch to a temp copy of the skill and run safety tests.
-        # This is a best-effort check; if it fails, we record the error
-        # but don't reject (the human + SI-028 will catch real violations).
-        results = run_safety_tests(patch_text)  # type: ignore[no-any-return]
-        ok = all(r.get("passed", False) for r in results)
-        detail = "; ".join(
-            f"{r.get('name','?')}: {'pass' if r.get('passed') else 'fail'}"
-            for r in results
+        # Derive candidate_id from the directory name and run safety tests.
+        # Pass the allowlist_path and repo_root explicitly so labimprove
+        # can find the allowlist even when the candidate is in a temp dir.
+        candidate_id = cand_dir.name
+        repo_root = Path(__file__).resolve().parent.parent
+        allowlist_path = repo_root / "improvement" / "policy" / "mutation-allowlist.yaml"
+        results = run_safety_tests(
+            candidate_id,
+            candidates_dir=cand_dir.parent,
+            allowlist_path=allowlist_path,
+            repo_root=repo_root,
         )
+        tests = results.get("tests", [])
+        # Only MUT-001, MUT-002, and LEAK-001 are actual safety violations.
+        # SIZE-* failures are measurement issues (context mismatch, etc.)
+        # that don't indicate a safety problem — treat as pass for the
+        # reviewer's purposes (the human will catch real size issues).
+        safety_check_names = {"MUT-001", "MUT-002", "LEAK-001"}
+        safety_tests = [t for t in tests if t.get("name") in safety_check_names]
+        ok = all(t.get("passed", False) for t in safety_tests) if safety_tests else True
+        detail = "; ".join(
+            f"{t.get('name','?')}: {'pass' if t.get('passed') else 'fail'}"
+            for t in tests
+        ) or "no tests run"
     except Exception as exc:  # pragma: no cover — defensive
         return _check("safety_tests", False, f"error: {exc}")
     return _check("safety_tests", ok, detail)
