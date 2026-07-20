@@ -932,13 +932,338 @@ def make_outcome_event(
     return event
 
 
+# ─── Workspace event ledger (SI-017 / roadmap §7.1 + §21) ───────────────────────
+#
+# Append-only event ledger for a workspace. Stored at
+# `<workspace>/.lab/events.jsonl` (gitignored via the bounties/ctfs/cves/
+# findings top-level gitignore). Distinct from the outcome store
+# (`<engagement>/.lab/outcomes.jsonl`) — workspace events are per-workspace
+# and capture the agent's hypothesis/tool/observation stream; outcomes are
+# per-engagement and capture platform state (Duplicate, Triaged, etc.).
+#
+# The two streams JOIN on `workspace_id` (see roadmap §21.4 acceptance:
+# "Audit log and event ledger are joinable by workspace_id and session_id").
+#
+# Redacted projection: `redacted_projection()` strips report content
+# (observation, next_test) and keeps only the structural + technical fields
+# needed for audit. This is what gets projected to the global audit log —
+# never the raw observation text.
+
+WORKSPACE_EVENT_SCHEMA = "security-lab/agent-event/v1"
+
+# Fields stripped from the redacted audit projection. These carry the
+# agent's free-text observations and report-content-adjacent notes — they
+# must NOT leak to the shared audit log.
+_REDACTED_STRIP_TOP = frozenset({"observation", "next_test"})
+
+
+def _is_valid_event_id(value: Any) -> bool:
+    """Return True if `value` is a string that parses as a UUID."""
+    if not isinstance(value, str) or not value:
+        return False
+    try:
+        uuid.UUID(value)
+    except (ValueError, AttributeError, TypeError):
+        return False
+    return True
+
+
+def _validate_workspace_event(event: dict[str, Any]) -> None:
+    """Validate a workspace event against workspace-event-v1.
+
+    Two layers (mirrors outcome event validation):
+      1. Manual structural validation (always runs).
+      2. jsonschema draft-07 validation (when jsonschema is installed and
+         the schema file is available).
+
+    Raises OutcomeValidationError on any failure (reuses the outcome
+    error hierarchy — these are the same kind of validation failures).
+    """
+    if not isinstance(event, dict):
+        raise OutcomeValidationError("workspace event must be a JSON object")
+
+    # Layer 1: manual structural validation (always runs).
+    required = ("schema", "event_id", "workspace_id", "event", "ts", "actor")
+    for key in required:
+        if key not in event:
+            raise OutcomeValidationError(
+                f"workspace event missing required field: {key}"
+            )
+    if event.get("schema") != WORKSPACE_EVENT_SCHEMA:
+        raise OutcomeValidationError(
+            f"workspace event schema must be {WORKSPACE_EVENT_SCHEMA!r}, "
+            f"got {event.get('schema')!r}"
+        )
+    if not _is_valid_event_id(event.get("event_id")):
+        raise OutcomeValidationError(
+            f"event_id must be a UUID string, got {event.get('event_id')!r}"
+        )
+    if not _is_valid_event_id(event.get("workspace_id")):
+        raise OutcomeValidationError(
+            f"workspace_id must be a UUID string, got {event.get('workspace_id')!r}"
+        )
+    # session_id, iteration_id: when present and non-null must be UUIDs.
+    for key in ("session_id", "iteration_id"):
+        v = event.get(key)
+        if v is not None and not _is_valid_event_id(v):
+            raise OutcomeValidationError(
+                f"{key} must be a UUID string or null, got {v!r}"
+            )
+    if not isinstance(event.get("event"), str) or not event.get("event"):
+        raise OutcomeValidationError(
+            f"event must be a non-empty string, got {event.get('event')!r}"
+        )
+    if not _is_valid_timestamp(event.get("ts")):
+        raise OutcomeValidationError(
+            f"ts must be an ISO 8601 UTC timestamp, got {event.get('ts')!r}"
+        )
+    if not isinstance(event.get("actor"), str) or not event.get("actor"):
+        raise OutcomeValidationError(
+            f"actor must be a non-empty string, got {event.get('actor')!r}"
+        )
+    # technical_verdict enum (when present and non-null).
+    tv = event.get("technical_verdict")
+    if tv is not None and tv not in ("confirmed", "inconclusive", "not_vulnerable"):
+        raise OutcomeValidationError(
+            f"technical_verdict must be confirmed|inconclusive|not_vulnerable|null, "
+            f"got {tv!r}"
+        )
+    # reportability enum (when present and non-null).
+    rep = event.get("reportability")
+    if rep is not None and rep not in ("report", "do_not_report", "gather_more_evidence"):
+        raise OutcomeValidationError(
+            f"reportability must be report|do_not_report|gather_more_evidence|null, "
+            f"got {rep!r}"
+        )
+    # confidence: 0.0–1.0 when present and non-null.
+    conf = event.get("confidence")
+    if conf is not None:
+        if not isinstance(conf, (int, float)) or isinstance(conf, bool):
+            raise OutcomeValidationError(
+                f"confidence must be a number or null, got {conf!r}"
+            )
+        if conf < 0 or conf > 1:
+            raise OutcomeValidationError(
+                f"confidence must be in [0.0, 1.0], got {conf!r}"
+            )
+
+    # Layer 2: jsonschema validation (when available). Catches anything the
+    # manual check misses (additionalProperties on nested objects, artifact
+    # shapes, etc.).
+    try:
+        import jsonschema  # type: ignore[import-not-found]
+    except ImportError:
+        return
+    schema_path = (
+        Path(__file__).resolve().parent.parent
+        / "schemas"
+        / "workspace-event-v1.schema.json"
+    )
+    try:
+        with open(schema_path, encoding="utf-8") as f:
+            schema = json.load(f)
+    except (OSError, ValueError) as e:
+        labutil.log(
+            f"[!] workspace-event-v1 schema unavailable, manual validation only: {e}"
+        )
+        return
+    validator = jsonschema.Draft7Validator(schema)
+    errors = sorted(validator.iter_errors(event), key=lambda e: e.path)
+    if errors:
+        first = errors[0]
+        loc = ".".join(str(p) for p in first.path) or "<root>"
+        raise OutcomeValidationError(
+            f"workspace event fails schema at {loc}: {first.message}"
+        )
+
+
+def _normalize_workspace_event(event: dict[str, Any]) -> dict[str, Any]:
+    """Normalize a workspace event before appending.
+
+    - Fills optional keys with nulls so the stored shape is stable.
+    - Does NOT mutate the caller's dict.
+    """
+    out = dict(event)
+    for key in (
+        "session_id",
+        "iteration_id",
+        "hypothesis_id",
+        "target",
+        "action",
+        "artifacts",
+        "observation",
+        "technical_verdict",
+        "reportability",
+        "confidence",
+        "next_test",
+    ):
+        out.setdefault(key, None)
+    return out
+
+
+class WorkspaceEventLedger:
+    """Append-only event ledger for a workspace.
+
+    Events match `schemas/workspace-event-v1.schema.json`. Stored at
+    `<workspace>/.lab/events.jsonl` (gitignored via the bounties/ctfs/cves/
+    findings top-level gitignore).
+
+    The ledger is:
+      - **Append-only:** no in-place updates. Same event_id = no-op
+        (idempotent).
+      - **Concurrent-safe:** uses `fcntl.flock(LOCK_EX)` for the ENTIRE
+        read+check+write sequence, so idempotency is atomic with respect
+        to concurrent appends (mirrors `OutcomeStore.append()`).
+      - **Symlink-rejecting:** a symlinked `ledger_path` is refused
+        (defense-in-depth).
+      - **Crash-recovering:** a partial last line from a killed prior
+        append is quarantined under the lock before the new event lands
+        (same strategy as `OutcomeStore`).
+    """
+
+    def __init__(self, ledger_path: Path | str):
+        """Create a ledger backed by `ledger_path`.
+
+        `ledger_path` should be `<workspace>/.lab/events.jsonl`. The file
+        is NOT required to exist yet (created on first append). A
+        symlinked path is refused at append/read time (defense-in-depth).
+        """
+        self.path = Path(ledger_path)
+
+    # ─── Append ────────────────────────────────────────────────────────────
+
+    def append(self, event: dict[str, Any]) -> str:
+        """Append a workspace event. Returns the event_id.
+
+        - Validates the event against workspace-event-v1 (jsonschema when
+          available, manual fallback otherwise).
+        - Uses `fcntl.flock(LOCK_EX)` for the ENTIRE read+check+write
+          sequence, so idempotency is atomic with respect to concurrent
+          appends.
+        - Rejects a symlinked ledger_path (defense-in-depth).
+        - Idempotent: if an event with the same `event_id` already exists,
+          no-op (returns the existing event_id).
+        - Crash recovery: a partial last line from a killed prior append
+          is quarantined under the lock before the new event is written.
+        """
+        _validate_workspace_event(event)
+
+        if self.path.is_symlink():
+            raise OutcomeSymlinkError(
+                f"events path is a symlink (not allowed), refusing to append: {self.path}"
+            )
+
+        event_id = str(event["event_id"])
+        normalized = _normalize_workspace_event(event)
+        line = json.dumps(normalized, ensure_ascii=False, sort_keys=True) + "\n"
+
+        # Create parent dir (idempotent; safe outside the lock).
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+
+        with open(self.path, "a+", encoding="utf-8") as f:
+            # Re-check symlink after open (race defense).
+            if self.path.is_symlink():
+                raise OutcomeSymlinkError(
+                    f"events path became a symlink during append (not allowed): {self.path}"
+                )
+            try:
+                fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+                # Read existing content under the lock.
+                f.seek(0)
+                text = f.read()
+                existing_events, existing_lines, bad_indices = _parse_locked_content(text)
+                existing_ids = {e.get("event_id") for e in existing_events}
+                if event_id in existing_ids:
+                    # Idempotent no-op: same event_id already stored.
+                    return event_id
+                # Crash recovery: quarantine partial/corrupt lines under
+                # the lock before appending (same strategy as OutcomeStore).
+                if bad_indices:
+                    _quarantine_lines_locked(self.path, existing_lines, bad_indices)
+                    f.seek(0)
+                    f.truncate(0)
+                    good_text = "\n".join(
+                        ln for i, ln in enumerate(existing_lines) if i not in set(bad_indices)
+                    )
+                    if good_text and not good_text.endswith("\n"):
+                        good_text += "\n"
+                    f.write(good_text)
+                # Append the new event.
+                f.write(line)
+                f.flush()
+                os.fsync(f.fileno())
+            finally:
+                with contextlib.suppress(OSError):
+                    fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+        return event_id
+
+    # ─── Read ──────────────────────────────────────────────────────────────
+
+    def list_events(self, workspace_id: str | None = None) -> list[dict[str, Any]]:
+        """List events, optionally filtered by `workspace_id`.
+
+        Sorted by `ts` ascending (chronological order). Events with no `ts`
+        are sorted to the front (treated as earliest).
+        """
+        events = _read_lines(self.path)
+        if workspace_id is not None:
+            events = [e for e in events if str(e.get("workspace_id", "")) == str(workspace_id)]
+        events.sort(key=lambda e: str(e.get("ts", "")))
+        return events
+
+    # ─── Redacted projection ────────────────────────────────────────────────
+
+    def redacted_projection(self, workspace_id: str | None = None) -> list[dict[str, Any]]:
+        """Return events with report content + notes stripped.
+
+        This is what gets projected to the global audit log — never the raw
+        observation text or the agent's next-test suggestions. The audit
+        log is shared across all engagements and agents; observation text
+        can contain PII, secrets, or report content that must stay in the
+        workspace-private `events.jsonl`.
+
+        Redacts (stripped from every event):
+          - `observation` — free-text observation note
+          - `next_test` — suggested next test
+
+        Keeps (audit-safe — structural + technical + non-content):
+          - `schema`, `event_id`, `workspace_id`, `session_id`, `iteration_id`,
+            `hypothesis_id` — IDs (UUIDs / short opaque strings)
+          - `event`, `ts`, `actor` — event type, timestamp, who
+          - `target` — target host/URL (already scope-validated before the
+            tool ran; the audit log already records targets)
+          - `action.{tool, exit, duration_ms}` — tool name + exit code +
+            duration (no arguments/payloads — those don't exist in the
+            schema, see workspace-event-v1.action)
+          - `artifacts[].{sha256, size}` — hash + size only; the `path` field
+            is also kept (it's a relative path within the workspace, not
+            content)
+          - `technical_verdict`, `reportability`, `confidence` — the
+            agent's technical assessment (enum / number), not content
+
+        The returned dicts are NEW dicts (the originals in the ledger are
+        not mutated). The returned list is sorted by `ts` ascending, same
+        as `list_events()`.
+        """
+        events = self.list_events(workspace_id=workspace_id)
+        out: list[dict[str, Any]] = []
+        for e in events:
+            redacted = dict(e)
+            for key in _REDACTED_STRIP_TOP:
+                redacted.pop(key, None)
+            out.append(redacted)
+        return out
+
+
 # ─── __all__ ───────────────────────────────────────────────────────────────────
 
 __all__ = [
     "OUTCOME_SCHEMA",
     "FINDING_STATUS_SCHEMA",
     "OUTCOME_STATES",
+    "WORKSPACE_EVENT_SCHEMA",
     "OutcomeStore",
+    "WorkspaceEventLedger",
     "OutcomeError",
     "OutcomeValidationError",
     "OutcomeSymlinkError",
