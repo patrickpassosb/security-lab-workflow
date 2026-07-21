@@ -62,7 +62,7 @@ done
 
 echo
 echo "## Skills drafts (~/security-lab/skills/)"
-SKILL_COUNT=$(find $LAB/skills -name SKILL.md 2>/dev/null | wc -l)
+SKILL_COUNT=$(find "$LAB/skills" -name SKILL.md 2>/dev/null | wc -l)
 if [ "$SKILL_COUNT" -ge 15 ]; then
   ok "Skill drafts: $SKILL_COUNT"
 else
@@ -71,9 +71,9 @@ fi
 
 echo
 echo "## Content (cloned repos)"
-test -d "$LAB/sandboxes/vulhub" && ok "vulhub: $(du -sh $LAB/sandboxes/vulhub 2>/dev/null | cut -f1)" || fail "vulhub missing"
-test -d "$LAB/wordlists/SecLists" && ok "SecLists: $(du -sh $LAB/wordlists/SecLists 2>/dev/null | cut -f1)" || fail "SecLists missing"
-test -d "$LAB/wordlists/PayloadsAllTheThings" && ok "PayloadsAllTheThings: $(du -sh $LAB/wordlists/PayloadsAllTheThings 2>/dev/null | cut -f1)" || fail "PayloadsAllTheThings missing"
+test -d "$LAB/sandboxes/vulhub" && ok "vulhub: $(du -sh "$LAB/sandboxes/vulhub" 2>/dev/null | cut -f1)" || fail "vulhub missing"
+test -d "$LAB/wordlists/SecLists" && ok "SecLists: $(du -sh "$LAB/wordlists/SecLists" 2>/dev/null | cut -f1)" || fail "SecLists missing"
+test -d "$LAB/wordlists/PayloadsAllTheThings" && ok "PayloadsAllTheThings: $(du -sh "$LAB/wordlists/PayloadsAllTheThings" 2>/dev/null | cut -f1)" || fail "PayloadsAllTheThings missing"
 test -f "$LAB/wordlists/raft-medium-directories.txt" && ok "assetnote wordlist present" || warn "assetnote wordlist missing"
 
 echo

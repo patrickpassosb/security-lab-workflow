@@ -190,7 +190,7 @@ mkdir -p "$AGENTS_SKILLS"
 echo ">> Generating .agents/skills/ symlinks from skills/"
 
 for skill_tree in security gbrain obsidian; do
-  for skill_dir in "$INSTALL_DIR"/skills/$skill_tree/*/; do
+  for skill_dir in "$INSTALL_DIR"/skills/"$skill_tree"/*/; do
     [ -d "$skill_dir" ] || continue
     name="$(basename "$skill_dir")"
     target="$AGENTS_SKILLS/$name"
@@ -213,7 +213,7 @@ if [ -d "$OVERLAY_DIR" ]; then
   done
 fi
 
-echo "   Generated $(ls -1 "$AGENTS_SKILLS" | wc -l) skill symlinks"
+echo "   Generated $(find "$AGENTS_SKILLS" -mindepth 1 -maxdepth 1 | wc -l) skill symlinks"
 
 # ─── PATH check ─────────────────────────────────────────────────────────────
 case ":${PATH}:" in
@@ -223,6 +223,7 @@ case ":${PATH}:" in
     echo "!! $LOCAL_BIN is not on your PATH."
     echo "   Add this to your shell rc (~/.bashrc or ~/.zshrc):"
     echo ""
+    # shellcheck disable=SC2016 # literal string written to the user's shell profile
     echo '   export PATH="$HOME/.local/bin:$PATH"'
     echo ""
     echo "   Then start a new shell."

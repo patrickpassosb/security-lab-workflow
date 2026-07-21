@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- `Makefile`: `BIN_BASH_SCRIPTS` `$(shell ...)` assignment contained an
+  unbalanced `)` (case pattern) and a `#` (regex), which make parses as
+  grouping/comment — `make lint` crashed with a shell syntax error and
+  silently skipped shellcheck. Rewrote the detection without case/`#`.
+- `bin/lab-new`: the cd-then-create walk-up accepted the lab root itself
+  as a program folder whenever a `findings/` dir existed there, hijacking
+  workspaces into `<lab>/findings/<name>` and writing stray workspaces
+  into the live lab (including from the test suite). Program folders are
+  now only accepted when they live strictly under `$HACKING_LAB`.
+- shellcheck info-level findings in `install.sh`, `bin/ctf-health`,
+  `bin/lab-status` (quoting, `ls` -> `find`, intentional single-quote
+  directives).
+
+### Added
+- `tests/test_lab_new.py::TestProgramRootDetection`: regression tests
+  pinning that the lab root is never a program root and that real program
+  folders under `$HACKING_LAB` still get program mode.
+
 ## [0.1.0] - 2026-07-06
 
 ### Added

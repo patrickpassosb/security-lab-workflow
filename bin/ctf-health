@@ -96,6 +96,7 @@ log_install_result() {
   result="$3"
   if [ -f "solve_log.md" ]; then
     {
+      # shellcheck disable=SC2016 # printf format string is intentionally single-quoted
       printf '\n- Tool install %s `%s` via `%s` -> %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$tool" "$hint" "$result"
     } >> solve_log.md
   fi
