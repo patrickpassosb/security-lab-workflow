@@ -231,7 +231,7 @@ def audit(
         # empty strings (e.g. no workspace_id) are dropped cleanly.
         if v is None:
             continue
-        if isinstance(v, (int, float, bool)) or v:
+        if isinstance(v, int | float | bool) or v:
             entry[k] = v
     try:
         atomic_append_jsonl(AUDIT_LOG_PATH, entry)

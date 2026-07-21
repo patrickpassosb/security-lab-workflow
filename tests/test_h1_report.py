@@ -5,6 +5,7 @@ Task 1: reusable report parser + read-only `check` and `status` commands.
 Run: pytest tests/test_h1_report.py -q
 """
 
+import contextlib
 import copy
 import importlib.machinery
 import importlib.util
@@ -3158,10 +3159,8 @@ class TestAdversarialRound6:
         """P2: the fallback extract_host in h1report must also handle the
         ValueError (exercised via the fallback path when labutil import fails)."""
         from urllib.parse import urlparse
-        try:
-            urlparse("http://[::1,")
-        except ValueError:
-            pass  # confirm it raises
+        with contextlib.suppress(ValueError):
+            urlparse("http://[::1,")  # confirm it raises
         # The h1report module's extract_host (whether labutil or fallback)
         # must not raise.
         assert h1report.extract_host("http://[::1,") == ""
