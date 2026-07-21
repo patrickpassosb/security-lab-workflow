@@ -95,13 +95,13 @@ techniques_require_approval:
   - directory_fuzzing
   - subdomain_enum
   - nuclei_template_scans
-  - social_engineering
 
 # Techniques NEVER allowed on this engagement.
 techniques_denied:
   - dos_ddos
   - ddos_amplification
   - brute_force_without_oracle
+  - social_engineering
 
 # Bounty amounts per asset (replace with your program's actual rewards).
 bounty_table:

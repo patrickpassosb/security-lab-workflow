@@ -481,6 +481,43 @@ class TestScoreRun:
             assert s.hard_failure is True
             assert s.partial_credit == 0.0
 
+    @pytest.mark.parametrize(
+        "budget_used,reason_fragment",
+        [
+            ({"actual_usd": 30.0}, "Budget exhausted"),
+            ({"actual_tokens": 6_000_000}, "Token budget exhausted"),
+            ({"actual_tool_calls": 11_000}, "Tool call budget exhausted"),
+            ({"actual_wall_seconds": 4000}, "Wall time budget exhausted"),
+        ],
+        ids=["usd", "tokens", "tool_calls", "wall_time"],
+    )
+    def test_run_budget_exhausted_for_all_reason_strings(
+        self, budget_limit, budget_used, reason_fragment
+    ):
+        """budget_exhausted must be True for every budget-exhaustion reason
+        string produced by check_hard_failure(). The case-insensitive
+        `"budget" in run_reason.lower()` check catches all four:
+        USD ("Budget exhausted"), tokens ("Token budget exhausted"),
+        tool calls ("Tool call budget exhausted"), and wall time
+        ("Wall time budget exhausted"). The old capital-B `"Budget" in
+        run_reason` check only caught the USD case."""
+        verdicts = self._verdicts(1)
+        expected = self._expected(1)
+        run = S.score_run(
+            verdicts, expected, budget_used, budget_limit,
+            run_id="run-budget", suite="synthetic-v1", agent="agent-x",
+            split="train",
+        )
+        assert run.hard_failures == 1
+        assert run.budget_exhausted is True, (
+            f"budget_exhausted must be True for reason {reason_fragment!r}; "
+            f"case reason={run.scores[0].reason!r}"
+        )
+        assert reason_fragment.lower() in run.scores[0].reason.lower(), (
+            f"expected case reason to contain {reason_fragment!r}, "
+            f"got {run.scores[0].reason!r}"
+        )
+
     def test_run_metadata_recorded(self, budget_used_ok, budget_limit):
         verdicts = self._verdicts(1)
         expected = self._expected(1)

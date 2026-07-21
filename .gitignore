@@ -14,7 +14,6 @@ gbrain/learning/
 
 # ─── Real engagement scope files (private — never commit real target scope) ───
 # Synthetic example-* engagement files ARE committable (see allowlist below).
-# SI-000: real bounty-notion.yaml contains real Notion target scope.
 engagements/bounty-notion.yaml
 engagements/bounty-*.yaml
 !engagements/example-bounty.yaml

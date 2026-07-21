@@ -911,7 +911,11 @@ def _load_submission_thresholds(lab_root: Path) -> dict:
     try:
         import yaml  # type: ignore[import-not-found]
         data = yaml.safe_load(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+    except ImportError:
+        # PyYAML not installed — fall back to conservative defaults.
+        return defaults
+    except (OSError, ValueError, yaml.YAMLError):
+        # Unreadable / unparseable submission.yaml — fall back to defaults.
         return defaults
     if not isinstance(data, dict):
         return defaults

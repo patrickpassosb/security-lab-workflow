@@ -2,8 +2,8 @@
 
 **Status:** Ready for implementation handoff  
 **Date:** 2026-07-13  
-**Repository:** `/home/patrickpassos/security-lab`  
-**Implementation worktree:** `/home/patrickpassos/.config/superpowers/worktrees/security-lab/h1-reporting-mvp`  
+**Repository:** `<lab-root>`  
+**Implementation worktree:** `<worktree-path>`  
 **Branch:** `feat/h1-reporting-mvp`
 
 ## Mission
@@ -54,7 +54,7 @@ The same workflow must support:
 
 ### Main checkout
 
-The main checkout is `/home/patrickpassos/security-lab`.
+The main checkout is `<lab-root>`.
 
 At the time of this handoff it contains an unrelated untracked file:
 
@@ -70,7 +70,7 @@ Do not delete, replace, or reset that file. Read it before making any eventual
 The approved worktree already exists:
 
 ```text
-/home/patrickpassos/.config/superpowers/worktrees/security-lab/h1-reporting-mvp
+<worktree-path>
 ```
 
 It is on branch:
@@ -808,7 +808,7 @@ The MVP is complete when:
 ## First Commands For The Next Agent
 
 ```bash
-cd /home/patrickpassos/.config/superpowers/worktrees/security-lab/h1-reporting-mvp
+cd <worktree-path>
 git status --short
 uv run --with pytest --with pyyaml pytest -q
 ruff check .
@@ -817,8 +817,8 @@ ruff check .
 Then read:
 
 ```text
-/home/patrickpassos/security-lab/AGENTS.md
-/home/patrickpassos/security-lab/docs/H1_REPORTING_MVP_PLAN.md
+<lab-root>/AGENTS.md
+<lab-root>/docs/H1_REPORTING_MVP_PLAN.md
 lib/h1report.py
 bin/lab-h1-report
 tests/test_h1_report.py

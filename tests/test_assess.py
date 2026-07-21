@@ -693,17 +693,17 @@ class TestDeriveFindingStatusWrapper:
         status = fe.derive_finding_status("222", workspace_path=ws, lab_root=lab)
         assert status["platform_state"] == "informative"
 
-    def test_falls_back_to_default_engagement(self, tmp_path, monkeypatch):
-        """When no engagement_name and no workspace, falls back to
-        bounty-notion (the only Phase 1 consumer)."""
+    def test_fails_closed_without_engagement(self, tmp_path, monkeypatch):
+        """When no engagement_name and no workspace is provided, the wrapper
+        fails closed with a ValueError rather than silently falling back to
+        a synthetic default engagement."""
         lab = tmp_path / "lab"
         eng = lab / "bounties" / "notion"
         (eng / ".lab").mkdir(parents=True)
-        # No outcomes — should return conservative defaults.
+        # No outcomes — and no engagement resolution path. Must raise.
         monkeypatch.setattr(labutil, "LAB", lab)
-        status = fe.derive_finding_status("999", lab_root=lab)
-        assert status["platform_state"] is None
-        assert status["reportability"] == "gather_more_evidence"
+        with pytest.raises(ValueError, match="Could not resolve engagement"):
+            fe.derive_finding_status("999", lab_root=lab)
 
 
 # ─── Integration: assess against the real case-002 scenario ──────────

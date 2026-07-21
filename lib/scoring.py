@@ -415,7 +415,7 @@ def score_run(
         failed=failed,
         partial=partial,
         hard_failures=hard,
-        budget_exhausted=run_hard and "Budget" in run_reason,
+        budget_exhausted=run_hard and "budget" in run_reason.lower(),
         budget_used_usd=actual_usd,
         budget_limit_usd=limit_usd,
         total_partial_credit=total_partial,

@@ -17,7 +17,7 @@
       "type": "string",
       "description": "Identity of the agent/user that produced the event. Populated from os.environ.get('USER', os.environ.get('LOGNAME', 'agent')).",
       "minLength": 1,
-      "examples": ["patrickpassos", "agent"]
+      "examples": ["agent"]
     },
     "action": {
       "type": "string",
@@ -51,7 +51,7 @@
   "examples": [
     {
       "ts": "2026-07-19T12:34:56Z",
-      "agent": "patrickpassos",
+      "agent": "agent",
       "action": "scope-check",
       "target": "example.com",
       "engagement": "my-ctf",
@@ -60,7 +60,7 @@
     },
     {
       "ts": "2026-07-19T12:35:00Z",
-      "agent": "patrickpassos",
+      "agent": "agent",
       "action": "ctf-evidence",
       "target": "https://example.com",
       "engagement": "my-ctf",

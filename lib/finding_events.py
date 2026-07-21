@@ -850,9 +850,10 @@ def derive_finding_status(
     Engagement resolution order:
       1. `engagement_name` argument, if provided.
       2. <workspace_path>/engagement.txt, if present.
-      3. Falls back to bounty-notion (the only Phase 1 consumer) — but
-         this is a last resort; callers should pass engagement_name or a
-         workspace with engagement.txt for correctness.
+
+    Fails closed with a `ValueError` if no engagement can be resolved —
+    callers must pass `engagement_name` or a workspace containing
+    `engagement.txt`. There is intentionally no synthetic fallback.
 
     Returns the finding-status-v1 dict (same as
     OutcomeStore.derive_finding_status()).
@@ -860,10 +861,11 @@ def derive_finding_status(
     if engagement_name is None and workspace_path is not None:
         engagement_name = read_engagement_name_from_workspace(workspace_path)
     if not engagement_name:
-        # Last-resort default — bounty is the only Phase 1 consumer of
-        # the outcome store. This keeps the wrapper usable for ad-hoc
-        # calls without an engagement context.
-        engagement_name = "bounty-notion"
+        raise ValueError(
+            "Could not resolve engagement: pass engagement_name explicitly "
+            "or provide a workspace containing engagement.txt. "
+            "There is no default engagement (no synthetic fallback)."
+        )
     store_path = resolve_store_path(engagement_name, lab_root=lab_root)
     store = OutcomeStore(store_path)
     return store.derive_finding_status(report_id, workspace_path=workspace_path)
@@ -1038,7 +1040,7 @@ def _validate_workspace_event(event: dict[str, Any]) -> None:
     # confidence: 0.0–1.0 when present and non-null.
     conf = event.get("confidence")
     if conf is not None:
-        if not isinstance(conf, (int, float)) or isinstance(conf, bool):
+        if not isinstance(conf, int | float) or isinstance(conf, bool):
             raise OutcomeValidationError(
                 f"confidence must be a number or null, got {conf!r}"
             )
