@@ -4,11 +4,13 @@
 Combines everything into a single command:
   1. Scope check
   2. Create workspace (lab-new)
-  3. Query gbrain for similar challenges
-  4. Run automated first-pass pipeline (lab-firstpass)
-  5. Generate custom wordlist from JS/wayback (lab-wordlist)
-  6. Parse the report and write initial hypotheses to solve_log.md
-  7. Print: "Ready to hunt. Check challenges/<name>/recon/FIRSTPASS_REPORT.md"
+  3. Preflight enforcement gate (lab-preflight) — SI-007: must run before any offensive tool
+  4. Query gbrain for similar challenges
+  5. Run automated first-pass pipeline (lab-firstpass)
+  6. Generate custom wordlist from JS/wayback (lab-wordlist)
+  7. Parse the report and write initial hypotheses to solve_log.md
+
+Prints: "Ready to hunt. Check challenges/<name>/recon/FIRSTPASS_REPORT.md"
 
 Usage:
     lab-hunt <url> --name <challenge-name> --engagement <name>
@@ -100,7 +102,7 @@ def main() -> int:
     log("")
 
     # Step 1: Scope check
-    log("Step 1/6: Scope check")
+    log("Step 1/7: Scope check")
     code, stdout, stderr = run_cmd([str(LAB / "bin" / "lab-scope"), url, "--engagement", engagement])
     print(f"  {stdout.strip()}")
     if code == 2:
@@ -111,7 +113,7 @@ def main() -> int:
         return 3
 
     # Step 2: Create workspace
-    log("Step 2/6: Create workspace")
+    log("Step 2/7: Create workspace")
     code, stdout, stderr = run_cmd([str(LAB / "bin" / "lab-new"), "ctf", name, "--target", url, "--engagement", engagement])
     print(stdout)
     if code != 0:
@@ -129,8 +131,22 @@ def main() -> int:
         log(f"ERROR: workspace not found at {workspace}")
         return 1
 
-    # Step 3: Query gbrain for similar challenges
-    log("Step 3/6: Query gbrain for similar challenges")
+    # Step 3: Preflight enforcement gate (SI-007)
+    # Per AGENTS.md: lab-preflight must run BEFORE any offensive tool
+    # (gbrain queries, firstpass recon, wordlist gen, etc.).
+    log("Step 3/7: Preflight enforcement gate (lab-preflight)")
+    preflight_cmd = [str(LAB / "bin" / "lab-preflight"), name, "--new", "--target", url]
+    pf_code, pf_stdout, pf_stderr = run_cmd(preflight_cmd, timeout=60)
+    if pf_stdout:
+        print(pf_stdout)
+    if pf_stderr:
+        print(pf_stderr, file=sys.stderr)
+    if pf_code != 0:
+        log(f"ERROR: lab-preflight failed (exit {pf_code}) — fix the gate failures above before any offensive tool")
+        return pf_code
+
+    # Step 4: Query gbrain for similar challenges
+    log("Step 4/7: Query gbrain for similar challenges")
     # A-18: guard against IndexError on malformed URL (e.g. "http://")
     hostname = url
     if "://" in url:
@@ -155,15 +171,15 @@ def main() -> int:
     gbrain_path.parent.mkdir(parents=True, exist_ok=True)
     gbrain_path.write_text("\n".join(gbrain_results) + "\n", encoding="utf-8")
 
-    # Step 4: Run first-pass pipeline
-    log("Step 4/6: Run automated first-pass pipeline")
+    # Step 5: Run first-pass pipeline
+    log("Step 5/7: Run automated first-pass pipeline")
     # Pass the workspace recon dir as output so artifacts land in the right place
     firstpass_output = str(workspace / "recon")
     code, stdout, stderr = run_cmd([str(LAB / "bin" / "lab-firstpass"), url, "--engagement", engagement, "--output", firstpass_output], timeout=300)
     print(stdout)
 
-    # Step 5: Generate custom wordlist
-    log("Step 5/6: Generate custom wordlist from JS/wayback")
+    # Step 6: Generate custom wordlist
+    log("Step 6/7: Generate custom wordlist from JS/wayback")
     # Run from inside the workspace so lab-wordlist finds recon/endpoints.txt
     wordlist_code, wordlist_stdout, wordlist_stderr = run_cmd([str(LAB / "bin" / "lab-wordlist"), url], cwd=str(workspace), timeout=60)
     if wordlist_code == 0:
@@ -172,8 +188,8 @@ def main() -> int:
     else:
         print(f"  Wordlist generation skipped (exit {wordlist_code})")
 
-    # Step 6: Write initial hypotheses to solve_log.md
-    log("Step 6/6: Write initial hypotheses to solve_log.md")
+    # Step 7: Write initial hypotheses to solve_log.md
+    log("Step 7/7: Write initial hypotheses to solve_log.md")
     solve_log = workspace / "solve_log.md"
     report_path = workspace / "recon" / "FIRSTPASS_REPORT.md"
 

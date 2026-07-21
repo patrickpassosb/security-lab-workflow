@@ -1,0 +1,7 @@
+report_h1.md vs hackerone_submission.md:
+
+- Same title, same weakness.
+- Body text overlaps ~90%.
+- hackerone_submission.md omits the "server-side authorization remains intact"
+  caveat that report_h1.md includes.
+- Two sources of truth -> drift risk. report_h1.md is the canonical source.

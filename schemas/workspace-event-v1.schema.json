@@ -1,0 +1,191 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://security-lab/schemas/workspace-event-v1.schema.json",
+  "title": "Workspace Event v1",
+  "description": "A single line in <workspace>/.lab/events.jsonl — the append-only workspace\nevent ledger. Per roadmap section 7.1.\n\nThis is the per-workspace event stream that the Phase 2 event-ledger\nreducer will consume to compute technical_verdict, impact_demonstrated,\nand confidence. Phase 1 (outcome MVP) does NOT read this stream — it\nonly reads outcomes.jsonl + record.json. This schema is finalized here\nso Phase 2 can produce and consume events without re-specifying.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "event_id",
+    "workspace_id",
+    "event",
+    "ts",
+    "actor"
+  ],
+  "properties": {
+    "schema": {
+      "type": "string",
+      "description": "Schema identifier. Must be exactly 'security-lab/agent-event/v1'.",
+      "const": "security-lab/agent-event/v1",
+      "examples": ["security-lab/agent-event/v1"]
+    },
+    "event_id": {
+      "type": "string",
+      "description": "UUIDv4 for this event. Idempotency key for the event store.",
+      "format": "uuid",
+      "examples": ["f81d4fae-7dec-11d0-a765-00a0c91e6bf6"]
+    },
+    "workspace_id": {
+      "type": "string",
+      "description": "UUID of the workspace from <workspace>/.lab/workspace.json.",
+      "format": "uuid",
+      "examples": ["a81d4fae-7dec-11d0-a765-00a0c91e6bf6"]
+    },
+    "session_id": {
+      "type": ["string", "null"],
+      "description": "UUID of the agent session that produced this event. null when not\napplicable (e.g. a human-edited event).",
+      "format": "uuid",
+      "examples": ["b81d4fae-7dec-11d0-a765-00a0c91e6bf6", null]
+    },
+    "iteration_id": {
+      "type": ["string", "null"],
+      "description": "UUID of the iteration within the session. null when not applicable.",
+      "format": "uuid",
+      "examples": [null]
+    },
+    "hypothesis_id": {
+      "type": ["string", "null"],
+      "description": "ID of the hypothesis this event tested or evaluated. null when the\nevent is not hypothesis-scoped (e.g. a session-start event).",
+      "examples": ["H3", null]
+    },
+    "event": {
+      "type": "string",
+      "description": "Event type in <noun>.<verb> form (e.g. 'hypothesis.evaluated',\n'session.started', 'tool.invoked').",
+      "minLength": 1,
+      "examples": [
+        "hypothesis.evaluated",
+        "session.started",
+        "tool.invoked",
+        "evidence.captured"
+      ]
+    },
+    "ts": {
+      "type": "string",
+      "description": "ISO 8601 UTC timestamp the event was recorded.",
+      "format": "date-time",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(Z|[+-]\\d{2}:\\d{2})$",
+      "examples": ["2026-07-15T15:10:00Z"]
+    },
+    "actor": {
+      "type": "string",
+      "description": "Who/what produced the event (e.g. 'opencode', 'human', 'evaluator').",
+      "minLength": 1,
+      "examples": ["opencode", "human"]
+    },
+    "target": {
+      "type": ["string", "null"],
+      "description": "Target host or URL the event pertained to. null when not target-specific.",
+      "examples": ["<PROGRAM_HOST>/api/v3/endpointA", null]
+    },
+    "action": {
+      "type": ["object", "null"],
+      "description": "Tool invocation details, when the event was triggered by a tool call.",
+      "additionalProperties": false,
+      "properties": {
+        "tool": {
+          "type": "string",
+          "description": "Tool name (e.g. 'curl', 'nuclei', 'gdb').",
+          "examples": ["curl", "nuclei"]
+        },
+        "exit": {
+          "type": "integer",
+          "description": "Exit code of the tool invocation.",
+          "minimum": 0,
+          "maximum": 255,
+          "examples": [0, 1]
+        },
+        "duration_ms": {
+          "type": "integer",
+          "description": "Wall-clock duration of the tool invocation in milliseconds.",
+          "minimum": 0,
+          "examples": [1200, 45000]
+        }
+      }
+    },
+    "artifacts": {
+      "type": "array",
+      "description": "Artifacts produced or modified by this event (e.g. evidence files).",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["path", "sha256", "size"],
+        "properties": {
+          "path": {
+            "type": "string",
+            "description": "Relative path to the artifact within the workspace.",
+            "examples": ["evidence/01_response.txt"]
+          },
+          "sha256": {
+            "type": "string",
+            "description": "SHA256 of the artifact content.",
+            "pattern": "^[0-9a-f]{64}$",
+            "examples": ["e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"]
+          },
+          "size": {
+            "type": "integer",
+            "description": "Size of the artifact in bytes.",
+            "minimum": 0,
+            "examples": [1456]
+          }
+        }
+      }
+    },
+    "observation": {
+      "type": ["string", "null"],
+      "description": "Free-text observation note. MUST NOT contain secrets or PII.",
+      "examples": ["Unauthenticated response returned workspace metadata", null]
+    },
+    "technical_verdict": {
+      "type": ["string", "null"],
+      "description": "Agent's technical verdict at this event (optional; the reducer folds\nthese into the final technical_verdict).",
+      "enum": ["confirmed", "inconclusive", "not_vulnerable", null],
+      "examples": ["confirmed", null]
+    },
+    "reportability": {
+      "type": ["string", "null"],
+      "description": "Agent's reportability assessment at this event (optional; the reducer\nfolds these into the final reportability).",
+      "enum": ["report", "do_not_report", "gather_more_evidence", null],
+      "examples": ["do_not_report", null]
+    },
+    "confidence": {
+      "type": ["number", "null"],
+      "description": "Agent's confidence at this event, 0.0 to 1.0. Optional.",
+      "minimum": 0,
+      "maximum": 1,
+      "examples": [0.82, null]
+    },
+    "next_test": {
+      "type": ["string", "null"],
+      "description": "Suggested next test the agent should run. Optional.",
+      "examples": ["Test with non-existent page ID for differential response", null]
+    }
+  },
+  "examples": [
+    {
+      "schema": "security-lab/agent-event/v1",
+      "event_id": "f81d4fae-7dec-11d0-a765-00a0c91e6bf6",
+      "workspace_id": "a81d4fae-7dec-11d0-a765-00a0c91e6bf6",
+      "session_id": "b81d4fae-7dec-11d0-a765-00a0c91e6bf6",
+      "iteration_id": null,
+      "hypothesis_id": "H3",
+      "event": "hypothesis.evaluated",
+      "ts": "2026-07-15T15:10:00Z",
+      "actor": "opencode",
+      "target": "<PROGRAM_HOST>/api/v3/endpointA",
+      "action": {"tool": "curl", "exit": 0, "duration_ms": 1200},
+      "artifacts": [
+        {
+          "path": "evidence/01_response.txt",
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "size": 1456
+        }
+      ],
+      "observation": "Unauthenticated response returned workspace metadata",
+      "technical_verdict": "confirmed",
+      "reportability": "gather_more_evidence",
+      "confidence": 0.82,
+      "next_test": "Test with non-existent page ID for differential response"
+    }
+  ]
+}

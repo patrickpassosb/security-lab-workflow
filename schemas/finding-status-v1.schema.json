@@ -1,0 +1,155 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://security-lab/schemas/finding-status-v1.schema.json",
+  "title": "Finding Status v1",
+  "description": "Authoritative finding status — the output of\nlib.finding_events.OutcomeStore.derive_finding_status(). Per ADR-0002,\nthis is the SOLE owner of the reducer; lib/h1report.py and\nbin/lab-h1-report status delegate to it and only layer H1-specific\npresentation on top.\n\nPrecedence (roadmap section 7.4):\n  1. outcomes.jsonl (platform ground truth — this is what this reducer\n     consumes in the Phase 1 MVP)\n  2. record.json (human submission receipt — for submission_state)\n  3. manifest.json (prepared package)\n  4. audit events\n  5. bounty_log.md (editable, lowest authority)\n\nPhase 1 MVP scope: outcomes.jsonl + record.json only. The remaining\nlayers are folded in by later phases. Until then, technical_verdict,\nimpact_demonstrated, and confidence carry conservative defaults\n(inconclusive / false / 0.0) that will be replaced by the event-ledger\nreducer in Phase 2.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "report_id",
+    "technical_verdict",
+    "reportability",
+    "platform_state",
+    "platform_state_at",
+    "impact_demonstrated",
+    "confidence",
+    "submission_state",
+    "last_event_ts"
+  ],
+  "properties": {
+    "schema": {
+      "type": "string",
+      "description": "Schema identifier. Must be exactly 'security-lab/finding-status/v1'.",
+      "const": "security-lab/finding-status/v1",
+      "examples": ["security-lab/finding-status/v1"]
+    },
+    "workspace_id": {
+      "type": ["string", "null"],
+      "description": "UUID of the workspace from <workspace>/.lab/workspace.json, if that\nfile exists. null when the workspace has no workspace.json (Phase 1\nMVP does not require it).",
+      "format": "uuid",
+      "examples": ["f81d4fae-7dec-11d0-a765-00a0c91e6bf6", null]
+    },
+    "report_id": {
+      "type": "string",
+      "description": "HackerOne report ID this status pertains to. Matches the report_id in\nthe outcome events and in the workspace's record.json.",
+      "minLength": 1,
+      "examples": ["1234567"]
+    },
+    "technical_verdict": {
+      "type": "string",
+      "description": "Agent's technical verdict on whether the vulnerability is real.\nPhase 1 MVP returns 'inconclusive' (the event-ledger reducer in\nPhase 2 will compute this).",
+      "enum": ["confirmed", "inconclusive", "not_vulnerable"],
+      "examples": ["inconclusive", "confirmed"]
+    },
+    "reportability": {
+      "type": "string",
+      "description": "Recommendation on whether to submit (or re-submit) to HackerOne.\nDerived from platform_state in Phase 1: duplicate or informative =>\ndo_not_report; otherwise gather_more_evidence (conservative).",
+      "enum": ["report", "do_not_report", "gather_more_evidence"],
+      "examples": ["do_not_report", "gather_more_evidence"]
+    },
+    "platform_state": {
+      "type": ["string", "null"],
+      "description": "Latest outcome state observed for this report_id, or null when no\noutcome has been recorded yet. One of the outcome-v1 state enum values.",
+      "enum": [
+        "new",
+        "needs_more_info",
+        "triaged",
+        "duplicate",
+        "informative",
+        "not_applicable",
+        "resolved",
+        "bounty_awarded",
+        "bounty_paid",
+        null
+      ],
+      "examples": ["duplicate", null]
+    },
+    "platform_state_at": {
+      "type": ["string", "null"],
+      "description": "occurred_at of the latest outcome event, or null when no outcome has\nbeen recorded yet.",
+      "format": "date-time",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(Z|[+-]\\d{2}:\\d{2})$",
+      "examples": ["2026-07-15T15:55:00Z", null]
+    },
+    "impact_demonstrated": {
+      "type": "boolean",
+      "description": "Whether the finding demonstrated actual impact (not just a theoretical\nor empty response). Phase 1 MVP returns false; Phase 2 event-ledger\nreducer will compute this from evidence artifacts.",
+      "examples": [false]
+    },
+    "confidence": {
+      "type": "number",
+      "description": "Confidence in the technical verdict, 0.0 to 1.0. Phase 1 MVP returns\n0.0; Phase 2 event-ledger reducer will compute this.",
+      "minimum": 0,
+      "maximum": 1,
+      "examples": [0.0, 0.82]
+    },
+    "submission_state": {
+      "type": "string",
+      "description": "State of the local submission receipt.\n'not_submitted' = no record.json found.\n'submitted' = record.json exists (kept for backward compat; prefer\n'recorded' for new code).\n'recorded' = record.json exists with a valid schema and report_id.",
+      "enum": ["not_submitted", "submitted", "recorded"],
+      "examples": ["recorded", "not_submitted"]
+    },
+    "last_event_ts": {
+      "type": "string",
+      "description": "ISO 8601 UTC timestamp of the last event that informed this status.\nIn Phase 1, this is the occurred_at of the latest outcome event, or\nthe submitted_at from record.json if no outcome exists, or the current\ntime if neither exists.",
+      "format": "date-time",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(Z|[+-]\\d{2}:\\d{2})$",
+      "examples": ["2026-07-15T15:55:00Z"]
+    },
+    "duplicate_of": {
+      "type": ["string", "null"],
+      "description": "Populated when platform_state='duplicate' — the H1 report ID of the\noriginal. Mirrored from the latest outcome event for convenience.",
+      "examples": ["7654321", null]
+    },
+    "duplicate_original_state": {
+      "type": ["string", "null"],
+      "description": "Populated when platform_state='duplicate' — the state of the original\nreport. Mirrored from the latest outcome event.",
+      "enum": [
+        "new",
+        "needs_more_info",
+        "triaged",
+        "duplicate",
+        "informative",
+        "not_applicable",
+        "resolved",
+        "bounty_awarded",
+        "bounty_paid",
+        null
+      ],
+      "examples": ["informative", null]
+    }
+  },
+  "examples": [
+    {
+      "schema": "security-lab/finding-status/v1",
+      "workspace_id": null,
+      "report_id": "1234567",
+      "technical_verdict": "inconclusive",
+      "reportability": "do_not_report",
+      "platform_state": "duplicate",
+      "platform_state_at": "2026-07-15T15:55:00Z",
+      "impact_demonstrated": false,
+      "confidence": 0.0,
+      "submission_state": "recorded",
+      "last_event_ts": "2026-07-15T15:55:00Z",
+      "duplicate_of": "7654321",
+      "duplicate_original_state": "informative"
+    },
+    {
+      "schema": "security-lab/finding-status/v1",
+      "workspace_id": null,
+      "report_id": "9999999",
+      "technical_verdict": "inconclusive",
+      "reportability": "gather_more_evidence",
+      "platform_state": null,
+      "platform_state_at": null,
+      "impact_demonstrated": false,
+      "confidence": 0.0,
+      "submission_state": "not_submitted",
+      "last_event_ts": "2026-07-19T12:00:00Z",
+      "duplicate_of": null,
+      "duplicate_original_state": null
+    }
+  ]
+}

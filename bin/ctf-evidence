@@ -132,11 +132,24 @@ EXIT_CODE=0
 MODE="stdin"
 COMMAND_JSON="[]"
 OUTPUT_PATH="$BASE.txt"
+# SI-018: instrument command hash + duration for audit attribution.
+# COMMAND_NAME is the short tool name (e.g. "nuclei", "curl") — never the
+# full command line, to avoid leaking tokens/secrets in the audit log.
+# COMMAND_HASH is SHA256 of the joined command args (the actual command
+# run, not the lab wrapper) — lets us dedupe/diff audit entries without
+# recording the raw command. DURATION_MS is measured with python's
+# time.mononic() via $EPOCHREALTIME (bash 5+) for sub-ms resolution.
+COMMAND_NAME=""
+COMMAND_HASH=""
+DURATION_MS=""
 
 if [ -n "$FILE_PATH" ]; then
   MODE="file"
   BASENAME="$(basename "$FILE_PATH")"
   OUTPUT_PATH="$BASE-$(sanitize "$BASENAME")"
+  COMMAND_NAME="cp"
+  COMMAND_HASH="$(printf '%s %s' "$FILE_PATH" "$OUTPUT_PATH" | sha256sum | awk '{print $1}')"
+  START_TIME="$EPOCHREALTIME"
   # T2-20: warn if the file is outside the workspace (prevent copying /etc/shadow etc.)
   WORK_ABS="$(cd "$WORK" && pwd)"
   FILE_ABS="$(cd "$(dirname "$FILE_PATH")" && pwd)/$(basename "$FILE_PATH")"
@@ -152,14 +165,31 @@ if [ -n "$FILE_PATH" ]; then
   if [ $EXIT_CODE -ne 0 ]; then
     echo "[!] cp failed (exit $EXIT_CODE): $FILE_PATH -> $OUTPUT_PATH" >&2
   fi
+  END_TIME="$EPOCHREALTIME"
+  DURATION_MS="$(python3 - <<PY
+start = float("${START_TIME}")
+end = float("${END_TIME}")
+print(int((end - start) * 1000))
+PY
+)"
 elif [ "$#" -gt 0 ]; then
   MODE="command"
   OUTPUT_PATH="$BASE.out"
   ERR_PATH="$BASE.err"
+  COMMAND_NAME="$1"
+  COMMAND_HASH="$(printf '%s' "$*" | sha256sum | awk '{print $1}')"
+  START_TIME="$EPOCHREALTIME"
   set +e
   "$@" > "$OUTPUT_PATH" 2> "$ERR_PATH"
   EXIT_CODE=$?
   set -e
+  END_TIME="$EPOCHREALTIME"
+  DURATION_MS="$(python3 - <<PY
+start = float("${START_TIME}")
+end = float("${END_TIME}")
+print(int((end - start) * 1000))
+PY
+)"
   COMMAND_JSON="$(python3 - "$@" <<'PY'
 import json
 import sys
@@ -197,22 +227,39 @@ TARGET=""
 [ -f "$WORK/target.txt" ] && TARGET="$(tr -d '\r' < "$WORK/target.txt" | head -n 1)"
 ENGAGEMENT=""
 [ -f "$WORK/engagement.txt" ] && ENGAGEMENT="$(tr -d '\r' < "$WORK/engagement.txt" | head -n 1)"
-# T2-08: use python json.dumps instead of printf to avoid JSON injection
-python3 -c 'import json,sys,os
-from datetime import datetime, timezone
-entry = {
-    "ts": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-    "agent": os.environ.get("USER", os.environ.get("LOGNAME", "agent")),
-    "action": "ctf-evidence",
-    "challenge": sys.argv[1],
-    "target": sys.argv[2],
-    "engagement": sys.argv[3],
-    "label": sys.argv[4],
-    "exit": int(sys.argv[5]),
-}
-print(json.dumps(entry, ensure_ascii=False))
-' "$CHALLENGE" "$TARGET" "$ENGAGEMENT" "$LABEL" "$EXIT_CODE" \
-  >> "$LAB/findings/.agent-audit.jsonl"
+# SI-005: write the audit entry through the canonical lib/labutil.audit()
+# so we get file locking (fcntl.flock), symlink rejection, the `agent`
+# field, and json.dumps safety. Previously this opened the audit log
+# directly with `>> ... .agent-audit.jsonl`, which had none of those
+# guarantees and could lose the `agent` field if the inline python was
+# edited. Per-writer extras `challenge` and `label` are passed through
+# the canonical writer's **extra channel.
+#
+# SI-018: also pass command_hash (SHA256 of the command args), duration_ms
+# (wall-clock duration of the command), workspace_id (UUID from
+# <workspace>/.lab/workspace.json if it exists), and command (the short
+# tool name — NOT the full command line, to avoid leaking secrets/tokens
+# in the audit log). All four are extra fields; the canonical schema
+# allows per-writer extras. Empty values are passed through; labutil.audit
+# skips falsy extras so the audit entry stays clean when a workspace has
+# no workspace.json or a step has no command (stdin/file modes).
+PYTHONPATH="$LAB/lib" python3 -c '
+import sys
+import labutil
+import workspace
+labutil.audit(
+    "ctf-evidence",
+    target=sys.argv[1],
+    engagement=sys.argv[2],
+    challenge=sys.argv[3],
+    label=sys.argv[4],
+    exit_code=int(sys.argv[5]),
+    command=sys.argv[6],
+    command_hash=sys.argv[7],
+    duration_ms=int(sys.argv[8]) if sys.argv[8] else None,
+    workspace_id=sys.argv[9],
+)
+' "$TARGET" "$ENGAGEMENT" "$CHALLENGE" "$LABEL" "$EXIT_CODE" "$COMMAND_NAME" "$COMMAND_HASH" "$DURATION_MS" "$(PYTHONPATH="$LAB/lib" python3 -c 'import sys, workspace; print(workspace.read_workspace_id(sys.argv[1]))' "$WORK")"
 
 echo "[+] evidence: $OUTPUT_PATH"
 echo "[+] metadata: $META_PATH"

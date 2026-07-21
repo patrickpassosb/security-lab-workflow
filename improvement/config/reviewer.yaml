@@ -1,0 +1,17 @@
+# Background reviewer configuration (opt-in)
+#
+# Per SI-030, the background reviewer is opt-in. Set enabled: true to
+# enable. When disabled, review_candidate() is never called by the
+# outer loop.
+#
+# This file is TRACKED (public, committable). It is TCB: the candidate
+# may read it but NEVER modify it. The outer loop may NEVER modify it
+# either (per roadmap §14 "Files the outer loop may never modify").
+#
+# Per ADR-0001 (docs/adr/0001-tcb-runtime-split.md), this file lives
+# under improvement/config/ (tracked) rather than improvement/ (gitignored).
+#
+# The enabled field must be exactly ``true`` (a YAML boolean). Truthy
+# strings like "yes" or 1 do NOT count — the human must explicitly
+# opt in by setting ``enabled: true``.
+enabled: false

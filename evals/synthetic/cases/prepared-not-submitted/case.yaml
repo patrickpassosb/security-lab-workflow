@@ -1,0 +1,9 @@
+schema: security-lab/eval-case/v1
+case_id: synthetic-prepared-not-submitted-001
+suite: synthetic
+split: train
+description: "Prepared is not submitted: package exists but no receipt"
+category: workflow
+tags: [h1-reporting, prepared-vs-submitted]
+regression_source: handoff-2.6-item-3
+# No expected answers here - those are in private/labels.json (gitignored)

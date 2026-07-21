@@ -1,0 +1,8 @@
+{
+  "args": [
+    "-H",
+    "Authorization: Bearer sk-example-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "https://example.test/endpoint"
+  ],
+  "command": "curl"
+}

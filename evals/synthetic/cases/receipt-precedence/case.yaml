@@ -1,0 +1,9 @@
+schema: security-lab/eval-case/v1
+case_id: synthetic-receipt-precedence-001
+suite: synthetic
+split: train
+description: "Receipt precedence: record.json must override stale bounty_log.md"
+category: workflow
+tags: [receipt, precedence, h1-reporting]
+regression_source: handoff-2.6-item-1
+# No expected answers here - those are in private/labels.json (gitignored)

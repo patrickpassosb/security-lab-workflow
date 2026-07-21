@@ -457,7 +457,9 @@ class TestYamlScalarEscaping:
         assert rc == 0
         ws = lab / "findings" / "bounty" / "test-finding"
         fm = _parse_frontmatter(ws / "report_h1.md")
-        assert fm["program"] == 'Foo "Bar"', f"quoted program name must parse; got {fm['program']!r}"
+        assert fm["program"] == 'Foo "Bar"', (
+            f"quoted program name must parse; got {fm['program']!r}"
+        )
 
     def test_program_name_with_brackets_parses_as_string(self, tmp_path, monkeypatch):
         """A program name like '[Foo] Bar' must parse as a string, not a YAML
@@ -485,5 +487,7 @@ class TestYamlScalarEscaping:
         assert rc == 0
         ws = lab / "findings" / "bounty" / "test-finding"
         fm = _parse_frontmatter(ws / "report_h1.md")
-        assert fm["program"] == "[Foo] Bar", f"bracketed program name must parse as string; got {fm['program']!r}"
+        assert fm["program"] == "[Foo] Bar", (
+            f"bracketed program name must parse as string; got {fm['program']!r}"
+        )
         assert isinstance(fm["program"], str)

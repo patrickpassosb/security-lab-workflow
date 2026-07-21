@@ -1,0 +1,6 @@
+Captured during manual testing:
+
+request header: X-Api-Key: sk-example-cccccccccccccccccccccccccccccccc
+response status: 200
+
+No .env file was present in the workspace; the secret lived in this notes file.

@@ -225,6 +225,7 @@ This is how future-you (or future-agents) avoid repeating the same work.
 
 - `~/security-lab/docs/ARCHITECTURE.md` — the lab architecture overview
 - `~/security-lab/docs/ROADMAP.md` — planned improvements
+- `~/security-lab/docs/SELF_IMPROVEMENT_ROADMAP.md` — **self-improvement system design (read before building any learning/evaluation/improvement feature)**
 - `~/security-lab/bin/lab-status` — quick health check
 - The gbrain — `gbrain search "<your question>"`
 

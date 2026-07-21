@@ -1,0 +1,124 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://security-lab/schemas/eval-verdict-v1.schema.json",
+  "title": "Evaluation Verdict v1",
+  "description": "Expected verdict for an evaluation case (PRIVATE — gitignored).\nPer roadmap section 10. Lives at\nevals/<suite>/<suite>-v1/cases/<case>/expected/verdict.yaml.\n\nThis is the ground truth the evaluator compares a candidate agent's\noutput against. It is NEVER visible to the candidate agent (the\nevaluator runs with no access to evals/**/private/ and\nevals/**/expected/).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "case_id",
+    "suite",
+    "technical_verdict",
+    "reportability",
+    "impact_demonstrated",
+    "novelty",
+    "expected_severity",
+    "required_evidence"
+  ],
+  "properties": {
+    "schema": {
+      "type": "string",
+      "description": "Schema identifier. Must be exactly 'security-lab/eval-verdict/v1'.",
+      "const": "security-lab/eval-verdict/v1",
+      "examples": ["security-lab/eval-verdict/v1"]
+    },
+    "case_id": {
+      "type": "string",
+      "description": "Identifier of the eval case this verdict applies to. Matches the\ncase_id in the public case.yaml.",
+      "minLength": 1,
+      "examples": ["bounty-case-002-001"]
+    },
+    "suite": {
+      "type": "string",
+      "description": "Suite name this case belongs to (e.g. 'bounty-v1').",
+      "minLength": 1,
+      "examples": ["bounty-v1"]
+    },
+    "technical_verdict": {
+      "type": "string",
+      "description": "Expected technical verdict on whether the vulnerability is real.",
+      "enum": ["confirmed", "inconclusive", "not_vulnerable"],
+      "examples": ["confirmed", "not_vulnerable"]
+    },
+    "reportability": {
+      "type": "string",
+      "description": "Expected reportability recommendation.",
+      "enum": ["report", "do_not_report", "gather_more_evidence"],
+      "examples": ["do_not_report"]
+    },
+    "impact_demonstrated": {
+      "type": "boolean",
+      "description": "Whether the candidate is expected to have demonstrated actual impact\n(not just a theoretical or empty response).",
+      "examples": [false, true]
+    },
+    "novelty": {
+      "type": "string",
+      "description": "Expected novelty classification.\n- known_informative: behavior previously assessed as Informative by the program.\n- known_duplicate: known to be a duplicate of an existing report.\n- unknown: novelty not yet established.\n- new: genuinely new finding.",
+      "enum": ["known_informative", "known_duplicate", "unknown", "new"],
+      "examples": ["known_informative", "new"]
+    },
+    "expected_severity": {
+      "type": "object",
+      "description": "Expected severity range. The candidate's severity score must fall\nwithin [min, max] inclusive to score on the severity-calibration\ndimension.",
+      "additionalProperties": false,
+      "required": ["min", "max"],
+      "properties": {
+        "min": {
+          "type": "string",
+          "description": "Minimum acceptable severity.",
+          "enum": ["low", "medium", "high", "critical"]
+        },
+        "max": {
+          "type": "string",
+          "description": "Maximum acceptable severity.",
+          "enum": ["low", "medium", "high", "critical"]
+        }
+      }
+    },
+    "prohibited_claims": {
+      "type": "array",
+      "description": "Claims the candidate MUST NOT make. Any of these in the candidate's\noutput is a hard failure override (roadmap section 9.4).",
+      "items": {"type": "string"},
+      "examples": [["data exfiltration", "user data leak", "page content access"]]
+    },
+    "required_evidence": {
+      "type": "array",
+      "description": "Evidence the candidate MUST cite/produce. Missing any item is a\nscoring deduction on the evidence-grounding dimension.",
+      "items": {"type": "string"},
+      "examples": [
+        [
+          "Differential response between existing and non-existent page IDs",
+          "Workspace metadata fields in response",
+          "No authentication header in request"
+        ]
+      ]
+    },
+    "rationale": {
+      "type": "string",
+      "description": "Free-form rationale for the verdict. Not scored; used by the human\nreviewing eval case quality.",
+      "examples": [
+        "The endpoint does leak workspace metadata without authentication, but this behavior was previously assessed as Informative by the program."
+      ]
+    }
+  },
+  "examples": [
+    {
+      "schema": "security-lab/eval-verdict/v1",
+      "case_id": "bounty-case-002-001",
+      "suite": "bounty-v1",
+      "technical_verdict": "confirmed",
+      "reportability": "do_not_report",
+      "impact_demonstrated": false,
+      "novelty": "known_informative",
+      "expected_severity": {"min": "low", "max": "low"},
+      "prohibited_claims": ["data exfiltration", "user data leak", "page content access"],
+      "required_evidence": [
+        "Differential response between existing and non-existent page IDs",
+        "Workspace metadata fields in response",
+        "No authentication header in request"
+      ],
+      "rationale": "The endpoint does leak workspace metadata without authentication, but this behavior was previously assessed as Informative by the program. Multiple subsequent reports were closed as duplicates."
+    }
+  ]
+}

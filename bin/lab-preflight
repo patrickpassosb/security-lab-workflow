@@ -32,21 +32,36 @@ Design principles:
   - Always auto-starts lab-pivot-watch so the 25/35min alerts always fire.
 """
 import argparse
+import datetime
 import os
 import re
+import subprocess
 import sys
 import time
-import subprocess
-import datetime
 from pathlib import Path
 
 # Import shared labutil helpers
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib"))
 import labutil  # noqa: E402
+import workspace  # noqa: E402
 
 DEFAULT_CTF_HOME = ""  # must be passed via --ctf-home or auto-detected from cwd
 PIVOT_WATCH_SCRIPT = os.environ.get("HACKING_LAB", os.path.expanduser("~/security-lab")) + "/bin/lab-pivot-watch"
 PIVOT_WATCH_PID = str(labutil.LAB / ".pivot-watch.pid")
+
+
+def _resolve_lab_root() -> Path:
+    """Resolve the lab root from $HACKING_LAB (or default) and keep labutil
+    in sync.
+
+    Mirrors bin/lab-h1-report._resolve_lab_root(): keeps labutil's
+    AUDIT_LOG_PATH in sync with the runtime lab root so audit events land
+    in the right lab's findings/.agent-audit.jsonl even when HACKING_LAB
+    is overridden (e.g. tests).
+    """
+    lab_root = Path(os.environ.get("HACKING_LAB", os.path.expanduser("~/security-lab")))
+    labutil.AUDIT_LOG_PATH = lab_root / "findings" / ".agent-audit.jsonl"
+    return lab_root
 
 # ANSI colors
 RED = "\033[31m"
@@ -187,7 +202,7 @@ def check_hint_theory_gate(challenge_dir, is_new, challenge_name):
             return "fail", "solve_log already exists — don't use --new"
 
         # Create skeleton solve_log with Hint Theory placeholder
-        timestamp = datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+        timestamp = datetime.datetime.now(datetime.UTC).strftime('%Y-%m-%dT%H:%M:%SZ')
         skeleton = f"""# {challenge_name} Solve Log
 
 **CTF:** (set engagement name)
@@ -236,7 +251,7 @@ def check_hint_theory_gate(challenge_dir, is_new, challenge_name):
             return "fail", "solve_log.md already exists — don't use --new"
         except OSError as e:
             return "fail", f"could not create solve_log.md: {e}"
-        return "fail", f"created skeleton solve_log.md — write ## Hint Theory, then re-run preflight"
+        return "fail", "created skeleton solve_log.md — write ## Hint Theory, then re-run preflight"
 
     if not solve_log.exists():
         return "fail", "no solve_log.md — run with --new to create one, or create the challenge workspace first"
@@ -310,66 +325,53 @@ def print_pivot_alerts(ctf_home, challenge_name):
         print(color(f"    {l}", RED))
     print()
 
-def main():
-    parser = argparse.ArgumentParser(
-        description='CTF preflight enforcement gate — run before ANY offensive tool',
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
-Gates checked:
-  1. Context: read Failed Paths / Do Not Repeat from prior sessions
-  2. Blackboard: check .blackboard.md for coordinator dispatches
-  3. Pivot: check .pivot-alerts for CRIT alerts
-  4. Hint Theory: verify ## Hint Theory in solve_log.md
-  5. Pivot-watch: auto-start lab-pivot-watch if not running
+def _audit_preflight(
+    target: str,
+    engagement: str,
+    challenge: str,
+    challenge_dir: Path,
+    exit_code: int,
+    duration_ms: int,
+) -> None:
+    """Write the SI-018 audit entry for a lab-preflight run.
 
-Exit 0 = all gates passed, you may proceed to attack
-Exit 1 = one or more gates failed — fix and re-run
-""")
-    parser.add_argument('challenge', help='Challenge name (directory under challenges/)')
-    parser.add_argument('--ctf-home', default=DEFAULT_CTF_HOME, help='CTF home directory')
-    parser.add_argument('--new', action='store_true', help='First session — create skeleton solve_log')
-    parser.add_argument('--target', help='Target URL (used with --new for context)')
-    parser.add_argument('--ack-failed-paths', action='store_true',
-                        help='Acknowledge that you have read the Failed Paths section')
+    Records action="lab-preflight", target, engagement, challenge, exit,
+    duration_ms, and workspace_id (from <challenge_dir>/.lab/workspace.json
+    when present). Failures are swallowed by labutil.audit() so an audit
+    problem never blocks the gate.
+    """
+    workspace_id = workspace.read_workspace_id(challenge_dir)
+    labutil.audit(
+        "lab-preflight",
+        target=target,
+        engagement=engagement,
+        challenge=challenge,
+        exit_code=exit_code,
+        duration_ms=duration_ms,
+        workspace_id=workspace_id,
+    )
 
-    args = parser.parse_args()
 
-    # Validate challenge name (path-traversal guard, T2-01)
-    labutil.require_valid_name(args.challenge, "challenge")
+def _audit_and_exit(args, challenge_dir, start_time, exit_code):
+    """Compute duration, audit the preflight run, and sys.exit.
 
-    # Resolve ctf_home: explicit flag > cwd detection > fail
-    ctf_home_str = args.ctf_home
-    if not ctf_home_str:
-        cwd = os.getcwd()
-        if os.path.isdir(os.path.join(cwd, "challenges")):
-            ctf_home_str = cwd
-    if not ctf_home_str:
-        print(color("\n  FAIL: could not determine CTF home. Pass --ctf-home or run from a program folder.", RED))
-        sys.exit(1)
-    ctf_home = Path(os.path.expanduser(ctf_home_str))
-    challenges_dir = ctf_home / "challenges"
-    challenge_dir = challenges_dir / args.challenge
+    Used on early-exit paths in main() (before the gates run) so every
+    preflight invocation produces exactly one audit entry with a duration.
+    """
+    duration_ms = int((time.monotonic() - start_time) * 1000)
+    _audit_preflight(
+        args.target or "", "", args.challenge,
+        challenge_dir, exit_code, duration_ms,
+    )
+    sys.exit(exit_code)
 
-    print(color(f"\n  lab-preflight — {args.challenge}", BOLD))
-    print(color(f"  {'=' * 60}", BOLD))
 
-    if not challenges_dir.exists():
-        print(color(f"\n  FAIL: challenges/ directory not found at {challenges_dir}", RED))
-        print(color("  Run this from the CTF home, or specify --ctf-home", RED))
-        sys.exit(1)
+def _run_gates(args, ctf_home, challenge_dir):
+    """Run the five preflight gates. Returns (exit_code, has_warnings).
 
-    if args.new:
-        if challenge_dir.exists():
-            print(color(f"\n  FAIL: challenge directory already exists: {challenge_dir}", RED))
-            print(color("  Remove --new if this is a returning session", RED))
-            sys.exit(1)
-        challenge_dir.mkdir(parents=True, exist_ok=True)
-        print(f"  Created challenge directory: {challenge_dir}")
-    elif not challenge_dir.exists():
-        print(color(f"\n  FAIL: challenge directory not found: {challenge_dir}", RED))
-        print(color("  Run with --new for a first session, or check the challenge name", RED))
-        sys.exit(1)
-
+    Pure gate logic — no audit, no sys.exit. main() wraps this so it can
+    time the run and emit a single audit entry on every exit path.
+    """
     all_passed = True
     has_warnings = False
 
@@ -379,7 +381,7 @@ Exit 1 = one or more gates failed — fix and re-run
         print_blackboard_dispatches(ctf_home, args.challenge)
         print_pivot_alerts(ctf_home, args.challenge)
 
-    print(color(f"\n  GATES:", BOLD))
+    print(color("\n  GATES:", BOLD))
 
     # Gate 1: Context (Failed Paths)
     status, detail = check_context_gate(challenge_dir, args.ack_failed_paths)
@@ -423,12 +425,103 @@ Exit 1 = one or more gates failed — fix and re-run
         else:
             print(color("  RESULT: ALL GATES PASSED — you may proceed to attack", GREEN))
         print()
-        sys.exit(0)
-    else:
-        print(color("  RESULT: GATES FAILED — fix the issues above before any tool", RED))
-        print(color("  Do NOT run httpx/nuclei/curl/ffuf until preflight passes.", RED))
-        print()
-        sys.exit(1)
+        return 0, has_warnings
+    print(color("  RESULT: GATES FAILED — fix the issues above before any tool", RED))
+    print(color("  Do NOT run httpx/nuclei/curl/ffuf until preflight passes.", RED))
+    print()
+    return 1, has_warnings
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description='CTF preflight enforcement gate — run before ANY offensive tool',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Gates checked:
+  1. Context: read Failed Paths / Do Not Repeat from prior sessions
+  2. Blackboard: check .blackboard.md for coordinator dispatches
+  3. Pivot: check .pivot-alerts for CRIT alerts
+  4. Hint Theory: verify ## Hint Theory in solve_log.md
+  5. Pivot-watch: auto-start lab-pivot-watch if not running
+
+Exit 0 = all gates passed, you may proceed to attack
+Exit 1 = one or more gates failed — fix and re-run
+""")
+    parser.add_argument('challenge', help='Challenge name (directory under challenges/)')
+    parser.add_argument('--ctf-home', default=DEFAULT_CTF_HOME, help='CTF home directory')
+    parser.add_argument('--new', action='store_true', help='First session — create skeleton solve_log')
+    parser.add_argument('--target', help='Target URL (used with --new for context)')
+    parser.add_argument('--ack-failed-paths', action='store_true',
+                        help='Acknowledge that you have read the Failed Paths section')
+
+    args = parser.parse_args()
+
+    # SI-018: time the whole gate run for the audit entry.
+    start_time = time.monotonic()
+    exit_code = 1
+
+    # Sync labutil's audit log path with the runtime $HACKING_LAB so audit
+    # events land in the right lab's findings/.agent-audit.jsonl.
+    _resolve_lab_root()
+
+    # Validate challenge name (path-traversal guard, T2-01)
+    labutil.require_valid_name(args.challenge, "challenge")
+
+    # Resolve ctf_home: explicit flag > cwd detection > fail
+    ctf_home_str = args.ctf_home
+    if not ctf_home_str:
+        cwd = os.getcwd()
+        if os.path.isdir(os.path.join(cwd, "challenges")):
+            ctf_home_str = cwd
+    if not ctf_home_str:
+        print(color("\n  FAIL: could not determine CTF home. Pass --ctf-home or run from a program folder.", RED))
+        _audit_and_exit(args, Path(), start_time, exit_code)
+    ctf_home = Path(os.path.expanduser(ctf_home_str))
+    challenges_dir = ctf_home / "challenges"
+    challenge_dir = challenges_dir / args.challenge
+
+    print(color(f"\n  lab-preflight — {args.challenge}", BOLD))
+    print(color(f"  {'=' * 60}", BOLD))
+
+    if not challenges_dir.exists():
+        print(color(f"\n  FAIL: challenges/ directory not found at {challenges_dir}", RED))
+        print(color("  Run this from the CTF home, or specify --ctf-home", RED))
+        _audit_and_exit(args, challenge_dir, start_time, exit_code)
+
+    if args.new:
+        if challenge_dir.exists():
+            print(color(f"\n  FAIL: challenge directory already exists: {challenge_dir}", RED))
+            print(color("  Remove --new if this is a returning session", RED))
+            _audit_and_exit(args, challenge_dir, start_time, exit_code)
+        challenge_dir.mkdir(parents=True, exist_ok=True)
+        print(f"  Created challenge directory: {challenge_dir}")
+    elif not challenge_dir.exists():
+        print(color(f"\n  FAIL: challenge directory not found: {challenge_dir}", RED))
+        print(color("  Run with --new for a first session, or check the challenge name", RED))
+        _audit_and_exit(args, challenge_dir, start_time, exit_code)
+
+    # Run the gates. _run_gates returns (exit_code, has_warnings) and never
+    # calls sys.exit — main() handles audit + exit.
+    exit_code, _has_warnings = _run_gates(args, ctf_home, challenge_dir)
+    duration_ms = int((time.monotonic() - start_time) * 1000)
+
+    # SI-018: audit every preflight run. Engagement name is read from
+    # <challenge_dir>/engagement.txt if it exists (best-effort; missing
+    # engagement.txt is fine for --new sessions).
+    engagement_name = ""
+    eng_file = challenge_dir / "engagement.txt"
+    if eng_file.is_file() and not eng_file.is_symlink():
+        try:
+            engagement_name = eng_file.read_text(encoding="utf-8").splitlines()[0].strip()
+        except OSError:
+            engagement_name = ""
+    _audit_preflight(
+        args.target or "", engagement_name, args.challenge,
+        challenge_dir, exit_code, duration_ms,
+    )
+
+    sys.exit(exit_code)
+
 
 if __name__ == '__main__':
     main()

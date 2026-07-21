@@ -1,0 +1,7 @@
+{
+  "inputs/.env.example": "2e08c6cca1edd53b5e694643bc6759d4c7c69c8dc57d197470258bb752a9276b",
+  "inputs/Dotfile": "7c87681245855d8284dfcd5c2bfe39729f48cd95c3eb81729eb6828bb7214cd5",
+  "inputs/command_metadata": "a43e356b0e647977568acc93bfbd2637c99ec19f1a402fa89b5b9df5ac2d214d",
+  "inputs/evidence_notes": "87f23528094dfebe2c0037e07f2c3411b9eb98a7e23621b896a3e6d9f99e2c8f",
+  "inputs/file_index.txt": "e9bd935edc66f275a80ce0810ad1ff5fe5b381501284e806d223cad32df15b65"
+}

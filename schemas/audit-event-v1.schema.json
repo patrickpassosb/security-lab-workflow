@@ -1,0 +1,72 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://security-lab/schemas/audit-event-v1.schema.json",
+  "title": "Audit Event v1",
+  "description": "Canonical schema for a single line in findings/.agent-audit.jsonl.\n\nEvery tool invocation against a target is recorded as one JSON object per\nline (JSONL). All writers MUST go through lib/labutil.audit() so the entry\nis produced with file locking (fcntl.flock), symlink protection, the `agent`\nfield populated from the environment, and json.dumps (never string\nformatting) to prevent JSON injection.\n\nRequired fields: ts, agent, action.\nOptional fields: target, engagement, exit, detail.\nPer-writer extras (e.g. challenge, label, type, name) are allowed via the\ncanonical writer's **extra channel — see lib/labutil.py:audit().\n\nThis schema is a documentation artifact. Runtime enforcement (validating\nwrites against this schema before they hit disk) is a future task.\n",
+  "type": "object",
+  "additionalProperties": true,
+  "required": ["ts", "agent", "action"],
+  "properties": {
+    "ts": {
+      "type": "string",
+      "description": "ISO 8601 UTC timestamp the event was recorded, e.g. 2026-07-19T12:34:56Z. Produced by labutil.audit() as datetime.now(UTC).strftime('%Y-%m-%dT%H:%M:%SZ').",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}Z$",
+      "examples": ["2026-07-19T12:34:56Z"]
+    },
+    "agent": {
+      "type": "string",
+      "description": "Identity of the agent/user that produced the event. Populated from os.environ.get('USER', os.environ.get('LOGNAME', 'agent')).",
+      "minLength": 1,
+      "examples": ["agent"]
+    },
+    "action": {
+      "type": "string",
+      "description": "What the agent did. Canonical short string, e.g. 'scope-check', 'ctf-evidence', 'nuclei', 'h1-report-check'. Replaces the deprecated, unsafe `cmd` string field.",
+      "minLength": 1,
+      "examples": ["scope-check", "ctf-evidence", "nuclei", "lab-firstpass", "h1-report-check", "issue"]
+    },
+    "target": {
+      "type": "string",
+      "description": "Target host or URL the action was performed against. Omitted when the action is not target-specific (e.g. an internal 'issue' report).",
+      "examples": ["example.com", "https://example.com/path", "127.0.0.1:8080"]
+    },
+    "engagement": {
+      "type": "string",
+      "description": "Engagement name the action belongs to (matches engagements/<name>.yaml). Empty string means no engagement (global check only).",
+      "examples": ["my-ctf", "acme-bounty", "log4j-cve"]
+    },
+    "exit": {
+      "type": "integer",
+      "description": "Exit code of the tool invocation. Omitted when the action is not a subprocess invocation.",
+      "minimum": 0,
+      "maximum": 255,
+      "examples": [0, 1, 2]
+    },
+    "detail": {
+      "type": "string",
+      "description": "Free-form short human-readable detail. Must not contain secrets, private keys, tokens, or credentials (see h1-report secret-scrubbing test for the pattern).",
+      "examples": ["OK: in scope", "DENIED: matches global denied *.gov", "finished in 12s"]
+    }
+  },
+  "examples": [
+    {
+      "ts": "2026-07-19T12:34:56Z",
+      "agent": "agent",
+      "action": "scope-check",
+      "target": "example.com",
+      "engagement": "my-ctf",
+      "exit": 0,
+      "detail": "OK: in scope"
+    },
+    {
+      "ts": "2026-07-19T12:35:00Z",
+      "agent": "agent",
+      "action": "ctf-evidence",
+      "target": "https://example.com",
+      "engagement": "my-ctf",
+      "challenge": "web1",
+      "label": "screenshot",
+      "exit": 0
+    }
+  ]
+}

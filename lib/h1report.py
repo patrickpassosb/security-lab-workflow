@@ -886,9 +886,9 @@ def _validate_severity(fm: dict[str, Any], path: Path) -> list[Issue]:
         return issues
     score = sev.get("score")
     # B3: reject bool explicitly — Python's bool is a subclass of int, so
-    # `isinstance(True, (int, float))` is True and `score: true` would be
+    # `isinstance(True, int | float)` is True and `score: true` would be
     # silently accepted as 1.0. YAML booleans must not be valid severity scores.
-    if isinstance(score, bool) or not isinstance(score, (int, float)):
+    if isinstance(score, bool) or not isinstance(score, int | float):
         kind = type(score).__name__
         issues.append(Issue("ERROR", loc, f"severity.score must be a number, got {kind}"))
         return issues
@@ -1591,7 +1591,11 @@ def status_report(
         "engagement": manifest.get("engagement", ""),
         "program": manifest.get("program", ""),
         "asset_id": manifest.get("asset_id", ""),
-        "attachments": len(manifest.get("attachments") or []) if isinstance(manifest.get("attachments"), list) else 0,
+        "attachments": (
+            len(manifest.get("attachments") or [])
+            if isinstance(manifest.get("attachments"), list)
+            else 0
+        ),
     }
 
     # Integrity: re-hash report_h1.md and report.md in the package and compare

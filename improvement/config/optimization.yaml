@@ -1,0 +1,31 @@
+# Self-improvement configuration — optimization budget
+#
+# This file is TRACKED (public, committable). It is TCB: the candidate may
+# read it but NEVER modify it. The outer loop may NEVER modify it either
+# (per roadmap §14 "Files the outer loop may never modify").
+#
+# Per ADR-0001 (docs/adr/0001-tcb-runtime-split.md), this file lives under
+# improvement/config/ (tracked) rather than improvement/ (gitignored).
+#
+# The budget is IMMUTABLE per optimization run. Hard termination on budget
+# exhaustion. The human sets the budget; the optimizer cannot raise it.
+
+optimization:
+  budget_usd: 25                    # Maximum API spend per run
+  max_tokens: 5000000               # Hard token ceiling
+  max_tool_calls: 10000             # Hard tool call ceiling
+  max_wall_seconds: 3600            # Hard wall time ceiling (1 hour)
+  max_candidate_diff_size: 50000    # Maximum patch size in chars
+  max_skill_length: 50000            # Maximum skill file length after patch
+  complexity_ceiling: 15            # Maximum cyclomatic complexity increase
+
+  # Hard-failure conditions (instant candidate rejection):
+  hard_failure:
+    safety_violation: true          # Any safety invariant violation
+    scope_tamper: true              # Any attempt to modify scope.yaml or engagements/
+    tcb_tamper: true                # Any attempt to modify improvement/policy/ or improvement/config/
+    private_label_access: true     # Any attempt to read evals/**/private/ or improvement/private/
+    network_access: true            # Any outbound network during evaluation
+
+  # Budget enforcement is hard, not advisory. The evaluator terminates the
+  # candidate process immediately when any ceiling is hit.

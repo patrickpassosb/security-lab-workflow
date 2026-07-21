@@ -35,21 +35,116 @@ if [ ! -d "$INSTALL_DIR" ]; then
         && (cd "$INSTALL_DIR" && git checkout HEAD -- . 2>/dev/null) \
         || git clone --local "$SCRIPT_DIR" "$INSTALL_DIR"
     else
-      # Non-git dir: rsync with excludes (or cp -R + cleanup if rsync missing)
+      # Non-git dir: framework allowlist copy.
+      # SI-000: Replaced the previous rsync exclude-list with an explicit
+      # framework allowlist. The old exclude-list (.env, .git, sandboxes/,
+      # wordlists/, .venv, __pycache__, node_modules, .audit.jsonl) could still
+      # copy private local state (bounties/, ctfs/, cves/, findings/, engagements/
+      # real scope, docs/ with private roadmaps). The allowlist copies ONLY
+      # known framework paths; everything else stays in the source clone.
+      # SI-001: docs/ is now sanitized and added to the allowlist. Only
+      # committed, public docs are copied (gitignored docs stay in source).
+      # SI-002: improvement/policy/ and improvement/config/ are tracked TCB
+      # and added to the allowlist. improvement/{state,runs,candidates,private}/
+      # are gitignored runtime/private state and NOT copied.
       if command -v rsync >/dev/null 2>&1; then
+        # Build the rsync include list from FRAMEWORK_PATHS.
+        # rsync semantics: --include=<path> --include=<path>/ --exclude='*'
+        # (trailing slash on dir = include dir and recurse into it).
         rsync -a \
-          --exclude='.env' --exclude='.git' --exclude='sandboxes/' \
-          --exclude='wordlists/' --exclude='.venv' --exclude='__pycache__/' \
-          --exclude='node_modules/' --exclude='.audit.jsonl' \
+          --include='bin/' --include='bin/**' \
+          --include='lib/' --include='lib/**' \
+          --include='skills/' --include='skills/**' \
+          --include='templates/' --include='templates/**' \
+          --include='tests/' --include='tests/**' \
+          --include='.github/' --include='.github/**' \
+          --include='docs/' --include='docs/**' \
+          --include='improvement/' \
+          --include='improvement/policy/' --include='improvement/policy/**' \
+          --include='improvement/config/' --include='improvement/config/**' \
+          --exclude='improvement/*' \
+          --include='engagements/' --include='engagements/example-bounty.yaml' \
+          --include='engagements/example-ctf.yaml' \
+          --include='engagements/cve-research.yaml' \
+          --exclude='engagements/*' \
+          --include='AGENTS.md' \
+          --include='README.md' \
+          --include='CONTRIBUTING.md' \
+          --include='CHANGELOG.md' \
+          --include='CHEATSHEET.md' \
+          --include='CLAUDE.md' \
+          --include='CODE_OF_CONDUCT.md' \
+          --include='LICENSE' \
+          --include='Makefile' \
+          --include='SECURITY.md' \
+          --include='requirements.txt' \
+          --include='ruff.toml' \
+          --include='scope.yaml' \
+          --include='.env.example' \
+          --include='.gitleaks.toml' \
+          --include='.gitignore' \
+          --include='.shellcheckrc' \
+          --include='install.sh' \
+          --exclude='*' \
           "$SCRIPT_DIR/" "$INSTALL_DIR/"
       else
-        cp -R "$SCRIPT_DIR" "$INSTALL_DIR"
-        rm -rf "$INSTALL_DIR/.env" "$INSTALL_DIR/.git" "$INSTALL_DIR/sandboxes" \
-               "$INSTALL_DIR/wordlists" "$INSTALL_DIR/.venv" "$INSTALL_DIR/__pycache__" \
-               "$INSTALL_DIR/node_modules" "$INSTALL_DIR/.audit.jsonl" 2>/dev/null || true
+        # cp fallback: copy each allowlisted path individually.
+        # dirs are copied recursively; files are copied as-is.
+        for path in bin lib skills templates tests .github docs; do
+          [ -e "$SCRIPT_DIR/$path" ] && cp -R "$SCRIPT_DIR/$path" "$INSTALL_DIR/"
+        done
+        # improvement/: only policy/ and config/ (tracked TCB), not state/runs/
+        # candidates/private/ (gitignored runtime/private state).
+        mkdir -p "$INSTALL_DIR/improvement"
+        for sub in policy config; do
+          if [ -d "$SCRIPT_DIR/improvement/$sub" ]; then
+            cp -R "$SCRIPT_DIR/improvement/$sub" "$INSTALL_DIR/improvement/"
+          fi
+        done
+        mkdir -p "$INSTALL_DIR/engagements"
+        for f in engagements/example-bounty.yaml engagements/example-ctf.yaml \
+                 engagements/cve-research.yaml; do
+          [ -f "$SCRIPT_DIR/$f" ] && cp "$SCRIPT_DIR/$f" "$INSTALL_DIR/$f"
+        done
+        for f in AGENTS.md README.md CONTRIBUTING.md CHANGELOG.md CHEATSHEET.md \
+                 CLAUDE.md CODE_OF_CONDUCT.md LICENSE Makefile SECURITY.md \
+                 requirements.txt ruff.toml scope.yaml .env.example .gitleaks.toml \
+                 .gitignore .shellcheckrc install.sh; do
+          [ -f "$SCRIPT_DIR/$f" ] && cp "$SCRIPT_DIR/$f" "$INSTALL_DIR/$f"
+        done
       fi
-      # Dead check removed: the rsync/cp above already handled the non-git case.
-      # (The previous LAB_INSTALL_OFFLINE check was dead code and tripped set -u.)
+      # Defensive: ensure no engagement-private content leaked through.
+      for private in bounties ctfs cves findings; do
+        if [ -d "${INSTALL_DIR:?}/$private" ]; then
+          echo ">> WARN: $private/ present in install dir — removing (private)"
+          rm -rf "${INSTALL_DIR:?}/$private"
+        fi
+      done
+      # Defensive: ensure no real engagement scope leaked through.
+      for private_eng in "$INSTALL_DIR"/engagements/bounty-*.yaml \
+                        "$INSTALL_DIR"/engagements/ctf-*.yaml; do
+        # Allowlist: engagements/example-bounty.yaml, engagements/example-ctf.yaml,
+        # engagements/cve-research.yaml. Anything else matching the glob is private.
+        case "$(basename "$private_eng" 2>/dev/null)" in
+          example-bounty.yaml|example-ctf.yaml|cve-research.yaml) ;;
+          "")
+            # Glob did not match — skip
+            ;;
+          *)
+            echo ">> WARN: removing private engagement file: $private_eng"
+            rm -f "$private_eng"
+            ;;
+        esac
+      done 2>/dev/null || true
+      # Defensive: ensure no gitignored improvement/ runtime state leaked
+      # through (SI-002). Only improvement/policy/ and improvement/config/ are
+      # allowlisted; state/, runs/, candidates/, private/ are gitignored.
+      for private_sub in state runs candidates private; do
+        if [ -d "${INSTALL_DIR:?}/improvement/$private_sub" ]; then
+          echo ">> WARN: improvement/$private_sub/ present in install dir — removing (private)"
+          rm -rf "${INSTALL_DIR:?}/improvement/$private_sub"
+        fi
+      done
     fi
   else
     echo "git not found and target $INSTALL_DIR does not exist." >&2

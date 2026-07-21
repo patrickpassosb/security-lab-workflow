@@ -1,0 +1,9 @@
+schema: security-lab/eval-case/v1
+case_id: synthetic-attachment-completeness-001
+suite: synthetic
+split: train
+description: "Attachment completeness: evidence referenced but attachments array empty"
+category: workflow
+tags: [h1-reporting, attachments, evidence]
+regression_source: handoff-2.6-item-4
+# No expected answers here - those are in private/labels.json (gitignored)

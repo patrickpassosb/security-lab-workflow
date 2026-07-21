@@ -1,0 +1,9 @@
+schema: security-lab/eval-case/v1
+case_id: synthetic-submitted-by-empty-001
+suite: synthetic
+split: train
+description: "submitted_by empty in receipt: must be required in future recordings"
+category: workflow
+tags: [h1-reporting, receipt, required-fields]
+regression_source: handoff-2.6-item-12
+# No expected answers here - those are in private/labels.json (gitignored)

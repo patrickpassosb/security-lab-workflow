@@ -1,0 +1,12 @@
+{
+  "attachments": [],
+  "engagement": "example-bounty",
+  "package_id": "prepared-20260715T150820Z",
+  "prepared_at": "2026-07-15T15:08:20Z",
+  "report_body": {
+    "path": "report.md",
+    "sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+  },
+  "schema": "security-lab/hackerone-package/v1",
+  "workspace_path": "findings/example-finding/"
+}

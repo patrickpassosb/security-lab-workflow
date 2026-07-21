@@ -1,0 +1,13 @@
+lab-h1-report check output (synthetic):
+
+FAIL - title is empty
+FAIL - weakness is empty
+FAIL - severity.rating is empty
+FAIL - finding_type is empty
+FAIL - Summary contains TODO placeholder
+FAIL - Steps to reproduce contains TODO placeholder
+FAIL - Remediation contains TODO placeholder
+FAIL - Impact contains TODO placeholder
+FAIL - manual_only is false but report is a placeholder
+
+9 failures. Report must be rejected.

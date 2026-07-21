@@ -224,7 +224,14 @@ def audit(
     if challenge:
         entry["challenge"] = challenge
     for k, v in extra.items():
-        if v:
+        # SI-018: numeric instrument fields (duration_ms, exit) should be
+        # written whenever they are not None — a 0ms command is still a
+        # valid duration and must be recorded for the "every command logs
+        # duration" guarantee. String extras keep the truthy guard so
+        # empty strings (e.g. no workspace_id) are dropped cleanly.
+        if v is None:
+            continue
+        if isinstance(v, int | float | bool) or v:
             entry[k] = v
     try:
         atomic_append_jsonl(AUDIT_LOG_PATH, entry)
@@ -371,10 +378,10 @@ def check_target_scope(
         2 = DENIED (matches a denied pattern — global or engagement)
         3 = UNKNOWN (no match anywhere — default-deny)
 
-    Order (per AGENTS.md and the scope SKILL docs):
+    Order (per AGENTS.md, the scope SKILL docs, and SI-006):
         1. Global denied → DENIED (always wins, cannot be overridden)
-        2. Engagement in_scope → ALLOW (overrides engagement denied)
-        3. Engagement denied → DENIED
+        2. Engagement denied → DENIED (engagement denial blocks; in_scope cannot override)
+        3. Engagement in_scope → ALLOW
         4. Otherwise → UNKNOWN (default-deny; ask human)
     """
     host = extract_host(target)
@@ -387,17 +394,17 @@ def check_target_scope(
             reason = _reason_from_item(item)
             return 2, f"DENIED: {host} matches global denied pattern '{pat}' ({reason})"
 
-    for item in in_scope:
-        pat = _pattern_from_item(item)
-        if match_pattern(host, target, pat):
-            note = _reason_from_item(item)
-            return 0, f"OK: {host} matches in-scope pattern '{pat}' ({note})"
-
     for item in denied_eng:
         pat = _pattern_from_item(item)
         if match_pattern(host, target, pat):
             reason = _reason_from_item(item)
             return 2, f"DENIED: {host} matches engagement denied pattern '{pat}' ({reason})"
+
+    for item in in_scope:
+        pat = _pattern_from_item(item)
+        if match_pattern(host, target, pat):
+            note = _reason_from_item(item)
+            return 0, f"OK: {host} matches in-scope pattern '{pat}' ({note})"
 
     return 3, f"UNKNOWN: {host} is not in scope"
 

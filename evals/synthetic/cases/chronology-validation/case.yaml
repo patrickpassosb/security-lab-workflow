@@ -1,0 +1,10 @@
+schema: security-lab/eval-case/v1
+case_id: synthetic-chronology-validation-001
+suite: synthetic
+split: train
+description: "Chronology validation: package prepared AFTER claimed submitted_at"
+category: workflow
+tags: [chronology, h1-reporting, temporal-consistency]
+regression_source: handoff-2.6-item-2
+temporal_gap_seconds: 17652
+# No expected answers here - those are in private/labels.json (gitignored)

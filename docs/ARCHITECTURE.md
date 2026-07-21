@@ -45,7 +45,8 @@ $HACKING_LAB/
 ├── scope.yaml                      # Global denied list (gov/mil/edu)
 ├── .env.example                    # Documents env vars (committed)
 ├── .env                            # Real credentials (gitignored)
-└── .audit.jsonl                    # Shared audit log (gitignored)
+└── findings/
+    └── .agent-audit.jsonl           # Shared audit log (gitignored)
 ```
 
 The framework (what gets committed and shipped as open source) lives in `bin/`, `skills/`, `templates/`, `engagements/`, `docs/`, `scope.yaml`, and the root docs. Engagement data (flags, findings, CVE drafts) lives in `ctfs/`, `bounties/`, `cves/`, and `findings/` — these are gitignored or held in a separate private repo.
@@ -255,11 +256,13 @@ Copy the example, fill in real values. Never committed.
 
 ## The audit log
 
-Every tool invocation against a target is logged to `$HACKING_LAB/findings/.agent-audit.jsonl` (gitignored). One JSON line per command:
+Every tool invocation against a target is logged to `findings/.agent-audit.jsonl` (gitignored, relative to the lab root). One JSON line per command:
 
 ```json
-{"ts":"...","agent":"...","cmd":"...","target":"...","engagement":"...","exit":0}
+{"ts":"...","agent":"...","action":"...","target":"...","engagement":"...","exit":0}
 ```
+
+The canonical schema is defined in `lib/labutil.py:audit()`. The required fields are `ts`, `agent`, `action`. Optional fields include `target`, `engagement`, `exit`, `detail`, and other per-writer extras. All audit writes use `json.dumps` (never string formatting) to prevent JSON injection. Writers must use `lib/labutil.audit()`, not direct file appends — the canonical writer handles locking, symlink protection, and schema validation (SI-005).
 
 This is how you reconstruct what happened in a session — and how you prove you stayed in scope.
 
@@ -273,3 +276,4 @@ This is how you reconstruct what happened in a session — and how you prove you
 - **Extensible.** New engagement type = new YAML file + new template dir. No code changes needed.
 - **Config-driven.** Env vars, not hardcoded paths. Installable by anyone.
 - **Skills are the API.** Each `SKILL.md` is a documented, versioned interface. Community contributes new skills as PRs.
+- **Self-improving (planned).** The lab has a governed self-improvement system design (see [`SELF_IMPROVEMENT_ROADMAP.md`](SELF_IMPROVEMENT_ROADMAP.md)) that records platform outcomes, builds offline evaluation cases, generates candidate skill improvements, and promotes them through human-gated evaluation. Implementation is in progress; see the roadmap for current phase status.

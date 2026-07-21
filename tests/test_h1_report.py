@@ -5,6 +5,7 @@ Task 1: reusable report parser + read-only `check` and `status` commands.
 Run: pytest tests/test_h1_report.py -q
 """
 
+import contextlib
 import copy
 import importlib.machinery
 import importlib.util
@@ -3158,10 +3159,8 @@ class TestAdversarialRound6:
         """P2: the fallback extract_host in h1report must also handle the
         ValueError (exercised via the fallback path when labutil import fails)."""
         from urllib.parse import urlparse
-        try:
-            urlparse("http://[::1,")
-        except ValueError:
-            pass  # confirm it raises
+        with contextlib.suppress(ValueError):
+            urlparse("http://[::1,")  # confirm it raises
         # The h1report module's extract_host (whether labutil or fallback)
         # must not raise.
         assert h1report.extract_host("http://[::1,") == ""
@@ -3344,3 +3343,69 @@ class TestAdversarialRound6:
                    for d in status["integrity_drift"]), (
             f"scalar scope_snapshots should report drift; got {status['integrity_drift']}"
         )
+
+
+# ─── _load_submission_thresholds: YAML error handling ─────────────────────────
+
+
+class TestLoadSubmissionThresholdsYamlHandling:
+    """Verify _load_submission_thresholds falls back to conservative
+    defaults when submission.yaml is missing, malformed (YAMLError), or
+    PyYAML is unavailable (ImportError) — rather than crashing the
+    assess/record-outcome commands that depend on it."""
+
+    cli = _import_cli()
+
+    DEFAULT_TRIAL = 0.85
+    DEFAULT_NORMAL = 0.70
+
+    def _cfg_path(self, lab_root: Path) -> Path:
+        return lab_root / "improvement" / "config" / "submission.yaml"
+
+    def test_missing_file_returns_defaults(self, tmp_path):
+        lab = tmp_path / "lab"
+        cfg = self._cfg_path(lab)
+        cfg.parent.mkdir(parents=True, exist_ok=True)
+        # No submission.yaml written -> defaults.
+        out = self.cli._load_submission_thresholds(lab)
+        assert out["trial_report_threshold"] == self.DEFAULT_TRIAL
+        assert out["normal_threshold"] == self.DEFAULT_NORMAL
+
+    def test_malformed_yaml_returns_defaults(self, tmp_path):
+        """A corrupt submission.yaml (unparseable) must raise
+        yaml.YAMLError, which the handler catches and falls back to
+        defaults — never propagates to the caller."""
+        lab = tmp_path / "lab"
+        cfg = self._cfg_path(lab)
+        cfg.parent.mkdir(parents=True, exist_ok=True)
+        # Unterminated flow mapping -> yaml.YAMLError on safe_load.
+        cfg.write_text("submission: {trial_report_threshold: 0.9,\n", encoding="utf-8")
+        out = self.cli._load_submission_thresholds(lab)
+        assert out["trial_report_threshold"] == self.DEFAULT_TRIAL
+        assert out["normal_threshold"] == self.DEFAULT_NORMAL
+
+    def test_import_error_returns_defaults(self, tmp_path, monkeypatch):
+        """When PyYAML is not installed, `import yaml` raises ImportError,
+        which the handler catches and falls back to defaults."""
+        lab = tmp_path / "lab"
+        cfg = self._cfg_path(lab)
+        cfg.parent.mkdir(parents=True, exist_ok=True)
+        cfg.write_text(
+            "submission:\n  trial_report_threshold: 0.9\n", encoding="utf-8"
+        )
+        # Force the `import yaml` inside _load_submission_thresholds to fail.
+        # The function does a local `import yaml`, so we poison sys.modules
+        # so the local import raises ImportError.
+        import builtins
+
+        real_import = builtins.__import__
+
+        def _fake_import(name, *args, **kwargs):
+            if name == "yaml":
+                raise ImportError("simulated: PyYAML not installed")
+            return real_import(name, *args, **kwargs)
+
+        monkeypatch.setattr(builtins, "__import__", _fake_import)
+        out = self.cli._load_submission_thresholds(lab)
+        assert out["trial_report_threshold"] == self.DEFAULT_TRIAL
+        assert out["normal_threshold"] == self.DEFAULT_NORMAL

@@ -1,0 +1,11 @@
+Session handoff status (stale):
+
+Finding: example-finding
+Submitted: no        <- STALE (bounty_log.md)
+Report ID: n/a       <- STALE
+
+Receipt (record.json) says otherwise:
+  report_id: 1234571
+  submitted_at: 2026-07-15T14:00:00Z
+
+Receipts must win over stale bounty_log.md and handoff status.
