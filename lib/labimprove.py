@@ -82,8 +82,13 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
+import shutil
+import subprocess
 import uuid
+from collections.abc import Callable
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -442,6 +447,498 @@ def stage_candidate(
     )
 
     return metadata
+
+
+# ─── propose_candidate (SI-029, Phase 4 outer loop) ────────────────────────────
+
+
+@dataclass
+class CandidatePatch:
+    """A candidate skill patch proposed by the outer loop.
+
+    Per roadmap §23.2 and the karpathy/autoresearch pattern. The outer
+    loop reads the incumbent skill + trust-filtered lessons + public
+    eval results, calls an LLM to propose a unified diff, and returns
+    this object. The patch is then staged (``stage_candidate``) and
+    safety-tested (``run_safety_tests``) before any eval run.
+
+    Attributes:
+        patch: the unified diff text (the proposed change).
+        skill_path: repo-relative path to the skill the patch modifies
+            (e.g. ``skills/security/bounty-attack/SKILL.md``).
+        rationale: the LLM's explanation of why it made this change
+            (human-readable; never contains private labels).
+        linked_lessons: lesson IDs the LLM cited as motivation (a
+            subset of the lessons passed in; the LLM picks the ones it
+            used).
+        llm_model: the model identifier that produced the patch (for
+            provenance).
+        llm_agent: the agent CLI used (``"claude"`` / ``"codex"`` /
+            ``"opencode"`` / ``"inline"`` for the in-process test
+            runner).
+        token_cost: approximate token cost of the LLM call (best-effort;
+            0 when unknown).
+        error: when non-empty, the proposal failed and this is the
+            human-readable reason. When ``error`` is set, ``patch`` is
+            the empty string.
+    """
+
+    patch: str = ""
+    skill_path: str = ""
+    rationale: str = ""
+    linked_lessons: list[str] = field(default_factory=list)
+    llm_model: str = ""
+    llm_agent: str = ""
+    token_cost: int = 0
+    error: str = ""
+
+
+# Trust filter for lessons (per roadmap §8.3 / SI-003). The outer loop
+# may ONLY show the LLM lessons whose trust label allows promotion.
+# ``target_derived`` (trust=never-prime) lessons are NEVER shown to the
+# LLM — they are untrusted target output and must not influence the
+# skill. ``workflow`` / ``external`` lessons are shown with a warning
+# prefix. ``public`` lessons are shown as-is (strongest signal).
+_TRUST_NEVER = frozenset({"target_derived"})
+_TRUST_WARN = frozenset({"workflow", "external"})
+
+
+def _filter_lessons_for_llm(lessons: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Filter lessons for the LLM prompt (trust-aware).
+
+    Per roadmap §8.3 and the privacy contract. Drops ``target_derived``
+    lessons entirely (never shown to the LLM). Prefixes ``workflow`` /
+    ``external`` lessons with a trust warning. Passes ``public`` lessons
+    through unchanged.
+
+    Returns a new list of lesson dicts (the originals are not mutated).
+    Each returned dict has the same shape as the input plus a
+    ``_trust_note`` field (``""`` for public, ``"UNVERIFIED — "`` for
+    workflow/external).
+    """
+    out: list[dict[str, Any]] = []
+    for lesson in lessons:
+        source_kind = str(lesson.get("source_kind") or "")
+        if source_kind in _TRUST_NEVER:
+            # Never show target-derived lessons to the LLM.
+            continue
+        out_lesson = dict(lesson)
+        if source_kind in _TRUST_WARN:
+            out_lesson["_trust_note"] = "UNVERIFIED — "
+        else:
+            out_lesson["_trust_note"] = ""
+        out.append(out_lesson)
+    return out
+
+
+def _public_eval_summary(eval_results: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Build a public-only summary of eval results (private labels hidden).
+
+    Per roadmap §23.2: "The LLM does NOT see: private labels, holdout/OOD
+    cases, evaluator source code, safety invariant files." This function
+    strips the eval results down to:
+        - case_id
+        - passed (bool)
+        - partial_credit (float)
+        - hard_failure (bool)
+        - reason (the candidate's reason, NEVER the expected verdict)
+
+    The expected verdict (the private label) is NEVER included. The
+    ``reason`` field is the candidate's own explanation, not the
+    evaluator's comparison to the expected label.
+    """
+    out: list[dict[str, Any]] = []
+    for r in eval_results:
+        out.append({
+            "case_id": str(r.get("case_id") or "unknown"),
+            "passed": bool(r.get("passed", False)),
+            "partial_credit": float(r.get("partial_credit", 0.0) or 0.0),
+            "hard_failure": bool(r.get("hard_failure", False)),
+            "reason": str(r.get("reason") or ""),
+        })
+    return out
+
+
+def _build_propose_prompt(
+    incumbent_skill: str,
+    skill_rel: str,
+    lessons: list[dict[str, Any]],
+    eval_summary: list[dict[str, Any]],
+    budget: dict[str, Any],
+) -> str:
+    """Build the LLM prompt for ``propose_candidate``.
+
+    Follows the karpathy/autoresearch pattern: "you may only edit this
+    one skill file." The prompt:
+      - States the single file the LLM may modify.
+      - Shows the incumbent skill text.
+      - Shows the trust-filtered lessons.
+      - Shows the public eval summary (private labels hidden).
+      - Asks for a unified diff in a fenced code block.
+      - Asks for a one-paragraph rationale.
+      - Asks for the lesson IDs the LLM used (a subset).
+      - Forbids modifying any other file, weakening safety controls,
+        or referencing private labels.
+    """
+    lessons_json = json.dumps(lessons, sort_keys=True, indent=2)
+    eval_json = json.dumps(eval_summary, sort_keys=True, indent=2)
+    budget_json = json.dumps(budget, sort_keys=True, indent=2)
+    return f"""You are a security-lab skill improver. Your job is to propose a
+single improvement to ONE skill file, following the karpathy/autoresearch
+pattern: you may ONLY edit this one skill file.
+
+# Allowed mutation
+
+You may modify ONLY: {skill_rel}
+
+You may NOT modify any other file. You may NOT weaken safety controls,
+scope checks, rate limits, human submission gates, audit logging, or
+evaluator code. You may NOT reference private evaluation labels,
+holdout cases, or expected verdicts (you do not have them).
+
+# Incumbent skill
+
+The current skill text is:
+
+```markdown
+{incumbent_skill}
+```
+
+# Lessons (trust-filtered)
+
+The following lessons have been captured from prior sessions. Lessons
+prefixed with "UNVERIFIED — " are workflow/external observations that
+have not been independently verified; use them with caution. Lessons
+derived from target output (untrusted) have been removed entirely.
+
+```json
+{lessons_json}
+```
+
+# Public eval results (private labels hidden)
+
+The eval results below show only the candidate's own verdict and
+pass/fail status. The expected verdicts (private labels) are NOT shown
+to you — you must improve the skill without overfitting to specific
+cases.
+
+```json
+{eval_json}
+```
+
+# Budget
+
+The improvement must be producible within this budget:
+
+```json
+{budget_json}
+```
+
+# Output format
+
+Respond with EXACTLY three sections, in this order:
+
+1. A fenced ```diff code block containing the unified diff against the
+   incumbent skill. Use the format:
+   ```
+   --- a/{skill_rel}
+   +++ b/{skill_rel}
+   @@ -<line>,<len> +<line>,<len> @@
+    context
+   -removed
+   +added
+    context
+   ```
+
+2. A fenced ```rationale code block (or a paragraph after "## Rationale:")
+   with a one-paragraph explanation of why you made this change and what
+   you expect it to improve.
+
+3. A fenced ```lessons code block containing a JSON array of lesson IDs
+   you used as motivation (a subset of the lessons shown above). Example:
+   ["lesson-abc", "lesson-def"]
+
+Do not include any other text outside these three sections. Do not
+modify any file other than {skill_rel}.
+"""
+
+
+def _parse_llm_response(
+    response: str,
+    skill_rel: str,
+) -> tuple[str, str, list[str]]:
+    """Parse the LLM response into (patch, rationale, linked_lessons).
+
+    Returns ``("", "", [])`` on parse failure. The caller treats an
+    empty patch as a proposal failure (CandidatePatch.error set).
+    """
+    if not response or not response.strip():
+        return "", "", []
+
+    # Extract the diff block. Accept ```diff or ``` blocks; the first
+    # fenced block that starts with --- is the patch.
+    patch = ""
+    rationale = ""
+    linked_lessons: list[str] = []
+
+    # Find all fenced code blocks.
+    fence_re = re.compile(r"```([a-zA-Z0-9_-]*)\s*\n(.*?)```", re.DOTALL)
+    blocks = fence_re.findall(response)
+
+    for lang, body in blocks:
+        lang_lc = lang.lower()
+        if not patch and (
+            lang_lc == "diff"
+            or body.lstrip().startswith("---")
+        ):
+            patch = body.strip()
+            continue
+        if (
+            not rationale
+            and lang_lc in ("rationale", "text", "")
+            and not body.lstrip().startswith("---")
+        ):
+            # Heuristic: a rationale block is non-diff prose. Only
+            # accept it if it doesn't look like a diff.
+            rationale = body.strip()
+            continue
+        if lang_lc == "lessons" or lang_lc == "json":
+            # Try to parse as a JSON array of lesson IDs.
+            try:
+                parsed = json.loads(body.strip())
+                if isinstance(parsed, list):
+                    linked_lessons = [str(x) for x in parsed if isinstance(x, str)]
+                    continue
+            except ValueError:
+                pass
+
+    # Fallback: if no fenced rationale block, look for a "## Rationale"
+    # markdown section.
+    if not rationale:
+        m = re.search(r"##\s*Rationale\s*\n+(.*?)(?:\n##\s|\Z)", response, re.DOTALL)
+        if m:
+            rationale = m.group(1).strip()
+
+    # Fallback: if no fenced lessons block, look for a "## Lessons"
+    # section with a JSON array.
+    if not linked_lessons:
+        m = re.search(r"##\s*Lessons\s*\n+```[a-zA-Z]*\s*\n(.*?)```", response, re.DOTALL)
+        if m:
+            try:
+                parsed = json.loads(m.group(1).strip())
+                if isinstance(parsed, list):
+                    linked_lessons = [str(x) for x in parsed if isinstance(x, str)]
+            except ValueError:
+                pass
+
+    return patch, rationale, linked_lessons
+
+
+def _default_llm_call(prompt: str, agent: str | None = None) -> tuple[str, str, str]:
+    """Default LLM call: shell out to an agent CLI (claude/codex/opencode).
+
+    Returns ``(response_text, model_id, agent_name)``. The agent is
+    chosen in this order: the ``agent`` argument (when provided), then
+    ``$LAB_IMPROVE_AGENT`` env var, then the first available of
+    ``claude``, ``codex``, ``opencode``.
+
+    The agent is invoked with ``-p`` (print mode / non-interactive) and
+    the prompt on stdin. We use a generous timeout (10 minutes) since
+    LLM calls can be slow; the outer loop's budget enforcement is the
+    real ceiling.
+
+    This runs in the TRUSTED parent process (not the eval sandbox), so
+    it MAY make network calls to the model API. Per ADR-0003, the
+    candidate subprocess is the untrusted one; the outer loop is
+    trusted.
+    """
+    # Pick the agent.
+    candidates: list[str] = []
+    if agent:
+        candidates.append(agent)
+    env_agent = os.environ.get("LAB_IMPROVE_AGENT")
+    if env_agent:
+        candidates.append(env_agent)
+    candidates.extend(["claude", "codex", "opencode"])
+
+    chosen: str | None = None
+    for c in candidates:
+        if shutil.which(c):
+            chosen = c
+            break
+    if chosen is None:
+        raise FileNotFoundError(
+            "no agent CLI found for propose_candidate (tried: "
+            + ", ".join(candidates)
+            + "). Set LAB_IMPROVE_AGENT or install one of them."
+        )
+
+    # Invoke the agent with the prompt on stdin. ``-p`` puts claude /
+    # codex in print mode (non-interactive). opencode uses a different
+    # invocation; we try the common ``-p`` flag and fall back to a
+    # bare invocation if the agent doesn't support it.
+    argv: list[str] = [chosen, "-p"]
+    try:
+        result = subprocess.run(
+            argv,
+            input=prompt,
+            capture_output=True,
+            text=True,
+            timeout=600,  # 10 minutes
+        )
+    except subprocess.TimeoutExpired as e:
+        raise TimeoutError(
+            f"agent CLI {chosen} timed out after 600s: {e}"
+        ) from e
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"agent CLI {chosen} exited {result.returncode}: "
+            f"{result.stderr[:500]}"
+        )
+    # Best-effort model id — we don't parse the agent's output for it.
+    model_id = os.environ.get("LAB_IMPROVE_MODEL", "")
+    return result.stdout, model_id, chosen
+
+
+def propose_candidate(
+    incumbent_skill_path: Path,
+    lessons: list[dict[str, Any]],
+    eval_results: list[dict[str, Any]],
+    budget: dict[str, Any],
+    *,
+    llm_call: Callable[[str], tuple[str, str, str]] | None = None,
+    agent: str | None = None,
+    repo_root: Path | None = None,
+) -> CandidatePatch:
+    """Propose a candidate skill patch via an LLM (the outer loop).
+
+    Per roadmap §23.2 and the karpathy/autoresearch pattern. The outer
+    loop:
+
+      1. Reads the incumbent skill text.
+      2. Reads linked lessons (trust-filtered — ``target_derived``
+         lessons are dropped; ``workflow``/``external`` lessons are
+         shown with a warning).
+      3. Reads public eval results (private labels hidden — only
+         case_id + pass/fail + reason are shown to the LLM).
+      4. Calls an LLM to propose a unified diff.
+      5. Returns the patch for staging + safety testing.
+
+    The LLM does NOT see:
+      - Private labels (expected verdicts).
+      - Holdout/OOD cases (the caller filters these out before passing
+        eval_results).
+      - Evaluator source code.
+      - Safety invariant files.
+
+    Args:
+        incumbent_skill_path: path to the incumbent skill file (the one
+            the LLM may modify).
+        lessons: list of lesson dicts (shape: ``schemas/lesson-v1``).
+            Trust-filtered internally; the caller does NOT need to
+            pre-filter.
+        eval_results: list of per-case eval result dicts. Only the
+            public fields (case_id, passed, partial_credit,
+            hard_failure, reason) are shown to the LLM.
+        budget: the budget envelope for the improvement run (echoed to
+            the LLM so it knows the constraints).
+        llm_call: optional in-process LLM callable (for unit tests).
+            When None, the default ``_default_llm_call`` shells out to
+            an agent CLI. The callable takes the prompt and returns
+            ``(response_text, model_id, agent_name)``.
+        agent: override the agent CLI (``"claude"`` / ``"codex"`` /
+            ``"opencode"``). Ignored when ``llm_call`` is provided.
+        repo_root: optional repo root (used to compute the
+            repo-relative skill path). When None, walks up from the
+            skill path to find a ``.git`` dir.
+
+    Returns:
+        A ``CandidatePatch``. On success, ``patch`` is the unified diff
+        text, ``rationale`` is the LLM's explanation, ``linked_lessons``
+        is the subset of lesson IDs the LLM cited, and ``error`` is
+        empty. On failure (LLM call failed, no patch parsed, empty
+        patch), ``error`` is a human-readable reason and ``patch`` is
+        empty.
+
+    Safety:
+      - This function runs in the TRUSTED parent process (the outer
+        loop). It MAY make network calls to the model API. The
+        candidate subprocess (the eval sandbox) is the untrusted one;
+        this is not it.
+      - The returned patch is NOT applied to the live skill. The caller
+        must ``stage_candidate`` it and ``run_safety_tests`` on it
+        before any eval run. Safety tests (MUT-001, MUT-002) enforce
+        that the patch only modifies allowlisted files and does not
+        touch safety-critical paths.
+    """
+    skill_path = Path(incumbent_skill_path).resolve()
+    if not skill_path.is_file():
+        return CandidatePatch(
+            error=f"incumbent skill not found: {skill_path}",
+        )
+
+    # Compute the repo-relative skill path (for the diff header).
+    if repo_root is None:
+        repo_root = _repo_root_from(skill_path)
+    try:
+        skill_rel = str(skill_path.resolve().relative_to(repo_root.resolve()).as_posix())
+    except ValueError:
+        # Skill is outside the repo — use the bare filename.
+        skill_rel = skill_path.name
+
+    # Read the incumbent skill text.
+    try:
+        incumbent_text = skill_path.read_text(encoding="utf-8")
+    except OSError as e:
+        return CandidatePatch(
+            error=f"could not read incumbent skill: {type(e).__name__}: {e}",
+            skill_path=skill_rel,
+        )
+
+    # Trust-filter the lessons.
+    filtered_lessons = _filter_lessons_for_llm(lessons)
+    # Build the public eval summary (private labels hidden).
+    eval_summary = _public_eval_summary(eval_results)
+
+    # Build the prompt.
+    prompt = _build_propose_prompt(
+        incumbent_text, skill_rel, filtered_lessons, eval_summary, budget
+    )
+
+    # Call the LLM.
+    try:
+        if llm_call is not None:
+            response, model_id, agent_name = llm_call(prompt)
+        else:
+            response, model_id, agent_name = _default_llm_call(prompt, agent=agent)
+    except Exception as e:  # noqa: BLE001 — surface as CandidatePatch.error
+        return CandidatePatch(
+            skill_path=skill_rel,
+            error=f"LLM call failed: {type(e).__name__}: {e}",
+        )
+
+    # Parse the response.
+    patch, rationale, linked_lessons = _parse_llm_response(response, skill_rel)
+    if not patch:
+        return CandidatePatch(
+            skill_path=skill_rel,
+            rationale=rationale,
+            llm_model=model_id,
+            llm_agent=agent_name,
+            error=(
+                "LLM did not produce a parseable unified diff. "
+                f"Response (first 500 chars): {response[:500]!r}"
+            ),
+        )
+
+    return CandidatePatch(
+        patch=patch,
+        skill_path=skill_rel,
+        rationale=rationale,
+        linked_lessons=linked_lessons,
+        llm_model=model_id,
+        llm_agent=agent_name,
+    )
 
 
 # ─── run_safety_tests ──────────────────────────────────────────────────────────
@@ -904,6 +1401,8 @@ def run_safety_tests(
 
 __all__ = [
     "CANDIDATES_DIR",
+    "CandidatePatch",
     "stage_candidate",
+    "propose_candidate",
     "run_safety_tests",
 ]

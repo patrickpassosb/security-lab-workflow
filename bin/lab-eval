@@ -1,0 +1,303 @@
+#!/usr/bin/env python3
+"""lab-eval — run an eval suite against a skill file (SI-022, Phase 3).
+
+Per roadmap section 22 (Phase 3 — Offline evaluation) and ADR-0003.
+Runs a candidate skill against every case in an eval suite, in an
+isolated subprocess per case (bwrap --unshare-net for network namespace
+isolation). Outputs structured results to stdout (JSON) and an optional
+output file.
+
+Usage:
+    lab-eval --suite <dir> --skill <path> [--budget <seconds>]
+             [--split <train|val|holdout|all>] [--agent <name>]
+             [--out <path>] [--quiet]
+
+Examples:
+    # Run the baseline (current bounty-attack skill) on the synthetic suite
+    lab-eval --suite evals/synthetic --skill skills/security/bounty-attack/SKILL.md
+
+    # Run a candidate skill on the holdout split, save results to a file
+    lab-eval --suite evals/bounty/bounty-v1 \\
+        --skill improvement/candidates/<id>/bounty-attack.md \\
+        --split holdout --agent candidate-<id> --out holdout-results.json
+
+Exit codes:
+    0 = run completed (cases may have passed or failed; check the JSON)
+    1 = bad arguments / missing files
+    2 = suite structurally invalid (use `lab-eval --suite <dir> --validate` to debug)
+    3 = isolation unavailable (bwrap not found; per ADR-0003, no fallback)
+"""
+
+from __future__ import annotations
+
+import json
+import sys
+from pathlib import Path
+from typing import Any
+
+# Make lib/ importable (same pattern as bin/lab-scope).
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib"))
+
+import labeval as LE  # noqa: E402
+import labutil  # noqa: E402
+
+
+def _print_help() -> None:
+    print(__doc__)
+
+
+def _parse_args(argv: list[str]) -> dict[str, Any]:
+    """Parse CLI args. Returns a dict; exits 1 on bad args."""
+    opts: dict[str, Any] = {
+        "suite": "",
+        "skill": "",
+        "budget_seconds": 300,
+        "max_tokens": 50_000,
+        "max_tool_calls": 30,
+        "budget_usd": 1.0,
+        "split": "all",
+        "agent": "baseline",
+        "out": "",
+        "quiet": False,
+        "validate": False,
+    }
+    i = 0
+    while i < len(argv):
+        a = argv[i]
+        if a in ("-h", "--help"):
+            _print_help()
+            sys.exit(0)
+        if a == "--suite" and i + 1 < len(argv):
+            opts["suite"] = argv[i + 1]
+            i += 2
+            continue
+        if a.startswith("--suite="):
+            opts["suite"] = a.split("=", 1)[1]
+            i += 1
+            continue
+        if a == "--skill" and i + 1 < len(argv):
+            opts["skill"] = argv[i + 1]
+            i += 2
+            continue
+        if a.startswith("--skill="):
+            opts["skill"] = a.split("=", 1)[1]
+            i += 1
+            continue
+        if a == "--budget" and i + 1 < len(argv):
+            try:
+                opts["budget_seconds"] = int(argv[i + 1])
+            except ValueError:
+                print(f"--budget expects an integer (seconds), got {argv[i + 1]!r}",
+                      file=sys.stderr)
+                sys.exit(1)
+            i += 2
+            continue
+        if a.startswith("--budget="):
+            try:
+                opts["budget_seconds"] = int(a.split("=", 1)[1])
+            except ValueError:
+                print(f"--budget expects an integer (seconds), got {a!r}",
+                      file=sys.stderr)
+                sys.exit(1)
+            i += 1
+            continue
+        if a == "--max-tokens" and i + 1 < len(argv):
+            try:
+                opts["max_tokens"] = int(argv[i + 1])
+            except ValueError:
+                print(f"--max-tokens expects an integer, got {argv[i + 1]!r}",
+                      file=sys.stderr)
+                sys.exit(1)
+            i += 2
+            continue
+        if a == "--max-tool-calls" and i + 1 < len(argv):
+            try:
+                opts["max_tool_calls"] = int(argv[i + 1])
+            except ValueError:
+                print(f"--max-tool-calls expects an integer, got {argv[i + 1]!r}",
+                      file=sys.stderr)
+                sys.exit(1)
+            i += 2
+            continue
+        if a == "--budget-usd" and i + 1 < len(argv):
+            try:
+                opts["budget_usd"] = float(argv[i + 1])
+            except ValueError:
+                print(f"--budget-usd expects a number, got {argv[i + 1]!r}",
+                      file=sys.stderr)
+                sys.exit(1)
+            i += 2
+            continue
+        if a == "--split" and i + 1 < len(argv):
+            opts["split"] = argv[i + 1]
+            i += 2
+            continue
+        if a.startswith("--split="):
+            opts["split"] = a.split("=", 1)[1]
+            i += 1
+            continue
+        if a == "--agent" and i + 1 < len(argv):
+            opts["agent"] = argv[i + 1]
+            i += 2
+            continue
+        if a.startswith("--agent="):
+            opts["agent"] = a.split("=", 1)[1]
+            i += 1
+            continue
+        if a == "--out" and i + 1 < len(argv):
+            opts["out"] = argv[i + 1]
+            i += 2
+            continue
+        if a.startswith("--out="):
+            opts["out"] = a.split("=", 1)[1]
+            i += 1
+            continue
+        if a in ("-q", "--quiet"):
+            opts["quiet"] = True
+            i += 1
+            continue
+        if a == "--validate":
+            opts["validate"] = True
+            i += 1
+            continue
+        print(f"Unknown option: {a}", file=sys.stderr)
+        _print_help()
+        sys.exit(1)
+
+    # Validate split value.
+    if opts["split"] not in ("train", "val", "holdout", "ood", "all"):
+        print(
+            f"--split must be one of train|val|holdout|ood|all, got {opts['split']!r}",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    return opts
+
+
+def _validate_only(suite_dir: Path) -> int:
+    """Run validate_suite and print errors. Exit 0 if valid, 2 if not."""
+    errors = LE.validate_suite(suite_dir)
+    if not errors:
+        print(f"OK: suite {suite_dir} is structurally valid")
+        return 0
+    print(f"INVALID: suite {suite_dir} has {len(errors)} error(s):", file=sys.stderr)
+    for e in errors:
+        print(f"  - {e}", file=sys.stderr)
+    return 2
+
+
+def main() -> int:
+    opts = _parse_args(sys.argv[1:])
+
+    if not opts["suite"]:
+        print("--suite is required", file=sys.stderr)
+        _print_help()
+        return 1
+
+    suite_dir = Path(opts["suite"]).resolve()
+    if not suite_dir.is_dir():
+        print(f"ERROR: suite dir not found: {suite_dir}", file=sys.stderr)
+        return 1
+
+    # --validate mode: just run the validator and exit.
+    if opts["validate"]:
+        return _validate_only(suite_dir)
+
+    if not opts["skill"]:
+        print("--skill is required (or use --validate to check the suite only)",
+              file=sys.stderr)
+        return 1
+
+    skill_path = Path(opts["skill"]).resolve()
+    if not skill_path.is_file():
+        print(f"ERROR: skill file not found: {skill_path}", file=sys.stderr)
+        return 1
+
+    # Check isolation availability (ADR-0003 §3 — hard-fail, no fallback).
+    if not LE.isolation_available():
+        print(
+            "ERROR: evaluation isolation unavailable — bwrap not found on PATH.\n"
+            "       Per ADR-0003 §3, there is no advisory-only fallback. The\n"
+            "       evaluator refuses to run candidates without enforceable\n"
+            "       network-namespace isolation. Install bubblewrap:\n"
+            "         dnf install bubblewrap   # Fedora\n"
+            "         apt install bubblewrap   # Debian/Ubuntu\n"
+            "       Do NOT fall back to advisory-only isolation.",
+            file=sys.stderr,
+        )
+        return 3
+
+    budget = LE.Budget(
+        max_wall_seconds=int(opts["budget_seconds"]),
+        max_tokens=int(opts["max_tokens"]),
+        max_tool_calls=int(opts["max_tool_calls"]),
+        budget_usd=float(opts["budget_usd"]),
+    )
+
+    if not opts["quiet"]:
+        labutil.log(
+            f"lab-eval: suite={suite_dir.name} skill={skill_path.name} "
+            f"split={opts['split']} agent={opts['agent']} budget={budget}"
+        )
+
+    try:
+        result = LE.run_suite(
+            suite_dir=suite_dir,
+            skill_path=skill_path,
+            budget=budget,
+            split=opts["split"],
+            agent=opts["agent"],
+        )
+    except LE.IsolationUnavailable as e:
+        print(f"ERROR: isolation unavailable: {e}", file=sys.stderr)
+        return 3
+
+    # Build the JSON output.
+    out = LE.suite_result_to_jsonable(result)
+
+    # Write to file if requested.
+    if opts["out"]:
+        out_path = Path(opts["out"])
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text(json.dumps(out, indent=2, sort_keys=True) + "\n",
+                            encoding="utf-8")
+        if not opts["quiet"]:
+            labutil.log(f"lab-eval: results written to {out_path}")
+
+    # Print a human-readable summary to stderr (so stdout stays clean for
+    # JSON piping) unless --quiet.
+    if not opts["quiet"]:
+        print(
+            f"SUITE: {result.suite}  AGENT: {result.agent}  SPLIT: {result.split}",
+            file=sys.stderr,
+        )
+        print(
+            f"TOTAL: {result.total}  PASSED: {result.passed}  "
+            f"FAILED: {result.failed}  HARD_FAILURES: {result.hard_failures}",
+            file=sys.stderr,
+        )
+        if result.suite_errors:
+            print(f"SUITE_ERRORS: {len(result.suite_errors)}", file=sys.stderr)
+            for e in result.suite_errors:
+                print(f"  - {e}", file=sys.stderr)
+        print(
+            f"BUDGET_USED: usd={result.budget_used.get('actual_usd', 0):.4f} "
+            f"tokens={result.budget_used.get('actual_tokens', 0)} "
+            f"tool_calls={result.budget_used.get('actual_tool_calls', 0)} "
+            f"wall_s={result.budget_used.get('actual_wall_seconds', 0):.2f}",
+            file=sys.stderr,
+        )
+
+    # Print the JSON to stdout (always — so callers can pipe it).
+    print(json.dumps(out, indent=2, sort_keys=True))
+
+    # Exit code: 0 if the run completed (even with failures), 2 if the
+    # suite was structurally invalid, 3 if isolation was unavailable.
+    if result.suite_errors:
+        return 2
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

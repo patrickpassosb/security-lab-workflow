@@ -709,3 +709,444 @@ class TestNoExceptionContract:
         # No .git at tmp_path — repo_root will be None. Should not raise.
         errs = LE.validate_suite(suite)
         assert isinstance(errs, list)
+
+
+# ─── Runner: run_case, run_suite (SI-022, ADR-0003) ────────────────────────────
+
+
+class TestRunnerHelpers:
+    """Tests for the runner's helper functions (no subprocess required)."""
+
+    def test_isolation_available_returns_bool(self):
+        # On any host, isolation_available() returns a bool. We don't
+        # assert the value (CI sandboxes vary) but it must not raise.
+        val = LE.isolation_available()
+        assert isinstance(val, bool)
+
+    def test_budget_to_limit_dict_shape(self):
+        b = LE.Budget(max_wall_seconds=10, max_tokens=100, max_tool_calls=5, budget_usd=2.5)
+        d = b.to_limit_dict()
+        assert d == {
+            "budget_usd": 2.5,
+            "max_tokens": 100,
+            "max_tool_calls": 5,
+            "max_wall_seconds": 10,
+        }
+
+    def test_budget_exceeded_safety_violation(self):
+        exceeded, reason = LE._budget_exceeded(
+            {"safety_violation": True, "actual_usd": 0.0, "actual_tokens": 0,
+             "actual_tool_calls": 0, "actual_wall_seconds": 0.0},
+            LE.Budget(),
+        )
+        assert exceeded is True
+        assert "Safety violation" in reason
+
+    def test_budget_exceeded_usd(self):
+        exceeded, reason = LE._budget_exceeded(
+            {"safety_violation": False, "actual_usd": 2.0, "actual_tokens": 0,
+             "actual_tool_calls": 0, "actual_wall_seconds": 0.0},
+            LE.Budget(budget_usd=1.0),
+        )
+        assert exceeded is True
+        assert "USD" in reason
+
+    def test_budget_exceeded_tokens(self):
+        exceeded, reason = LE._budget_exceeded(
+            {"safety_violation": False, "actual_usd": 0.0, "actual_tokens": 200,
+             "actual_tool_calls": 0, "actual_wall_seconds": 0.0},
+            LE.Budget(max_tokens=100),
+        )
+        assert exceeded is True
+        assert "Token" in reason
+
+    def test_budget_exceeded_tool_calls(self):
+        exceeded, reason = LE._budget_exceeded(
+            {"safety_violation": False, "actual_usd": 0.0, "actual_tokens": 0,
+             "actual_tool_calls": 50, "actual_wall_seconds": 0.0},
+            LE.Budget(max_tool_calls=10),
+        )
+        assert exceeded is True
+        assert "Tool-call" in reason
+
+    def test_budget_not_exceeded_at_exact_limit(self):
+        # Hitting the ceiling exactly is allowed (strict greater-than).
+        exceeded, _ = LE._budget_exceeded(
+            {"safety_violation": False, "actual_usd": 1.0, "actual_tokens": 100,
+             "actual_tool_calls": 10, "actual_wall_seconds": 10.0},
+            LE.Budget(max_wall_seconds=10, max_tokens=100, max_tool_calls=10, budget_usd=1.0),
+        )
+        assert exceeded is False
+
+    def test_accumulate_budget_from_events(self):
+        events = [
+            {"event": "tokens", "count": 100},
+            {"event": "tool_call", "name": "list_inputs"},
+            {"event": "cost", "usd": 0.5},
+            {"event": "tokens", "count": 50},
+            {"event": "cost", "usd": 0.25},
+            {"event": "safety_violation"},
+        ]
+        budget_used, sig = LE._accumulate_budget_from_events(events)
+        assert budget_used["actual_tokens"] == 150
+        assert budget_used["actual_tool_calls"] == 1
+        assert budget_used["actual_usd"] == 0.75
+        assert budget_used["safety_violation"] is True
+        assert sig is False  # no "budget_exhausted" event
+
+    def test_load_suite_returns_cases_and_errors(self, lab_root: Path, suite_dir: Path):
+        _make_valid_suite(suite_dir, n_cases=2)
+        cases, errors = LE.load_suite(suite_dir)
+        assert errors == []
+        assert len(cases) == 2
+        assert all(isinstance(c, LE.EvalCase) for c in cases)
+        # case_id comes from case.yaml (default fixture writes "c-001").
+        assert cases[0].case_id == "c-001"
+        assert cases[0].split == "all"  # default when absent
+
+    def test_load_suite_invalid_returns_errors(self, lab_root: Path, suite_dir: Path):
+        # Don't create the suite — load_suite returns errors.
+        cases, errors = LE.load_suite(suite_dir)
+        assert cases == []
+        assert len(errors) >= 1
+        assert any("does not exist" in e for e in errors)
+
+
+class TestRunCaseInProcess:
+    """Tests for run_case using the in-process candidate_runner (no subprocess).
+
+    The candidate_runner bypass is for testing only — it does NOT
+    provide isolation. It lets us test the EvalResult construction,
+    budget accounting, and error paths without spawning bwrap.
+    """
+
+    def test_in_process_runner_returns_verdict(self, lab_root: Path, suite_dir: Path):
+        _make_valid_suite(suite_dir, n_cases=1)
+        case_dir = suite_dir / "cases" / "case-001"
+        skill = lab_root / "SKILL.md"
+        skill.write_text("# skill\n", encoding="utf-8")
+
+        def runner(inputs_dir, skill_path, output_dir):
+            return {
+                "case_id": "c-001",
+                "technical_verdict": "confirmed",
+                "reportability": "do_not_report",
+                "impact_demonstrated": False,
+                "novelty": "known_informative",
+            }
+
+        result = LE.run_case(
+            case_path=case_dir,
+            skill_path=skill,
+            budget=LE.Budget(),
+            candidate_runner=runner,
+        )
+        assert result.completed is True
+        assert result.hard_failure is False
+        assert result.run_kind == "stub"
+        assert result.verdict["technical_verdict"] == "confirmed"
+        assert result.verdict["case_id"] == "c-001"
+
+    def test_in_process_runner_exception_is_hard_failure(
+        self, lab_root: Path, suite_dir: Path
+    ):
+        _make_valid_suite(suite_dir, n_cases=1)
+        case_dir = suite_dir / "cases" / "case-001"
+        skill = lab_root / "SKILL.md"
+        skill.write_text("# skill\n", encoding="utf-8")
+
+        def runner(inputs_dir, skill_path, output_dir):
+            raise RuntimeError("boom")
+
+        result = LE.run_case(
+            case_path=case_dir,
+            skill_path=skill,
+            budget=LE.Budget(),
+            candidate_runner=runner,
+        )
+        assert result.completed is False
+        assert result.hard_failure is True
+        assert "candidate_runner raised" in result.reason
+        assert "RuntimeError" in result.reason
+        assert "boom" in result.reason
+
+    def test_in_process_runner_non_dict_is_hard_failure(
+        self, lab_root: Path, suite_dir: Path
+    ):
+        _make_valid_suite(suite_dir, n_cases=1)
+        case_dir = suite_dir / "cases" / "case-001"
+        skill = lab_root / "SKILL.md"
+        skill.write_text("# skill\n", encoding="utf-8")
+
+        def runner(inputs_dir, skill_path, output_dir):
+            return "not a dict"
+
+        result = LE.run_case(
+            case_path=case_dir,
+            skill_path=skill,
+            budget=LE.Budget(),
+            candidate_runner=runner,
+        )
+        assert result.completed is False
+        assert result.hard_failure is True
+        assert "non-dict" in result.reason
+
+    def test_missing_skill_is_hard_failure(self, lab_root: Path, suite_dir: Path):
+        _make_valid_suite(suite_dir, n_cases=1)
+        case_dir = suite_dir / "cases" / "case-001"
+        result = LE.run_case(
+            case_path=case_dir,
+            skill_path=lab_root / "nonexistent.md",
+            budget=LE.Budget(),
+            candidate_runner=lambda *a: {},
+        )
+        assert result.hard_failure is True
+        assert "skill file not found" in result.reason
+
+    def test_missing_inputs_dir_is_hard_failure(self, lab_root: Path, suite_dir: Path):
+        _make_valid_suite(suite_dir, n_cases=1)
+        case_dir = suite_dir / "cases" / "case-001"
+        skill = lab_root / "SKILL.md"
+        skill.write_text("# skill\n", encoding="utf-8")
+        # Remove the inputs dir entirely (including any subdirs).
+        import shutil as _shutil
+        _shutil.rmtree(case_dir / "inputs", ignore_errors=True)
+        result = LE.run_case(
+            case_path=case_dir,
+            skill_path=skill,
+            budget=LE.Budget(),
+            candidate_runner=lambda *a: {},
+        )
+        assert result.hard_failure is True
+        assert "inputs dir not found" in result.reason
+
+
+class TestRunCaseIsolation:
+    """Tests for run_case with real bwrap isolation (ADR-0003).
+
+    These tests are skipped when bwrap is not available — per ADR-0003,
+    there is no advisory-only fallback. The tests verify the isolation
+    contract: the child cannot reach the network, cannot read private
+    labels, and produces a structured verdict.
+    """
+
+    @pytest.fixture
+    def isolated_suite(self, lab_root: Path) -> Path:
+        """A valid 1-case suite with private labels for isolation tests."""
+        suite = lab_root / "evals" / "iso"
+        _make_valid_suite(suite, n_cases=1)
+        # Write real private labels.
+        labels = {
+            "c-001": {
+                "case_id": "c-001",
+                "technical_verdict": "confirmed",
+                "reportability": "do_not_report",
+                "impact_demonstrated": False,
+                "novelty": "known_informative",
+            }
+        }
+        (suite / "private" / "labels.json").write_text(
+            json.dumps(labels, sort_keys=True), encoding="utf-8"
+        )
+        return suite
+
+    @pytest.fixture
+    def skill_file(self, lab_root: Path) -> Path:
+        s = lab_root / "SKILL.md"
+        s.write_text("# bounty-attack\n\nBase skill.\n", encoding="utf-8")
+        return s
+
+    def test_isolated_run_produces_verdict(
+        self, isolated_suite: Path, skill_file: Path
+    ):
+        if not LE.isolation_available():
+            pytest.skip("bwrap not available — ADR-0003 isolation unavailable")
+        result = LE.run_case(
+            case_path=isolated_suite / "cases" / "case-001",
+            skill_path=skill_file,
+            budget=LE.Budget(max_wall_seconds=30, max_tokens=100000,
+                             max_tool_calls=100, budget_usd=10.0),
+        )
+        assert result.run_kind == "isolated"
+        assert result.completed is True
+        assert result.hard_failure is False
+        assert result.verdict.get("case_id") == "case-001"
+        # The stub verdict has these fields.
+        assert result.verdict.get("technical_verdict") == "inconclusive"
+        assert result.verdict.get("reportability") == "gather_more_evidence"
+        # Budget was tracked.
+        assert result.budget_used["actual_tokens"] > 0
+        assert result.budget_used["actual_tool_calls"] >= 1
+        assert result.budget_used["actual_usd"] > 0
+        assert result.budget_used["actual_wall_seconds"] >= 0
+
+    def test_isolated_run_budget_exhausted_on_wall_time(
+        self, isolated_suite: Path, skill_file: Path
+    ):
+        if not LE.isolation_available():
+            pytest.skip("bwrap not available — ADR-0003 isolation unavailable")
+        # 1-second wall budget — SIGTERM at 90% (0.9s) kills the child
+        # before it can finish. The run should be a hard failure with
+        # budget_exhausted=True.
+        result = LE.run_case(
+            case_path=isolated_suite / "cases" / "case-001",
+            skill_path=skill_file,
+            budget=LE.Budget(max_wall_seconds=1, max_tokens=100000,
+                             max_tool_calls=100, budget_usd=10.0),
+        )
+        assert result.hard_failure is True
+        assert result.budget_exhausted is True
+        assert "Wall time" in result.reason
+
+    def test_isolation_unavailable_raises_when_no_bwrap(
+        self, isolated_suite: Path, skill_file: Path, monkeypatch
+    ):
+        # Simulate bwrap being unavailable.
+        monkeypatch.setattr(LE, "_find_bwrap", lambda: None)
+        with pytest.raises(LE.IsolationUnavailable) as exc_info:
+            LE.run_case(
+                case_path=isolated_suite / "cases" / "case-001",
+                skill_path=skill_file,
+                budget=LE.Budget(),
+            )
+        assert "no advisory-only fallback" in str(exc_info.value) or \
+               "advisory-only" in str(exc_info.value)
+
+
+class TestRunSuite:
+    """Tests for run_suite (aggregation across cases)."""
+
+    @pytest.fixture
+    def multi_case_suite(self, lab_root: Path) -> Path:
+        suite = lab_root / "evals" / "multi"
+        _make_valid_suite(suite, n_cases=3)
+        return suite
+
+    @pytest.fixture
+    def skill_file(self, lab_root: Path) -> Path:
+        s = lab_root / "SKILL.md"
+        s.write_text("# skill\n", encoding="utf-8")
+        return s
+
+    def test_run_suite_with_in_process_runner(self, multi_case_suite: Path, skill_file: Path):
+        # Use the in-process runner to avoid subprocess in CI.
+        def runner(inputs_dir, skill_path, output_dir):
+            return {
+                "case_id": inputs_dir.parent.name,
+                "technical_verdict": "inconclusive",
+                "reportability": "gather_more_evidence",
+                "impact_demonstrated": False,
+                "novelty": "unknown",
+            }
+
+        result = LE.run_suite(
+            suite_dir=multi_case_suite,
+            skill_path=skill_file,
+            budget=LE.Budget(),
+            agent="baseline",
+            candidate_runner=runner,
+        )
+        assert result.suite == "multi"
+        assert result.total == 3
+        assert result.passed == 3
+        assert result.hard_failures == 0
+        assert result.suite_errors == []
+        assert len(result.results) == 3
+        assert result.isolation_available is True or result.isolation_available is False
+
+    def test_run_suite_invalid_suite_returns_errors(
+        self, lab_root: Path, skill_file: Path
+    ):
+        missing = lab_root / "evals" / "does-not-exist"
+        result = LE.run_suite(
+            suite_dir=missing,
+            skill_path=skill_file,
+            budget=LE.Budget(),
+            agent="baseline",
+            candidate_runner=lambda *a: {},
+        )
+        assert result.suite_errors != []
+        assert result.total == 0
+        assert result.results == []
+
+    def test_run_suite_split_filter(self, multi_case_suite: Path, skill_file: Path):
+        # Set different splits on the cases.
+        for i, case_name in enumerate(["case-001", "case-002", "case-003"]):
+            case_yaml = multi_case_suite / "cases" / case_name / "case.yaml"
+            case_yaml.write_text(
+                f"schema: security-lab/eval-case/v1\ncase_id: c-{i+1:03d}\nsplit: "
+                f"{'train' if i < 2 else 'holdout'}\n",
+                encoding="utf-8",
+            )
+
+        def runner(inputs_dir, skill_path, output_dir):
+            return {"case_id": inputs_dir.parent.name, "technical_verdict": "inconclusive",
+                    "reportability": "gather_more_evidence", "impact_demonstrated": False,
+                    "novelty": "unknown"}
+
+        # train split should run 2 cases.
+        result = LE.run_suite(
+            suite_dir=multi_case_suite, skill_path=skill_file,
+            budget=LE.Budget(), split="train", candidate_runner=runner,
+        )
+        assert result.total == 2
+        assert result.split == "train"
+
+        # holdout split should run 1 case.
+        result = LE.run_suite(
+            suite_dir=multi_case_suite, skill_path=skill_file,
+            budget=LE.Budget(), split="holdout", candidate_runner=runner,
+        )
+        assert result.total == 1
+        assert result.split == "holdout"
+
+    def test_suite_result_to_jsonable(self, multi_case_suite: Path, skill_file: Path):
+        def runner(inputs_dir, skill_path, output_dir):
+            return {"case_id": inputs_dir.parent.name, "technical_verdict": "inconclusive",
+                    "reportability": "gather_more_evidence", "impact_demonstrated": False,
+                    "novelty": "unknown"}
+        result = LE.run_suite(
+            suite_dir=multi_case_suite, skill_path=skill_file,
+            budget=LE.Budget(), candidate_runner=runner,
+        )
+        out = LE.suite_result_to_jsonable(result)
+        # Should be JSON-serializable.
+        text = json.dumps(out, sort_keys=True)
+        assert "suite" in text
+        assert "results" in text
+        assert "budget_used" in text
+        assert "total" in text
+
+
+class TestRunSuiteIsolation:
+    """Tests for run_suite with real bwrap isolation (ADR-0003)."""
+
+    @pytest.fixture
+    def isolated_suite(self, lab_root: Path) -> Path:
+        suite = lab_root / "evals" / "iso-suite"
+        _make_valid_suite(suite, n_cases=2)
+        return suite
+
+    @pytest.fixture
+    def skill_file(self, lab_root: Path) -> Path:
+        s = lab_root / "SKILL.md"
+        s.write_text("# skill\n", encoding="utf-8")
+        return s
+
+    def test_run_suite_with_real_isolation(self, isolated_suite: Path, skill_file: Path):
+        if not LE.isolation_available():
+            pytest.skip("bwrap not available — ADR-0003 isolation unavailable")
+        result = LE.run_suite(
+            suite_dir=isolated_suite,
+            skill_path=skill_file,
+            budget=LE.Budget(max_wall_seconds=30, max_tokens=100000,
+                             max_tool_calls=100, budget_usd=10.0),
+            agent="baseline",
+        )
+        assert result.total == 2
+        assert result.passed == 2  # stub verdicts are "completed"
+        assert result.hard_failures == 0
+        assert result.isolation_available is True
+        # Budget was accumulated across cases.
+        assert result.budget_used["actual_tokens"] > 0
+        assert result.budget_used["actual_tool_calls"] >= 2  # one per case

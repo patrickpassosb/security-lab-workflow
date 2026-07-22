@@ -423,4 +423,280 @@ class TestSafetyChecklistPlaceholder:
         assert "SIZE-002" in cl
         assert "SIZE-003" in cl
         assert "LEAK-001" in cl
-        assert "PENDING" in cl
+
+
+# ─── propose_candidate (SI-029, Phase 4 outer loop) ───────────────────────────
+
+
+def _fake_llm_response(patch_body: str, rationale: str, lessons: list[str]) -> str:
+    """Build a fake LLM response with the three required fenced blocks."""
+    return (
+        "```diff\n"
+        "--- a/skills/security/bounty-attack/SKILL.md\n"
+        "+++ b/skills/security/bounty-attack/SKILL.md\n"
+        "@@ -1,3 +1,4 @@\n"
+        " # bounty-attack\n"
+        f"{patch_body}\n"
+        " Base skill content.\n"
+        "```\n\n"
+        "```rationale\n"
+        f"{rationale}\n"
+        "```\n\n"
+        "```lessons\n"
+        + json.dumps(lessons)
+        + "\n```\n"
+    )
+
+
+def _fake_llm_call(patch_body: str, rationale: str, lessons: list[str]):
+    """Return a callable that mimics the LLM call interface."""
+    def _call(prompt: str) -> tuple[str, str, str]:
+        return _fake_llm_response(patch_body, rationale, lessons), "fake-model", "inline"
+    return _call
+
+
+class TestProposeCandidate:
+    """Tests for labimprove.propose_candidate (SI-029)."""
+
+    def test_propose_returns_candidate_patch(self, fake_repo: Path):
+        skill = fake_repo / "skills" / "security" / "bounty-attack" / "SKILL.md"
+        cand = LI.propose_candidate(
+            incumbent_skill_path=skill,
+            lessons=[],
+            eval_results=[],
+            budget={"budget_usd": 25.0, "max_tokens": 5000000, "max_wall_seconds": 3600},
+            llm_call=_fake_llm_call(
+                "+Added: check known_outcomes.yaml.",
+                "Adds a known-outcomes check.",
+                [],
+            ),
+            repo_root=fake_repo,
+        )
+        assert cand.error == ""
+        assert cand.patch.startswith("--- a/skills/security/bounty-attack/SKILL.md")
+        assert "Added: check known_outcomes" in cand.patch
+        assert cand.rationale == "Adds a known-outcomes check."
+        assert cand.llm_agent == "inline"
+        assert cand.llm_model == "fake-model"
+        assert cand.skill_path == "skills/security/bounty-attack/SKILL.md"
+
+    def test_propose_cites_linked_lessons(self, fake_repo: Path):
+        skill = fake_repo / "skills" / "bounty-attack" / "SKILL.md"
+        skill.parent.mkdir(parents=True)
+        skill.write_text("# skill\n", encoding="utf-8")
+        cand = LI.propose_candidate(
+            incumbent_skill_path=skill,
+            lessons=[],
+            eval_results=[],
+            budget={},
+            llm_call=_fake_llm_call("+x", "r", ["lesson-abc", "lesson-def"]),
+            repo_root=fake_repo,
+        )
+        assert cand.linked_lessons == ["lesson-abc", "lesson-def"]
+
+    def test_propose_filters_target_derived_lessons(self, fake_repo: Path):
+        """target_derived lessons must NEVER be shown to the LLM."""
+        skill = fake_repo / "skills" / "security" / "bounty-attack" / "SKILL.md"
+        lessons = [
+            {"lesson_id": "lesson-public", "source_kind": "public",
+             "claim": "Public lesson.", "kind": "heuristic"},
+            {"lesson_id": "lesson-target", "source_kind": "target_derived",
+             "claim": "UNTRUSTED target output.", "kind": "observation"},
+            {"lesson_id": "lesson-workflow", "source_kind": "workflow",
+             "claim": "Workflow note.", "kind": "pattern"},
+        ]
+        captured_prompt: list[str] = []
+
+        def _call(prompt: str) -> tuple[str, str, str]:
+            captured_prompt.append(prompt)
+            return _fake_llm_response("+x", "r", ["lesson-public"]), "fake", "inline"
+
+        cand = LI.propose_candidate(
+            incumbent_skill_path=skill,
+            lessons=lessons,
+            eval_results=[],
+            budget={},
+            llm_call=_call,
+            repo_root=fake_repo,
+        )
+        assert cand.error == ""
+        # The target_derived lesson must NOT appear in the prompt.
+        assert "lesson-target" not in captured_prompt[0]
+        assert "UNTRUSTED target output" not in captured_prompt[0]
+        # The public + workflow lessons SHOULD appear.
+        assert "lesson-public" in captured_prompt[0]
+        assert "lesson-workflow" in captured_prompt[0]
+        # The workflow lesson should be prefixed with the UNVERIFIED warning.
+        assert "UNVERIFIED" in captured_prompt[0]
+
+    def test_propose_hides_private_labels_from_eval_results(self, fake_repo: Path):
+        """The LLM must NOT see expected verdicts (private labels)."""
+        skill = fake_repo / "skills" / "security" / "bounty-attack" / "SKILL.md"
+        eval_results = [
+            {"case_id": "c-001", "passed": False, "partial_credit": 0.5,
+             "hard_failure": False, "reason": "wrong reportability",
+             # Private fields that must NOT be shown:
+             "expected_verdict": {"technical_verdict": "confirmed",
+                                  "reportability": "do_not_report"},
+             "expected_severity": {"min": "low", "max": "low"}},
+        ]
+        captured_prompt: list[str] = []
+
+        def _call(prompt: str) -> tuple[str, str, str]:
+            captured_prompt.append(prompt)
+            return _fake_llm_response("+x", "r", []), "fake", "inline"
+
+        cand = LI.propose_candidate(
+            incumbent_skill_path=skill,
+            lessons=[],
+            eval_results=eval_results,
+            budget={},
+            llm_call=_call,
+            repo_root=fake_repo,
+        )
+        assert cand.error == ""
+        # The public fields should appear.
+        assert "c-001" in captured_prompt[0]
+        assert "wrong reportability" in captured_prompt[0]
+        # The private fields must NOT appear.
+        assert "expected_verdict" not in captured_prompt[0]
+        assert "expected_severity" not in captured_prompt[0]
+        assert "do_not_report" not in captured_prompt[0]
+
+    def test_propose_missing_skill_returns_error(self, fake_repo: Path):
+        cand = LI.propose_candidate(
+            incumbent_skill_path=fake_repo / "nonexistent.md",
+            lessons=[],
+            eval_results=[],
+            budget={},
+            llm_call=lambda p: ("", "", ""),
+            repo_root=fake_repo,
+        )
+        assert cand.error != ""
+        assert "not found" in cand.error
+        assert cand.patch == ""
+
+    def test_propose_empty_llm_response_returns_error(self, fake_repo: Path):
+        skill = fake_repo / "skills" / "security" / "bounty-attack" / "SKILL.md"
+        cand = LI.propose_candidate(
+            incumbent_skill_path=skill,
+            lessons=[],
+            eval_results=[],
+            budget={},
+            llm_call=lambda p: ("", "", ""),  # empty response
+            repo_root=fake_repo,
+        )
+        assert cand.error != ""
+        assert "parseable unified diff" in cand.error
+        assert cand.patch == ""
+
+    def test_propose_llm_call_exception_returns_error(self, fake_repo: Path):
+        skill = fake_repo / "skills" / "security" / "bounty-attack" / "SKILL.md"
+
+        def _raising_call(prompt: str) -> tuple[str, str, str]:
+            raise RuntimeError("LLM API down")
+
+        cand = LI.propose_candidate(
+            incumbent_skill_path=skill,
+            lessons=[],
+            eval_results=[],
+            budget={},
+            llm_call=_raising_call,
+            repo_root=fake_repo,
+        )
+        assert cand.error != ""
+        assert "LLM call failed" in cand.error
+        assert "RuntimeError" in cand.error
+        assert "LLM API down" in cand.error
+
+    def test_propose_prompt_contains_karpathy_constraint(self, fake_repo: Path):
+        """The prompt must tell the LLM it may only edit one skill file."""
+        skill = fake_repo / "skills" / "security" / "bounty-attack" / "SKILL.md"
+        captured: list[str] = []
+
+        def _call(prompt: str) -> tuple[str, str, str]:
+            captured.append(prompt)
+            return _fake_llm_response("+x", "r", []), "fake", "inline"
+
+        LI.propose_candidate(
+            incumbent_skill_path=skill,
+            lessons=[],
+            eval_results=[],
+            budget={},
+            llm_call=_call,
+            repo_root=fake_repo,
+        )
+        # The karpathy/autoresearch pattern: "you may only edit this one
+        # skill file." The prompt should name the skill and forbid other
+        # modifications.
+        assert "ONLY" in captured[0] or "only" in captured[0]
+        assert "skills/security/bounty-attack/SKILL.md" in captured[0]
+        assert "safety" in captured[0].lower() or "safety" in captured[0]
+
+
+class TestProposeCandidateParsing:
+    """Tests for the LLM response parser (_parse_llm_response)."""
+
+    def test_parse_diff_block(self):
+        resp = "```diff\n--- a/x\n+++ b/x\n@@ -1,1 +1,1 @@\n-old\n+new\n```\n"
+        patch, rationale, lessons = LI._parse_llm_response(resp, "x")
+        assert patch.startswith("--- a/x")
+        assert "+new" in patch
+        assert "-old" in patch
+        assert rationale == ""
+        assert lessons == []
+
+    def test_parse_rationale_block(self):
+        resp = (
+            "```diff\n--- a/x\n+++ b/x\n@@ -1,1 +1,1 @@\n-old\n+new\n```\n\n"
+            "```rationale\nThis is why.\n```\n"
+        )
+        patch, rationale, _ = LI._parse_llm_response(resp, "x")
+        assert rationale == "This is why."
+
+    def test_parse_lessons_block(self):
+        resp = (
+            "```diff\n--- a/x\n+++ b/x\n@@ -1,1 +1,1 @@\n-old\n+new\n```\n\n"
+            "```lessons\n[\"lesson-1\", \"lesson-2\"]\n```\n"
+        )
+        _, _, lessons = LI._parse_llm_response(resp, "x")
+        assert lessons == ["lesson-1", "lesson-2"]
+
+    def test_parse_rationale_fallback_markdown_section(self):
+        resp = (
+            "```diff\n--- a/x\n+++ b/x\n@@ -1,1 +1,1 @@\n-old\n+new\n```\n\n"
+            "## Rationale\n\nThis is the rationale as a markdown section.\n"
+        )
+        _, rationale, _ = LI._parse_llm_response(resp, "x")
+        assert "This is the rationale" in rationale
+
+    def test_parse_empty_response(self):
+        patch, rationale, lessons = LI._parse_llm_response("", "x")
+        assert patch == ""
+        assert rationale == ""
+        assert lessons == []
+
+    def test_parse_no_diff_block(self):
+        resp = "```rationale\nNo diff here.\n```\n"
+        patch, _, _ = LI._parse_llm_response(resp, "x")
+        assert patch == ""
+
+
+class TestCandidatePatchDataclass:
+    """Tests for the CandidatePatch dataclass."""
+
+    def test_default_fields(self):
+        cp = LI.CandidatePatch()
+        assert cp.patch == ""
+        assert cp.skill_path == ""
+        assert cp.rationale == ""
+        assert cp.linked_lessons == []
+        assert cp.llm_model == ""
+        assert cp.llm_agent == ""
+        assert cp.token_cost == 0
+        assert cp.error == ""
+
+    def test_error_field(self):
+        cp = LI.CandidatePatch(error="something went wrong")
+        assert cp.error == "something went wrong"
+        assert cp.patch == ""
