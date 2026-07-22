@@ -1061,13 +1061,13 @@ def _accumulate_budget_from_events(
         kind = ev.get("event")
         if kind == "tokens":
             n = ev.get("count", 0)
-            if isinstance(n, (int, float)):
+            if isinstance(n, int | float):
                 out["actual_tokens"] += int(n)
         elif kind == "tool_call":
             out["actual_tool_calls"] += 1
         elif kind == "cost":
             u = ev.get("usd", 0.0)
-            if isinstance(u, (int, float)):
+            if isinstance(u, int | float):
                 out["actual_usd"] += float(u)
         elif kind == "safety_violation":
             out["safety_violation"] = True
@@ -1432,13 +1432,13 @@ def _run_subprocess_with_budget(
                 kind = ev.get("event")
                 if kind == "tokens":
                     n = ev.get("count", 0)
-                    if isinstance(n, (int, float)):
+                    if isinstance(n, int | float):
                         budget_used["actual_tokens"] += int(n)
                 elif kind == "tool_call":
                     budget_used["actual_tool_calls"] += 1
                 elif kind == "cost":
                     u = ev.get("usd", 0.0)
-                    if isinstance(u, (int, float)):
+                    if isinstance(u, int | float):
                         budget_used["actual_usd"] += float(u)
                 elif kind == "safety_violation":
                     budget_used["safety_violation"] = True
