@@ -38,7 +38,7 @@
     },
     "technical_verdict": {
       "type": "string",
-      "description": "Agent's technical verdict on whether the vulnerability is real.\nPhase 1 MVP returns 'inconclusive' (the event-ledger reducer in\nPhase 2 will compute this).",
+      "description": "Agent's technical verdict on whether the vulnerability is real.\nSI-031: the reducer now folds this from the workspace event ledger\n(<workspace>/.lab/events.jsonl). The latest non-null technical_verdict\nacross all events for this report_id wins (a later event that revises\nthe verdict overrides an earlier one). When no event carries the\nfield, the conservative default 'inconclusive' is returned.",
       "enum": ["confirmed", "inconclusive", "not_vulnerable"],
       "examples": ["inconclusive", "confirmed"]
     },
@@ -74,12 +74,11 @@
     },
     "impact_demonstrated": {
       "type": "boolean",
-      "description": "Whether the finding demonstrated actual impact (not just a theoretical\nor empty response). Phase 1 MVP returns false; Phase 2 event-ledger\nreducer will compute this from evidence artifacts.",
-      "examples": [false]
+      "description": "Whether the finding demonstrated actual impact (not just a theoretical\nor empty response). SI-031: the reducer now reads the report's\nvalidated `poc.state_changed` frontmatter field (validated by `check`\nas a bool) so it is evidence, not self-asserted prose. When the field\nis absent or the report is unparseable, returns false (conservative)."
     },
     "confidence": {
       "type": "number",
-      "description": "Confidence in the technical verdict, 0.0 to 1.0. Phase 1 MVP returns\n0.0; Phase 2 event-ledger reducer will compute this.",
+      "description": "Confidence in the technical verdict, 0.0 to 1.0. SI-031: the reducer\nnow folds this from the workspace event ledger. The latest non-null\nconfidence across all events for this report_id wins.",
       "minimum": 0,
       "maximum": 1,
       "examples": [0.0, 0.82]

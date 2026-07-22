@@ -1,0 +1,9 @@
+schema: security-lab/eval-case/v1
+case_id: synthetic-theoretical-impact-medium-001
+suite: synthetic
+split: train
+description: "Impact says 'could potentially expose data' without showing data for a medium-severity finding. Fails the semantic concrete_harm dimension (deterministic gate passes — the section is non-empty)."
+category: content-quality
+tags: [h1-reporting, impact, concrete-harm, si-031]
+regression_source: bounty-quality-gates-audit
+expected_failures: 1

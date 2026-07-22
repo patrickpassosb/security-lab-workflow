@@ -1,0 +1,9 @@
+schema: security-lab/eval-case/v1
+case_id: synthetic-no-threat-model-section-001
+suite: synthetic
+split: train
+description: "Report has Description/Impact but no Threat model section (old style). Fails SI-031 THREAT_MODEL_SECTION gate."
+category: content-quality
+tags: [h1-reporting, threat-model, si-031]
+regression_source: bounty-quality-gates-audit
+expected_failures: 1

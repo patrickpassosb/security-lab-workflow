@@ -139,13 +139,14 @@ TARGET_URL="https://target" TARGET_ENDPOINT="/api/endpoint" \
 
 `report_h1.md` is the **single source of truth** for the report. It uses YAML
 frontmatter (schema `security-lab/hackerone-report/v1`) plus a Markdown body with
-`## Description` (Summary, Steps to reproduce, Remediation) and `## Impact`
+`## Threat model`, `## Description` (Summary, Steps to reproduce, `### PoC`,
+Remediation, `### Disconfirming controls`), `## Impact`, and `## Limitations`
 sections. Do NOT duplicate report content in `bounty_log.md`.
 
 The reporting workflow is **local-only and human-gated**:
 
 ```
-check -> prepare -> human submits -> record-submission -> status
+check -> review -> prepare -> human submits -> record-submission -> status
 ```
 
 1. **Draft `report_h1.md`.** Fill the YAML frontmatter: `asset_id`, `asset_name`
@@ -153,30 +154,45 @@ check -> prepare -> human submits -> record-submission -> status
    `weakness` (prefer a CWE id), `severity` (rating/score/vector with the
    correct bucket), `finding_type` (`live_web` or `source_code`), `live_targets`,
    `attachments` (explicit allowlist of relative paths under the workspace),
-   and the `testing` assertions (`manual_only`, `owned_accounts_only`,
-   `destructive_operations: false`). Then write the Description/Impact body —
-   no `TODO`, `TBD`, `{{FIELD}}`, or parenthesized template instructions.
-2. **`lab-h1-report check [workspace]`** — read-only validation. Confirms
-   frontmatter schema, body sections, engagement match, structured asset
-   eligibility, scope of live targets, testing assertions, attachment safety,
-   and secret scanning. Prints `PASS`/`WARN`/`FAIL` lines. Exit 0 = valid
-   (warnings allowed); 2 = validation failure; 1 = usage/fs/parse error.
-3. **`lab-h1-report prepare [workspace]`** — stage an immutable submission
-   package under `submission/prepared-<UTC>/` containing `report_h1.md`,
+   the `testing` assertions (`manual_only`, `owned_accounts_only`,
+   `destructive_operations: false`), and the **strict readiness fields** (SI-031):
+   `threat_model` (attacker/victim/trust_boundary/state_change), `evidence_index`
+   (maps each claim to an attachment), `limitations` (what wasn't tested), and
+   `poc` (type/attachment/state_changed). Then write the body sections — no
+   `TODO`, `TBD`, `{{FIELD}}`, or parenthesized template instructions.
+2. **`lab-h1-report check [workspace]`** — read-only validation. Runs the
+   deterministic structural + content-quality gates (frontmatter schema, body
+   sections, engagement match, structured asset eligibility, scope of live
+   targets, testing assertions, attachment safety, secret scanning, **threat
+   model**, **poc** type/state_changed, **evidence_index** links, **limitations**,
+   finding-class rules, attachment budget). Prints `PASS`/`WARN`/`FAIL` lines.
+   Exit 0 = valid (warnings allowed); 2 = validation failure; 1 = usage/fs/parse error.
+3. **`lab-h1-report review [workspace]`** — semantic/adversarial content-quality
+   review (SI-031). Reads the report body + evidence and returns a structured
+   per-dimension verdict (attacker_victim_chain, concrete_harm, poc_state_change,
+   evidence_to_claim_mapping, disconfirming_controls, redaction,
+   honest_limitations). `overall=pass` exits 0; `warn` exits 0 (non-blocking);
+   `fail` exits 2 (blocking). Deterministic structure checks alone are
+   insufficient — this is the content gate.
+4. **`lab-h1-report prepare [workspace] [--skip-review]`** — stage an immutable
+   submission package under `submission/prepared-<UTC>/` containing `report_h1.md`,
    `report.md` (frontmatter-stripped body for HackerOne), `attachments/`, and
-   `manifest.json` (SHA-256 + size for every file). Runs `check` internally and
-   aborts on any validation error. Refuses to overwrite an existing package.
-4. **HUMAN submits via the HackerOne UI.** The human copies `report.md`, uploads
+   `manifest.json` (SHA-256 + size for every file + the review verdict). Runs
+   `check` AND `review` internally and aborts on any validation error or semantic
+   `fail`. `--skip-review` bypasses the semantic review (backward compat with
+   old drafts; the audit log records the bypass). Refuses to overwrite an existing
+   package.
+5. **HUMAN submits via the HackerOne UI.** The human copies `report.md`, uploads
    the staged attachments, and submits. **Agents MUST NOT submit a report.**
    There is no `submit` command and there never will be. The human returns the
    accepted HackerOne report ID and URL.
-5. **`lab-h1-report record-submission [workspace] --package <path|id> --h1-id <num> --url <url> --submitted-at <ts> [--submitted-by <id>]`**
+6. **`lab-h1-report record-submission [workspace] --package <path|id> --h1-id <num> --url <url> --submitted-at <ts> [--submitted-by <id>]`**
    — record a one-time immutable local receipt in `<package>/record.json`.
    Validates the package manifest, the numeric report ID, the HackerOne URL
    (`hackerone.com/reports/<same ID>`), and a timezone-aware timestamp. Uses
    `O_EXCL` so a record is created exactly once and never overwritten. It never
    contacts HackerOne — it only records what the human already did.
-6. **`lab-h1-report status [workspace]`** — read-only. Prints report metadata,
+7. **`lab-h1-report status [workspace]`** — read-only. Prints report metadata,
    the latest prepared package, manifest integrity (re-hashes files on disk),
    source drift (whether `report_h1.md` changed since `prepare`), and the
    recorded HackerOne report ID/URL.
@@ -186,17 +202,23 @@ target interaction. `report_h1.md` is never modified by the tool — submission
 metadata lives only in `record.json` inside the prepared package. See
 `lab-h1-report --help` and `templates/bounty/report_h1.md`.
 
-### Report quality checklist
+### Report quality checklist (SI-031)
 
 - [ ] `report_h1.md` frontmatter parses and `lab-h1-report check` prints `PASS`
+- [ ] `## Threat model` identifies the attacker, victim, trust boundary, state change
+- [ ] `### PoC` demonstrates a state change (or explains why not feasible in `## Limitations`)
+- [ ] `evidence_index` maps every claim to an attachment
+- [ ] `### Disconfirming controls` records what you tested that was NOT vulnerable
+- [ ] `## Limitations` acknowledges what wasn't tested or what's uncertain
 - [ ] Reproducible — the triager can follow your steps and see the bug
-- [ ] Impact is clear — not just "XSS exists" but "attacker can steal session tokens"
+- [ ] Impact is concrete — not "could potentially" but "attacker can read X"
 - [ ] Minimal — no unnecessary scanning output, just the winning request/response
 - [ ] One vuln per report — unless chaining for impact
 - [ ] No data exfiltration beyond what proves the bug
 - [ ] No destructive actions (`testing.destructive_operations: false`)
 - [ ] Attachments are explicit, relative, non-symlink, and pass secret scanning
 - [ ] No `TODO`/`TBD`/`{{FIELD}}` placeholders left in the body
+- [ ] `lab-h1-report review` prints `REVIEW: pass` (or `warn` for non-blocking warnings)
 
 ## Rate limits
 

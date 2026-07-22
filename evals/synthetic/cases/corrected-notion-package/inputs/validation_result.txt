@@ -1,0 +1,27 @@
+lab-h1-report check output (synthetic):
+
+PASS - frontmatter schema valid
+PASS - threat_model present with all 4 subfields
+PASS - poc.type=read_only, poc.state_changed=true
+PASS - evidence_index maps claim to evidence/01_response.txt
+PASS - limitations present
+PASS - ## Threat model section present and non-empty
+PASS - ### PoC subsection present and non-empty
+PASS - ### Disconfirming controls present
+PASS - ## Limitations present
+
+lab-h1-report review output (synthetic):
+
+REVIEW: pass (or warn for redaction)
+BLOCKING_DIMENSIONS: []
+DIMENSIONS:
+  attacker_victim_chain: pass
+  concrete_harm: pass
+  poc_state_change: pass
+  evidence_to_claim_mapping: pass
+  disconfirming_controls: pass
+  redaction: warn (evidence contains an email — consider redacting)
+  honest_limitations: pass
+RECOMMENDATION: Review warnings before submitting.
+
+0 failures. The corrected package passes all SI-031 deterministic + semantic gates.

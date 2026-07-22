@@ -1,0 +1,12 @@
+lab-h1-report check output (synthetic):
+
+FAIL - missing required field: threat_model
+FAIL - missing required field: poc
+FAIL - missing required field: evidence_index
+FAIL - missing required field: limitations
+FAIL - body must contain a '## Threat model' section
+
+5 failures. The old incomplete package fails the SI-031 deterministic gates.
+The report has non-empty Description/Impact and valid frontmatter, but no
+threat model, PoC, evidence index, or limitations — exactly the incident
+the audit investigated.

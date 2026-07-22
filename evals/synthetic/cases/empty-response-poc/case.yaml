@@ -1,0 +1,9 @@
+schema: security-lab/eval-case/v1
+case_id: synthetic-empty-response-poc-001
+suite: synthetic
+split: train
+description: "PoC shows 200 OK but empty body for a medium-severity live_web finding. Fails SI-031 POC_STATE_CHANGING_FOR_MEDIUM_PLUS deterministic gate and the semantic poc_state_change dimension."
+category: content-quality
+tags: [h1-reporting, poc, state-change, si-031]
+regression_source: bounty-quality-gates-audit
+expected_failures: 2
