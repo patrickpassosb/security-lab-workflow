@@ -1129,6 +1129,28 @@ def _build_bwrap_argv(
         "--ro-bind", "/lib64", "/lib64",
         "--dev", "/dev",
         "--proc", "/proc",
+    ]
+
+    # Bind-mount the Python interpreter's path so bwrap can exec it.
+    # On GitHub Actions, Python is installed under /opt/hostedtoolcache/
+    # (not /usr/bin), so we need to bind-mount that path too. We mount
+    # the interpreter binary itself (ro) and its parent lib dirs.
+    py_exe = sys.executable
+    py_exe_path = Path(py_exe)
+    # The binary itself.
+    argv.extend(["--ro-bind", str(py_exe_path), str(py_exe_path)])
+    # Common Python lib locations relative to the interpreter.
+    py_prefix = py_exe_path.parent.parent  # e.g. /opt/.../Python/3.11.15/x64
+    for sub in ("lib", "Lib", "lib/python3.11", "lib/python3.12"):
+        candidate = py_prefix / sub
+        if candidate.is_dir():
+            argv.extend(["--ro-bind", str(candidate), str(candidate)])
+    # Also mount /opt/hostedtoolcache if the interpreter is under it
+    # (GitHub Actions). Mount the whole tree so shared libs resolve.
+    if "/opt/hostedtoolcache" in str(py_exe_path):
+        argv.extend(["--ro-bind", "/opt/hostedtoolcache", "/opt/hostedtoolcache"])
+
+    argv.extend([
         "--ro-bind", str(inputs_dir), str(inputs_dir),
         "--ro-bind", str(skill_path), str(skill_path),
         "--bind", str(output_dir), str(output_dir),
@@ -1137,7 +1159,7 @@ def _build_bwrap_argv(
         "--",
         sys.executable, str(shim_path),
         str(inputs_dir), str(skill_path), str(output_dir), case_id,
-    ]
+    ])
     return argv
 
 
