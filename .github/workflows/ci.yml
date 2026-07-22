@@ -89,13 +89,30 @@ jobs:
         # This step installs bubblewrap so the isolation tests actually
         # run instead of being skipped.
         run: sudo apt-get update -qq && sudo apt-get install -y -qq bubblewrap
+      - name: Enable unprivileged user namespaces (bwrap loopback setup)
+        # Ubuntu 24.04 (ubuntu-latest) restricts unprivileged user
+        # namespaces via AppArmor, which breaks bwrap --unshare-net
+        # loopback setup ("RTM_NEWADDR: Operation not permitted").
+        # The eval runner uses --unshare-user --unshare-net; the user
+        # namespace needs CAP_NET_ADMIN to configure loopback in the
+        # new net namespace. This sysctl disables the AppArmor
+        # restriction so bwrap can create the user namespace.
+        # If the sysctl doesn't exist (older Ubuntu), this is a no-op.
+        run: |
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
       - name: Verify bwrap is available
         # Fail the job if bwrap is not on PATH after install — the
         # isolation tests depend on it (ADR-0003 §3: no advisory-only
-        # fallback).
+        # fallback). Also smoke-test --unshare-net to catch environment
+        # issues early.
         run: |
           which bwrap || { echo "ERROR: bwrap not found — ADR-0003 isolation unavailable in CI"; exit 1; }
           bwrap --version
+          bwrap --unshare-user --unshare-net --proc /proc --dev /dev \
+            --ro-bind /usr /usr --ro-bind /bin /bin \
+            --ro-bind /lib /lib --ro-bind /lib64 /lib64 \
+            -- python3 -c "print('bwrap --unshare-net smoke test ok')" \
+            || { echo "ERROR: bwrap --unshare-net failed — CI cannot run isolation tests"; exit 1; }
       - name: Install Python deps
         # requirements.txt pins ruff + pyyaml + requests. pytest is added
         # explicitly (not in requirements.txt — it's a CI/test-only dep).
