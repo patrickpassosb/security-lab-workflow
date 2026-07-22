@@ -1122,11 +1122,18 @@ def _build_bwrap_argv(
         # CAP_NET_ADMIN to the runner user.
         "--unshare-user",
         "--unshare-net",
+        # Required system mounts — --ro-bind fails hard if the source
+        # is missing, which is what we want for /usr/bin, /usr/lib,
+        # /lib (these exist on every Linux).
         "--ro-bind", "/usr/bin", "/usr/bin",
         "--ro-bind", "/usr/lib", "/usr/lib",
-        "--ro-bind", "/usr/lib64", "/usr/lib64",
         "--ro-bind", "/lib", "/lib",
-        "--ro-bind", "/lib64", "/lib64",
+        # Optional system mounts — /usr/lib64 and /lib64 exist on most
+        # distros (Fedora, Arch, Ubuntu 24.04 as symlinks) but not all
+        # (some minimal Debian/Alpine). --ro-bind-try silently skips
+        # missing sources so bwrap doesn't crash on distros without them.
+        "--ro-bind-try", "/usr/lib64", "/usr/lib64",
+        "--ro-bind-try", "/lib64", "/lib64",
         "--dev", "/dev",
         "--proc", "/proc",
     ]

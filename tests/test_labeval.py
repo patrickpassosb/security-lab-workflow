@@ -747,6 +747,52 @@ class TestRunnerHelpers:
             "run instead of silently skipping."
         )
 
+    def test_bwrap_argv_uses_ro_bind_try_for_optional_lib64(self, tmp_path):
+        """Optional lib64 dirs use --ro-bind-try, required mounts use --ro-bind.
+
+        Regression test for the CodeRabbit finding: /usr/lib64 and /lib64
+        don't exist on all distros (some minimal Debian/Alpine). --ro-bind
+        fails hard if the source is missing; --ro-bind-try silently skips
+        it. Required mounts (/usr/bin, /usr/lib, /lib, inputs, skill,
+        output, shim) must stay --ro-bind so a missing required path
+        crashes loudly rather than silently producing a broken sandbox.
+        """
+        inputs_dir = tmp_path / "inputs"
+        inputs_dir.mkdir()
+        skill = tmp_path / "SKILL.md"
+        skill.write_text("# skill\n", encoding="utf-8")
+        output_dir = tmp_path / "output"
+        output_dir.mkdir()
+        shim = tmp_path / "shim.py"
+        shim.write_text("# shim\n", encoding="utf-8")
+
+        argv = LE._build_bwrap_argv(
+            "bwrap", inputs_dir, skill, output_dir, shim, "c-001"
+        )
+
+        # Required system mounts must use --ro-bind (hard fail if missing).
+        required = ["/usr/bin", "/usr/lib", "/lib"]
+        for path in required:
+            idx = argv.index(path)
+            assert argv[idx - 1] == "--ro-bind", (
+                f"required mount {path} uses {argv[idx - 1]} — should be --ro-bind"
+            )
+
+        # Optional lib64 dirs must use --ro-bind-try (silently skip if missing).
+        optional = ["/usr/lib64", "/lib64"]
+        for path in optional:
+            if path in argv:
+                idx = argv.index(path)
+                assert argv[idx - 1] == "--ro-bind-try", (
+                    f"optional mount {path} uses {argv[idx - 1]} — "
+                    "should be --ro-bind-try so bwrap doesn't crash on "
+                    "distros without lib64"
+                )
+
+        # Case inputs, skill, output, shim must use --ro-bind/--bind (required).
+        assert "--ro-bind" in argv  # inputs_dir, skill, shim
+        assert "--bind" in argv      # output_dir (writable)
+
     def test_budget_to_limit_dict_shape(self):
         b = LE.Budget(max_wall_seconds=10, max_tokens=100, max_tool_calls=5, budget_usd=2.5)
         d = b.to_limit_dict()
