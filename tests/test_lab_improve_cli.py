@@ -171,17 +171,25 @@ class TestLabImproveHelpAndArgs:
 
 
 class TestLabImproveRun:
-    def test_run_with_no_agent_exits_4(self, fake_repo: Path):
+    def test_run_with_no_agent_exits_4(self, fake_repo: Path, tmp_path: Path):
         """When no agent CLI is available, the LLM call fails with exit 4."""
+        import os
         skill = fake_repo / "skills" / "security" / "bounty-attack" / "SKILL.md"
-        # Use an agent name that doesn't exist so the LLM call fails.
-        code, out, err = _run_lab_improve([
-            "--skill", str(skill),
-            "--suite", str(fake_repo / "evals" / "test"),
-            "--agent", "nonexistent-agent-xyz",
-            "--quiet",
-        ])
-        # The LLM call should fail because the agent doesn't exist.
+        # Clear LAB_IMPROVE_AGENT and set PATH to an empty directory so no agent is available.
+        empty_bin_dir = tmp_path / "empty_bin"
+        empty_bin_dir.mkdir(parents=True, exist_ok=True)
+        env = dict(os.environ)
+        env.pop("LAB_IMPROVE_AGENT", None)
+        env["PATH"] = str(empty_bin_dir)
+        code, out, err = _run_lab_improve(
+            [
+                "--skill", str(skill),
+                "--suite", str(fake_repo / "evals" / "test"),
+                "--quiet",
+            ],
+            env=env,
+        )
+        # The LLM call should fail because no agent is available.
         assert code == 4
         data = json.loads(out)
         assert data["final_exit"] == 4
@@ -195,15 +203,24 @@ class TestLabImproveRun:
         self, fake_repo: Path, tmp_path: Path
     ):
         """The --out flag writes the JSON results to a file."""
+        import os
         skill = fake_repo / "skills" / "security" / "bounty-attack" / "SKILL.md"
         out_file = tmp_path / "improve-results.json"
-        code, out, err = _run_lab_improve([
-            "--skill", str(skill),
-            "--suite", str(fake_repo / "evals" / "test"),
-            "--agent", "nonexistent-agent-xyz",
-            "--quiet",
-            "--out", str(out_file),
-        ])
+        # Clear LAB_IMPROVE_AGENT and set PATH to an empty directory so no agent is available.
+        empty_bin_dir = tmp_path / "empty_bin"
+        empty_bin_dir.mkdir(parents=True, exist_ok=True)
+        env = dict(os.environ)
+        env.pop("LAB_IMPROVE_AGENT", None)
+        env["PATH"] = str(empty_bin_dir)
+        code, out, err = _run_lab_improve(
+            [
+                "--skill", str(skill),
+                "--suite", str(fake_repo / "evals" / "test"),
+                "--quiet",
+                "--out", str(out_file),
+            ],
+            env=env,
+        )
         # Exit 4 (LLM failed) but the out file should still be written.
         assert code == 4
         assert out_file.is_file()
@@ -211,15 +228,24 @@ class TestLabImproveRun:
         assert "iterations" in saved
         assert saved["final_exit"] == 4
 
-    def test_run_json_output_structure(self, fake_repo: Path):
+    def test_run_json_output_structure(self, fake_repo: Path, tmp_path: Path):
         """The JSON output has the expected top-level structure."""
+        import os
         skill = fake_repo / "skills" / "security" / "bounty-attack" / "SKILL.md"
-        code, out, err = _run_lab_improve([
-            "--skill", str(skill),
-            "--suite", str(fake_repo / "evals" / "test"),
-            "--agent", "nonexistent-agent-xyz",
-            "--quiet",
-        ])
+        # Clear LAB_IMPROVE_AGENT and set PATH to an empty directory so no agent is available.
+        empty_bin_dir = tmp_path / "empty_bin"
+        empty_bin_dir.mkdir(parents=True, exist_ok=True)
+        env = dict(os.environ)
+        env.pop("LAB_IMPROVE_AGENT", None)
+        env["PATH"] = str(empty_bin_dir)
+        code, out, err = _run_lab_improve(
+            [
+                "--skill", str(skill),
+                "--suite", str(fake_repo / "evals" / "test"),
+                "--quiet",
+            ],
+            env=env,
+        )
         assert code == 4
         data = json.loads(out)
         assert "skill" in data

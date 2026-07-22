@@ -966,12 +966,13 @@ def _list_inputs(inputs_dir: Path) -> list[str]:
 
 
 def main() -> int:
-    if len(sys.argv) != 4:
-        sys.stderr.write("usage: shim <inputs_dir> <skill_path> <output_dir>\\n")
+    if len(sys.argv) != 5:
+        sys.stderr.write("usage: shim <inputs_dir> <skill_path> <output_dir> <case_id>\\n")
         return 2
     inputs_dir = Path(sys.argv[1])
     skill_path = Path(sys.argv[2])
     output_dir = Path(sys.argv[3])
+    case_id = sys.argv[4]
 
     # Read the skill (read-only mount).
     skill_text = ""
@@ -996,7 +997,7 @@ def main() -> int:
     # reportability=gather_more_evidence) so the scoring path produces
     # a non-trivial RunScore without implying a real agent ran.
     verdict = {
-        "case_id": inputs_dir.parent.name,  # the case dir name
+        "case_id": case_id,  # resolved case_id passed from parent
         "technical_verdict": "inconclusive",
         "reportability": "gather_more_evidence",
         "impact_demonstrated": False,
@@ -1105,6 +1106,7 @@ def _build_bwrap_argv(
     skill_path: Path,
     output_dir: Path,
     shim_path: Path,
+    case_id: str,
 ) -> list[str]:
     """Build the bwrap argv for an isolated candidate run (ADR-0003 §1).
 
@@ -1113,7 +1115,7 @@ def _build_bwrap_argv(
       - read-only bind of the skill file (at its host path)
       - writable bind of the output dir (at its host path)
       - read-only bind of the shim (at its host path)
-      - the rest of ``/`` read-only (so python3 + stdlib resolve)
+      - minimal Python runtime paths (python3, stdlib, lib-dynload)
       - ``--unshare-net`` (no network interface in the namespace)
       - ``--die-with-parent`` (clean teardown if the parent dies)
 
@@ -1129,7 +1131,11 @@ def _build_bwrap_argv(
     """
     argv: list[str] = [
         bwrap,
-        "--ro-bind", "/", "/",
+        "--ro-bind", "/usr/bin", "/usr/bin",
+        "--ro-bind", "/usr/lib", "/usr/lib",
+        "--ro-bind", "/usr/lib64", "/usr/lib64",
+        "--ro-bind", "/lib", "/lib",
+        "--ro-bind", "/lib64", "/lib64",
         "--dev", "/dev",
         "--proc", "/proc",
         "--ro-bind", str(inputs_dir), str(inputs_dir),
@@ -1140,7 +1146,7 @@ def _build_bwrap_argv(
         "--die-with-parent",
         "--",
         sys.executable, str(shim_path),
-        str(inputs_dir), str(skill_path), str(output_dir),
+        str(inputs_dir), str(skill_path), str(output_dir), case_id,
     ]
     return argv
 
@@ -1289,7 +1295,7 @@ def run_case(
     shim_path = _write_shim(parent_tmp_path)
 
     try:
-        argv = _build_bwrap_argv(bwrap, inputs_dir, skill_path, out_dir, shim_path)
+        argv = _build_bwrap_argv(bwrap, inputs_dir, skill_path, out_dir, shim_path, case_id)
         return _run_subprocess_with_budget(
             argv=argv,
             case_id=case_id,
@@ -1329,6 +1335,7 @@ def _run_subprocess_with_budget(
             stderr=subprocess.PIPE,
             text=True,
             bufsize=1,  # line-buffered
+            start_new_session=True,
         )
     except OSError as e:
         return EvalResult(
@@ -1372,6 +1379,7 @@ def _run_subprocess_with_budget(
         term_at_mono = started + term_at
         term_sent = False
         term_sent_for_wall = False  # True => SIGTERM was the 90% courtesy
+        read_buffer = ""  # buffer for partial lines
 
         while True:
             now = time.monotonic()
@@ -1410,42 +1418,62 @@ def _run_subprocess_with_budget(
                     break
                 continue
 
-            line = proc.stdout.readline()
-            if not line:
+            # Read a bounded chunk (up to 4KB).
+            try:
+                chunk = os.read(stdout_fd, 4096)
+            except OSError:
+                # EOF or error
+                break
+            if not chunk:
                 # EOF — child closed stdout.
                 break
 
-            line = line.strip()
-            if not line:
-                continue
+            read_buffer += chunk.decode("utf-8", errors="replace")
 
-            # Parse the structured event.
+            # Process complete lines from the buffer.
+            while "\n" in read_buffer:
+                line, read_buffer = read_buffer.split("\n", 1)
+                line = line.strip()
+                if not line:
+                    continue
+
+                # Parse the structured event.
+                try:
+                    ev = json.loads(line)
+                except ValueError:
+                    # Not JSON — stash as stderr-ish noise.
+                    stderr_chunks.append(line)
+                    continue
+                if isinstance(ev, dict):
+                    events.append(ev)
+                    # Update the running budget counters.
+                    kind = ev.get("event")
+                    if kind == "tokens":
+                        n = ev.get("count", 0)
+                        if isinstance(n, int | float):
+                            budget_used["actual_tokens"] += int(n)
+                    elif kind == "tool_call":
+                        budget_used["actual_tool_calls"] += 1
+                    elif kind == "cost":
+                        u = ev.get("usd", 0.0)
+                        if isinstance(u, int | float):
+                            budget_used["actual_usd"] += float(u)
+                    elif kind == "safety_violation":
+                        budget_used["safety_violation"] = True
+                    # Check non-wall budgets after each event.
+                    if _check_token_tool_usd_budgets():
+                        _kill(proc, signal.SIGKILL)
+                        break
+
+        # Process any remaining buffered data on EOF.
+        if read_buffer.strip():
+            line = read_buffer.strip()
             try:
                 ev = json.loads(line)
+                if isinstance(ev, dict):
+                    events.append(ev)
             except ValueError:
-                # Not JSON — stash as stderr-ish noise.
                 stderr_chunks.append(line)
-                continue
-            if isinstance(ev, dict):
-                events.append(ev)
-                # Update the running budget counters.
-                kind = ev.get("event")
-                if kind == "tokens":
-                    n = ev.get("count", 0)
-                    if isinstance(n, int | float):
-                        budget_used["actual_tokens"] += int(n)
-                elif kind == "tool_call":
-                    budget_used["actual_tool_calls"] += 1
-                elif kind == "cost":
-                    u = ev.get("usd", 0.0)
-                    if isinstance(u, int | float):
-                        budget_used["actual_usd"] += float(u)
-                elif kind == "safety_violation":
-                    budget_used["safety_violation"] = True
-                # Check non-wall budgets after each event.
-                if _check_token_tool_usd_budgets():
-                    _kill(proc, signal.SIGKILL)
-                    break
 
         # Drain stderr (best-effort, non-blocking).
         try:

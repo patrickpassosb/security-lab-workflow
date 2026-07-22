@@ -219,24 +219,23 @@ class TestLabEvalRun:
         assert saved["suite"] == "test"
 
     def test_run_without_bwrap_exits_3(
-        self, suite_dir: Path, skill_file: Path, monkeypatch
+        self, suite_dir: Path, skill_file: Path, tmp_path: Path
     ):
-        # Simulate bwrap being unavailable by clearing PATH.
+        # Simulate bwrap being unavailable by setting PATH to an empty directory.
         _make_valid_suite(suite_dir, n_cases=1)
+        empty_bin_dir = tmp_path / "empty_bin"
+        empty_bin_dir.mkdir(parents=True, exist_ok=True)
         env = dict(os.environ)
-        env["PATH"] = "/usr/bin:/bin"  # bwrap is usually in /usr/bin
-        # This test only runs when bwrap IS available (to confirm the
-        # exit-3 path works). When bwrap is not available, the regular
-        # run test is skipped and this test confirms exit 3.
-        if not _bwrap_available():
-            code, out, err = _run_lab_eval([
+        env["PATH"] = str(empty_bin_dir)
+        code, out, err = _run_lab_eval(
+            [
                 "--suite", str(suite_dir),
                 "--skill", str(skill_file),
-            ])
-            assert code == 3
-            assert "isolation unavailable" in err.lower() or "bwrap" in err.lower()
-        else:
-            pytest.skip("bwrap is available — cannot test the no-bwrap path here")
+            ],
+            env=env,
+        )
+        assert code == 3
+        assert "isolation unavailable" in err.lower() or "bwrap" in err.lower()
 
 
 def _bwrap_available() -> bool:
