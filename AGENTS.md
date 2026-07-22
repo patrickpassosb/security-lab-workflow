@@ -151,6 +151,12 @@ the single source of truth — do not duplicate report content in `bounty_log.md
 - `~/security-lab/templates/bounty/` contains `bounty_log.md`, `report_h1.md`, `exploit.py` for bug bounty workspaces.
 - `~/security-lab/templates/cve/` contains `cve_log.md`, `advisory_template.md`, `poc.py` for CVE research workspaces.
 
+## Self-improvement runtime (SI-022, SI-029)
+
+- `~/security-lab/bin/lab-eval --suite <dir> --skill <path> [--budget <seconds>] [--split <train|val|holdout|all>] [--validate]` runs an eval suite against a skill file in an isolated subprocess per ADR-0003 (bwrap --unshare-net). Outputs structured JSON to stdout. Exit 3 = isolation unavailable (no advisory-only fallback).
+- `~/security-lab/bin/lab-improve --skill <path> --suite <dir> [--lessons <dir>] [--budget-usd <usd>] [--max-iterations <n>]` runs the self-improvement outer loop: propose candidate (LLM) → stage → safety tests → eval → score → report. No automatic promotion — human applies with `git apply`. Exit 4 = LLM call failed.
+- `lib/labeval.py` `run_case`/`run_suite` are the eval runner; `lib/labimprove.py` `propose_candidate` is the LLM-driven outer loop. Both are TCB — the candidate may read but never modify them.
+
 Every active challenge must keep `solve_log.md` current: known facts, hypotheses, failed paths, evidence, next best test, primitive chain, tool installs, and final eval.
 
 ## Skills (security)
