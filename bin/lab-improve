@@ -1,0 +1,561 @@
+#!/usr/bin/env python3
+"""lab-improve — run the self-improvement loop on a skill (SI-029, Phase 4).
+
+Per roadmap section 23 (Phase 4 — Candidate generation). Runs one
+iteration of the outer loop:
+
+  1. Read the incumbent skill.
+  2. Read linked lessons (trust-filtered — target_derived dropped).
+  3. Read public eval results from a prior baseline run or the previous
+     iteration (private labels hidden).
+  4. Call an LLM (via an agent CLI: claude/codex/opencode) to propose a
+     unified diff.
+  5. Stage the candidate (``stage_candidate``) — never apply to live.
+  6. Run the 6 safety tests (``run_safety_tests``). Hard-fail on any
+     safety violation.
+  7. Apply the candidate patch to an isolated temp copy of the incumbent
+     (``apply_candidate_to_temp_copy``) and run the eval suite against
+     THAT copy — not the incumbent. The incumbent is untouched.
+  8. Score the eval results against the private labels (``score_run``).
+  9. Report: print the candidate ID, safety results, eval summary, and
+     the diff. The human reviews and applies with ``git apply`` (no
+     automatic promotion).
+
+When ``--max-iterations > 1``, each iteration's eval results are fed
+into the next iteration's ``propose_candidate`` call as ``eval_results``
+so the LLM learns from each candidate's failures.
+
+Usage:
+    lab-improve --skill <path> --suite <dir> [--lessons <dir>]
+                [--budget-usd <usd>] [--max-iterations <n>]
+                [--baseline-results <path>] [--agent <name>]
+                [--out <path>] [--quiet]
+
+Examples:
+    # Run one improvement iteration on bounty-attack
+    lab-improve --skill skills/security/bounty-attack/SKILL.md \\
+        --suite evals/synthetic --lessons improvement/private
+
+    # Pass a prior baseline run for the LLM to improve on
+    lab-improve --skill skills/security/bounty-attack/SKILL.md \\
+        --suite evals/synthetic --baseline-results baseline.json
+
+Exit codes:
+    0 = iteration completed (candidate may or may not be an improvement;
+        check the JSON output)
+    1 = bad arguments / missing files
+    2 = safety test hard failure (candidate rejected)
+    3 = isolation unavailable (bwrap not found; per ADR-0003, no fallback)
+    4 = LLM call failed (no candidate produced)
+"""
+
+from __future__ import annotations
+
+import json
+import sys
+from dataclasses import asdict
+from pathlib import Path
+from typing import Any
+
+# Make lib/ importable (same pattern as bin/lab-scope).
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib"))
+
+import labeval as LE  # noqa: E402
+import labimprove as LI  # noqa: E402
+import labutil  # noqa: E402
+import lessons as LESSONS  # noqa: E402
+import scoring as SC  # noqa: E402
+
+
+def _print_help() -> None:
+    print(__doc__)
+
+
+def _parse_args(argv: list[str]) -> dict[str, Any]:
+    """Parse CLI args. Returns a dict; exits 1 on bad args."""
+    opts: dict[str, Any] = {
+        "skill": "",
+        "suite": "",
+        "lessons_dir": "improvement/private",
+        "budget_usd": 25.0,
+        "max_tokens": 5_000_000,
+        "max_tool_calls": 10_000,
+        "max_wall_seconds": 3600,
+        "case_wall_seconds": 300,
+        "case_max_tokens": 50_000,
+        "case_max_tool_calls": 30,
+        "case_budget_usd": 1.0,
+        "max_iterations": 1,
+        "baseline_results": "",
+        "agent": "",
+        "out": "",
+        "quiet": False,
+    }
+    i = 0
+    while i < len(argv):
+        a = argv[i]
+        if a in ("-h", "--help"):
+            _print_help()
+            sys.exit(0)
+        if a == "--skill" and i + 1 < len(argv):
+            opts["skill"] = argv[i + 1]
+            i += 2
+            continue
+        if a.startswith("--skill="):
+            opts["skill"] = a.split("=", 1)[1]
+            i += 1
+            continue
+        if a == "--suite" and i + 1 < len(argv):
+            opts["suite"] = argv[i + 1]
+            i += 2
+            continue
+        if a.startswith("--suite="):
+            opts["suite"] = a.split("=", 1)[1]
+            i += 1
+            continue
+        if a == "--lessons" and i + 1 < len(argv):
+            opts["lessons_dir"] = argv[i + 1]
+            i += 2
+            continue
+        if a.startswith("--lessons="):
+            opts["lessons_dir"] = a.split("=", 1)[1]
+            i += 1
+            continue
+        if a == "--budget-usd" and i + 1 < len(argv):
+            try:
+                opts["budget_usd"] = float(argv[i + 1])
+            except ValueError:
+                print(f"--budget-usd expects a number, got {argv[i + 1]!r}",
+                      file=sys.stderr)
+                sys.exit(1)
+            i += 2
+            continue
+        if a == "--max-iterations" and i + 1 < len(argv):
+            try:
+                opts["max_iterations"] = int(argv[i + 1])
+            except ValueError:
+                print(f"--max-iterations expects an integer, got {argv[i + 1]!r}",
+                      file=sys.stderr)
+                sys.exit(1)
+            i += 2
+            continue
+        if a == "--baseline-results" and i + 1 < len(argv):
+            opts["baseline_results"] = argv[i + 1]
+            i += 2
+            continue
+        if a.startswith("--baseline-results="):
+            opts["baseline_results"] = a.split("=", 1)[1]
+            i += 1
+            continue
+        if a == "--agent" and i + 1 < len(argv):
+            opts["agent"] = argv[i + 1]
+            i += 2
+            continue
+        if a.startswith("--agent="):
+            opts["agent"] = a.split("=", 1)[1]
+            i += 1
+            continue
+        if a == "--out" and i + 1 < len(argv):
+            opts["out"] = argv[i + 1]
+            i += 2
+            continue
+        if a.startswith("--out="):
+            opts["out"] = a.split("=", 1)[1]
+            i += 1
+            continue
+        if a in ("-q", "--quiet"):
+            opts["quiet"] = True
+            i += 1
+            continue
+        print(f"Unknown option: {a}", file=sys.stderr)
+        _print_help()
+        sys.exit(1)
+    return opts
+
+
+def _load_lessons(lessons_dir: Path) -> list[dict[str, Any]]:
+    """Load lessons from ``<lessons_dir>/lessons.jsonl``.
+
+    Returns an empty list when the file is missing (the improvement loop
+    can run without lessons — the LLM just has less context).
+    """
+    lessons_path = lessons_dir / "lessons.jsonl"
+    if not lessons_path.is_file():
+        return []
+    return LESSONS.list_lessons(lessons_path=lessons_path)
+
+
+def _load_baseline_results(path: Path) -> list[dict[str, Any]]:
+    """Load a prior baseline run's per-case results for the LLM to improve on.
+
+    Accepts either:
+      - a ``SuiteResult`` JSON (from ``lab-eval --out``) — extracts the
+        ``results`` list.
+      - a ``RunScore`` JSON (from ``scoring.score_run``) — extracts the
+        ``scores`` list.
+      - a bare JSON array of per-case result dicts.
+
+    Returns an empty list when the file is missing or unparseable.
+    """
+    if not path.is_file():
+        return []
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    if isinstance(data, list):
+        return [r for r in data if isinstance(r, dict)]
+    if isinstance(data, dict):
+        # SuiteResult shape?
+        results = data.get("results")
+        if isinstance(results, list):
+            return [r for r in results if isinstance(r, dict)]
+        # RunScore shape?
+        scores = data.get("scores")
+        if isinstance(scores, list):
+            return [s for s in scores if isinstance(s, dict)]
+    return []
+
+
+def _load_private_labels(suite_dir: Path) -> dict[str, dict[str, Any]]:
+    """Load private labels from ``<suite>/private/labels.json`` (evaluator-only).
+
+    The candidate never sees these. The CLI loads them only to score
+    the candidate's eval results (the trusted-parent role per ADR-0003).
+    """
+    labels_path = suite_dir / LE.PRIVATE_DIRNAME / "labels.json"
+    if not labels_path.is_file():
+        return {}
+    try:
+        data = json.loads(labels_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    if "cases" in data and isinstance(data["cases"], dict):
+        data = data["cases"]
+    out: dict[str, dict[str, Any]] = {}
+    for k, v in data.items():
+        if isinstance(k, str) and isinstance(v, dict):
+            out[k] = v
+    return out
+
+
+def _run_one_iteration(
+    opts: dict[str, Any],
+    skill_path: Path,
+    suite_dir: Path,
+    repo_root: Path,
+    prev_eval_results: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Run one improvement iteration. Returns a JSON-safe result dict.
+
+    Args:
+        prev_eval_results: the previous iteration's per-case eval results
+            (from ``suite_result.results``), fed back into the next
+            ``propose_candidate`` call as ``eval_results``. When None
+            (first iteration), the caller's ``--baseline-results`` file
+            is used instead (if provided). This implements the M2 fix:
+            ``--max-iterations > 1`` now feeds iteration N's eval results
+            into iteration N+1's proposal so the LLM learns from each
+            candidate's failures.
+    """
+    # 1. Load lessons + baseline results.
+    lessons = _load_lessons(Path(opts["lessons_dir"]))
+    # M2: use the previous iteration's eval results when available;
+    # otherwise fall back to the caller's --baseline-results file.
+    if prev_eval_results is not None:
+        eval_results_for_llm = prev_eval_results
+    else:
+        baseline_path = opts["baseline_results"]
+        eval_results_for_llm = (
+            _load_baseline_results(Path(baseline_path)) if baseline_path else []
+        )
+
+    # 2. Propose a candidate via the LLM.
+    budget_for_llm = {
+        "budget_usd": float(opts["budget_usd"]),
+        "max_tokens": int(opts["max_tokens"]),
+        "max_tool_calls": int(opts["max_tool_calls"]),
+        "max_wall_seconds": int(opts["max_wall_seconds"]),
+    }
+    if not opts["quiet"]:
+        labutil.log(
+            f"lab-improve: proposing candidate (lessons={len(lessons)}, "
+            f"eval_results={len(eval_results_for_llm)})"
+        )
+
+    candidate = LI.propose_candidate(
+        incumbent_skill_path=skill_path,
+        lessons=lessons,
+        eval_results=eval_results_for_llm,
+        budget=budget_for_llm,
+        agent=opts["agent"] or None,
+        repo_root=repo_root,
+    )
+
+    if candidate.error:
+        return {
+            "phase": "propose",
+            "status": "failed",
+            "error": candidate.error,
+            "candidate": asdict(candidate),
+        }
+
+    # 3. Stage the candidate (never apply to live).
+    if not opts["quiet"]:
+        labutil.log(f"lab-improve: staging candidate (agent={candidate.llm_agent})")
+    candidates_dir = repo_root / LI.CANDIDATES_DIR
+    stage_meta = LI.stage_candidate(
+        skill_path=Path(candidate.skill_path),
+        patch=candidate.patch,
+        linked_lessons=candidate.linked_lessons,
+        evaluation_summary=candidate.rationale,
+        provenance={
+            "session": "",
+            "agent": candidate.llm_agent,
+            "model": candidate.llm_model,
+        },
+        candidates_dir=candidates_dir,
+    )
+    candidate_id = stage_meta["candidate_id"]
+
+    # 4. Run the 6 safety tests.
+    if not opts["quiet"]:
+        labutil.log(f"lab-improve: running safety tests on {candidate_id}")
+    safety = LI.run_safety_tests(
+        candidate_id=candidate_id,
+        candidates_dir=candidates_dir,
+        repo_root=repo_root,
+    )
+
+    if safety.get("hard_failure"):
+        return {
+            "phase": "safety",
+            "status": "hard_failure",
+            "error": "safety test hard failure — candidate rejected",
+            "candidate_id": candidate_id,
+            "candidate": asdict(candidate),
+            "safety": safety,
+        }
+
+    # 5. Run the eval suite against the CANDIDATE skill (not the incumbent).
+    #    Per H1 (captain-approved fix): apply the staged patch to an
+    #    isolated temp copy of the incumbent, eval THAT copy, and keep
+    #    the incumbent untouched. The temp dir is cleaned up after the
+    #    eval run. If the patch doesn't apply cleanly, the candidate is
+    #    rejected (safe failure — incumbent is untouched).
+    if not opts["quiet"]:
+        labutil.log(
+            f"lab-improve: applying candidate patch to temp copy for eval "
+            f"(candidate {candidate_id})"
+        )
+
+    if not LE.isolation_available():
+        return {
+            "phase": "eval",
+            "status": "isolation_unavailable",
+            "error": "bwrap not found — cannot run eval (ADR-0003 §3)",
+            "candidate_id": candidate_id,
+            "candidate": asdict(candidate),
+            "safety": safety,
+        }
+
+    # Apply the candidate patch to a temp copy of the incumbent.
+    import shutil as _shutil
+    temp_skill: Path | None = None
+    temp_dir: Path | None = None
+    try:
+        temp_skill, temp_dir = LI.apply_candidate_to_temp_copy(
+            incumbent_skill_path=skill_path,
+            patch=candidate.patch,
+        )
+    except LI.CandidateApplyError as e:
+        return {
+            "phase": "eval",
+            "status": "patch_failed",
+            "error": f"candidate patch does not apply cleanly: {e}",
+            "candidate_id": candidate_id,
+            "candidate": asdict(candidate),
+            "safety": safety,
+        }
+
+    case_budget = LE.Budget(
+        max_wall_seconds=int(opts["case_wall_seconds"]),
+        max_tokens=int(opts["case_max_tokens"]),
+        max_tool_calls=int(opts["case_max_tool_calls"]),
+        budget_usd=float(opts["case_budget_usd"]),
+    )
+    try:
+        suite_result = LE.run_suite(
+            suite_dir=suite_dir,
+            skill_path=temp_skill,  # the candidate copy, not the incumbent
+            budget=case_budget,
+            split="all",
+            agent=f"candidate-{candidate_id[:8]}",
+        )
+    except LE.IsolationUnavailable as e:
+        return {
+            "phase": "eval",
+            "status": "isolation_unavailable",
+            "error": str(e),
+            "candidate_id": candidate_id,
+            "candidate": asdict(candidate),
+            "safety": safety,
+        }
+    finally:
+        # Clean up the temp copy regardless of eval outcome.
+        if temp_dir is not None:
+            _shutil.rmtree(temp_dir, ignore_errors=True)
+
+    # 6. Score the eval results against the private labels.
+    expected_labels = _load_private_labels(suite_dir)
+    verdicts = [
+        r.verdict for r in suite_result.results
+        if r.verdict and r.verdict.get("case_id")
+    ]
+    run_score = SC.score_run(
+        verdicts=verdicts,
+        expected_labels=expected_labels,
+        budget_used=suite_result.budget_used,
+        budget_limit=suite_result.budget_limit,
+        run_id=suite_result.run_id,
+        suite=suite_result.suite,
+        agent=suite_result.agent,
+        split=suite_result.split,
+    )
+
+    return {
+        "phase": "complete",
+        "status": "ok",
+        "candidate_id": candidate_id,
+        "candidate": asdict(candidate),
+        "safety": safety,
+        "eval": LE.suite_result_to_jsonable(suite_result),
+        "score": asdict(run_score),
+    }
+
+
+def main() -> int:
+    opts = _parse_args(sys.argv[1:])
+
+    if not opts["skill"]:
+        print("--skill is required", file=sys.stderr)
+        _print_help()
+        return 1
+    if not opts["suite"]:
+        print("--suite is required", file=sys.stderr)
+        _print_help()
+        return 1
+
+    skill_path = Path(opts["skill"]).resolve()
+    if not skill_path.is_file():
+        print(f"ERROR: skill file not found: {skill_path}", file=sys.stderr)
+        return 1
+
+    suite_dir = Path(opts["suite"]).resolve()
+    if not suite_dir.is_dir():
+        print(f"ERROR: suite dir not found: {suite_dir}", file=sys.stderr)
+        return 1
+
+    # Find the repo root (for staging + safety tests).
+    repo_root = LI._repo_root_from(skill_path)
+
+    # Run the iterations.
+    iterations: list[dict[str, Any]] = []
+    final_exit = 0
+    # M2: the previous iteration's per-case eval results, fed into the
+    # next iteration's propose_candidate call. None for the first
+    # iteration (falls back to --baseline-results).
+    prev_eval_results: list[dict[str, Any]] | None = None
+    for it_idx in range(int(opts["max_iterations"])):
+        if not opts["quiet"]:
+            labutil.log(f"lab-improve: iteration {it_idx + 1}/{opts['max_iterations']}")
+        result = _run_one_iteration(
+            opts, skill_path, suite_dir, repo_root,
+            prev_eval_results=prev_eval_results,
+        )
+        iterations.append(result)
+
+        # Map the phase/status to an exit code (the last iteration wins).
+        if result["status"] == "failed":
+            final_exit = 4
+        elif result["status"] == "hard_failure":
+            final_exit = 2
+        elif result["status"] == "isolation_unavailable":
+            final_exit = 3
+        elif result["status"] == "patch_failed":
+            final_exit = 2
+        else:
+            final_exit = 0
+
+        # If this iteration failed, stop (no point iterating further).
+        if result["status"] != "ok":
+            break
+
+        # M2: extract this iteration's per-case eval results to feed
+        # into the next iteration's propose_candidate call. The eval
+        # results are the per-case EvalResult dicts (asdict form) from
+        # suite_result.results. The LLM sees only the public fields
+        # (case_id, passed, partial_credit, hard_failure, reason) —
+        # propose_candidate._public_eval_summary hides private labels.
+        eval_block = result.get("eval")
+        if isinstance(eval_block, dict):
+            eval_results_raw = eval_block.get("results", [])
+            if isinstance(eval_results_raw, list):
+                prev_eval_results = [
+                    r for r in eval_results_raw if isinstance(r, dict)
+                ]
+            else:
+                prev_eval_results = []
+        else:
+            prev_eval_results = None
+
+    out = {
+        "skill": str(skill_path),
+        "suite": str(suite_dir),
+        "iterations": iterations,
+        "final_exit": final_exit,
+    }
+
+    # Write to file if requested.
+    if opts["out"]:
+        out_path = Path(opts["out"])
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text(json.dumps(out, indent=2, sort_keys=True) + "\n",
+                            encoding="utf-8")
+        if not opts["quiet"]:
+            labutil.log(f"lab-improve: results written to {out_path}")
+
+    # Human-readable summary to stderr.
+    if not opts["quiet"]:
+        for i, it in enumerate(iterations):
+            print(f"--- iteration {i + 1} ---", file=sys.stderr)
+            print(f"phase: {it['phase']}", file=sys.stderr)
+            print(f"status: {it['status']}", file=sys.stderr)
+            if it.get("candidate_id"):
+                print(f"candidate_id: {it['candidate_id']}", file=sys.stderr)
+            if it.get("error"):
+                print(f"error: {it['error']}", file=sys.stderr)
+            if it.get("safety"):
+                s = it["safety"]
+                print(
+                    f"safety: passed={s.get('passed')} hard_failure={s.get('hard_failure')}",
+                    file=sys.stderr,
+                )
+            if it.get("score"):
+                sc = it["score"]
+                print(
+                    f"score: passed={sc.get('passed')} failed={sc.get('failed')} "
+                    f"hard_failures={sc.get('hard_failures')} "
+                    f"total_partial_credit={sc.get('total_partial_credit', 0):.3f}",
+                    file=sys.stderr,
+                )
+
+    # Print the JSON to stdout.
+    print(json.dumps(out, indent=2, sort_keys=True))
+    return final_exit
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
