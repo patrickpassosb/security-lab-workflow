@@ -1114,6 +1114,14 @@ def _build_bwrap_argv(
     """
     argv: list[str] = [
         bwrap,
+        # --unshare-user creates a new user namespace where the child
+        # process has CAP_NET_ADMIN, which is required for --unshare-net
+        # to configure loopback. Without this, bwrap on GitHub Actions
+        # runners fails with "loopback: Failed RTM_NEWADDR: Operation
+        # not permitted" because the parent namespace doesn't grant
+        # CAP_NET_ADMIN to the runner user.
+        "--unshare-user",
+        "--unshare-net",
         "--ro-bind", "/usr/bin", "/usr/bin",
         "--ro-bind", "/usr/lib", "/usr/lib",
         "--ro-bind", "/usr/lib64", "/usr/lib64",
@@ -1125,7 +1133,6 @@ def _build_bwrap_argv(
         "--ro-bind", str(skill_path), str(skill_path),
         "--bind", str(output_dir), str(output_dir),
         "--ro-bind", str(shim_path), str(shim_path),
-        "--unshare-net",
         "--die-with-parent",
         "--",
         sys.executable, str(shim_path),
