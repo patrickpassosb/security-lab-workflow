@@ -274,12 +274,15 @@ def main() -> int:
     # T2-47: walk up from cwd to find a program folder (has AGENTS.md AND
     # a challenges/ or findings/ subdir), so running lab-new from inside a
     # challenge dir finds the program folder. Don't match the lab root's
-    # AGENTS.md (it has no challenges/ or findings/ — it has ctfs/, bounties/).
+    # AGENTS.md: the lab root legitimately has a findings/ dir (legacy mode
+    # target), so without a guard it would hijack every workspace created
+    # from inside the repo. Only accept ancestors that live UNDER LAB; the
+    # lab root itself and anything outside it can never be a program folder.
     cwd = Path.cwd()
     program_root = None
     search = cwd
     while search != search.parent:
-        if (search / "AGENTS.md").exists():
+        if LAB in search.parents and (search / "AGENTS.md").exists():
             # Only treat as program root if it has the expected workspace
             # subdir (challenges/ for CTF, findings/ for bounty/cve).
             # This prevents the lab root's AGENTS.md from matching.

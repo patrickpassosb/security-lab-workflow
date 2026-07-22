@@ -19,8 +19,8 @@ install:
 # Find bash scripts: anything in bin/ with a bash/sh shebang, plus install.sh.
 BIN_BASH_SCRIPTS := $(shell for f in bin/*; do \
   [ -f "$$f" ] || continue; \
-  case "$$(basename $$f)" in *.bak.*) continue;; esac; \
-  head -n1 $$f 2>/dev/null | grep -Eq '^#!.*(bash|/sh)' || continue; \
+  echo "$$f" | grep -q '\.bak\.' && continue; \
+  head -n1 $$f 2>/dev/null | grep -Eq '^[#]!.*(bash|/sh)' || continue; \
   echo "$$f"; \
   done)
 

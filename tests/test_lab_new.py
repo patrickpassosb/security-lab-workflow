@@ -320,6 +320,48 @@ class TestCVECreation:
 # ─── Example-bounty.yaml assets ────────────────────────────────────────────────
 
 
+class TestProgramRootDetection:
+    """Regression tests for the cd-then-create walk-up in lab-new.
+
+    The lab root legitimately contains findings/ (the legacy-mode target
+    dir). Before the fix, the walk-up accepted the lab root as a program
+    folder whenever a findings/ dir existed there, so running lab-new (or
+    the test suite) from inside the repo hijacked the workspace into
+    <lab>/findings/<name> and wrote stray workspaces into the live lab.
+    """
+
+    lab_new = _import_lab_new()
+
+    def test_lab_root_is_not_a_program_root(self, tmp_path, monkeypatch):
+        lab = _make_engagement(tmp_path)
+        (lab / "AGENTS.md").write_text("# lab\n", encoding="utf-8")
+        (lab / "findings").mkdir(exist_ok=True)
+        monkeypatch.setenv("HACKING_LAB", str(lab))
+        monkeypatch.chdir(lab)
+        rc = _run_lab_new(self.lab_new, [
+            "bounty", "test-finding", "--engagement", "example-bounty",
+        ], lab, monkeypatch)
+        assert rc == 0
+        legacy = lab / "findings" / "bounty" / "test-finding"
+        hijacked = lab / "findings" / "test-finding"
+        assert legacy.is_dir(), "legacy-mode workspace must be used from the lab root"
+        assert not hijacked.exists(), "lab root must not be treated as a program folder"
+
+    def test_program_folder_under_lab_uses_program_mode(self, tmp_path, monkeypatch):
+        lab = _make_engagement(tmp_path)
+        prog = lab / "bounties" / "myprog"
+        (prog / "findings").mkdir(parents=True)
+        (prog / "AGENTS.md").write_text("# program\n", encoding="utf-8")
+        monkeypatch.setenv("HACKING_LAB", str(lab))
+        monkeypatch.chdir(prog)
+        rc = _run_lab_new(self.lab_new, [
+            "bounty", "test-finding", "--engagement", "example-bounty",
+        ], lab, monkeypatch)
+        assert rc == 0
+        ws = prog / "findings" / "test-finding"
+        assert (ws / "submission").is_dir(), "program-mode workspace must be used under LAB"
+
+
 class TestExampleBountyAssets:
     """Verify the tracked engagements/example-bounty.yaml has a valid assets list.
 
