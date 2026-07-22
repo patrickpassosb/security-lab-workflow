@@ -6,18 +6,24 @@ iteration of the outer loop:
 
   1. Read the incumbent skill.
   2. Read linked lessons (trust-filtered — target_derived dropped).
-  3. Read public eval results from a prior baseline run (private labels
-     hidden).
+  3. Read public eval results from a prior baseline run or the previous
+     iteration (private labels hidden).
   4. Call an LLM (via an agent CLI: claude/codex/opencode) to propose a
      unified diff.
   5. Stage the candidate (``stage_candidate``) — never apply to live.
   6. Run the 6 safety tests (``run_safety_tests``). Hard-fail on any
      safety violation.
-  7. Run the eval suite against the candidate skill (``run_suite``).
+  7. Apply the candidate patch to an isolated temp copy of the incumbent
+     (``apply_candidate_to_temp_copy``) and run the eval suite against
+     THAT copy — not the incumbent. The incumbent is untouched.
   8. Score the eval results against the private labels (``score_run``).
   9. Report: print the candidate ID, safety results, eval summary, and
      the diff. The human reviews and applies with ``git apply`` (no
      automatic promotion).
+
+When ``--max-iterations > 1``, each iteration's eval results are fed
+into the next iteration's ``propose_candidate`` call as ``eval_results``
+so the LLM learns from each candidate's failures.
 
 Usage:
     lab-improve --skill <path> --suite <dir> [--lessons <dir>]
@@ -240,12 +246,31 @@ def _run_one_iteration(
     skill_path: Path,
     suite_dir: Path,
     repo_root: Path,
+    prev_eval_results: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    """Run one improvement iteration. Returns a JSON-safe result dict."""
+    """Run one improvement iteration. Returns a JSON-safe result dict.
+
+    Args:
+        prev_eval_results: the previous iteration's per-case eval results
+            (from ``suite_result.results``), fed back into the next
+            ``propose_candidate`` call as ``eval_results``. When None
+            (first iteration), the caller's ``--baseline-results`` file
+            is used instead (if provided). This implements the M2 fix:
+            ``--max-iterations > 1`` now feeds iteration N's eval results
+            into iteration N+1's proposal so the LLM learns from each
+            candidate's failures.
+    """
     # 1. Load lessons + baseline results.
     lessons = _load_lessons(Path(opts["lessons_dir"]))
-    baseline_path = opts["baseline_results"]
-    baseline_results = _load_baseline_results(Path(baseline_path)) if baseline_path else []
+    # M2: use the previous iteration's eval results when available;
+    # otherwise fall back to the caller's --baseline-results file.
+    if prev_eval_results is not None:
+        eval_results_for_llm = prev_eval_results
+    else:
+        baseline_path = opts["baseline_results"]
+        eval_results_for_llm = (
+            _load_baseline_results(Path(baseline_path)) if baseline_path else []
+        )
 
     # 2. Propose a candidate via the LLM.
     budget_for_llm = {
@@ -257,13 +282,13 @@ def _run_one_iteration(
     if not opts["quiet"]:
         labutil.log(
             f"lab-improve: proposing candidate (lessons={len(lessons)}, "
-            f"baseline_results={len(baseline_results)})"
+            f"eval_results={len(eval_results_for_llm)})"
         )
 
     candidate = LI.propose_candidate(
         incumbent_skill_path=skill_path,
         lessons=lessons,
-        eval_results=baseline_results,
+        eval_results=eval_results_for_llm,
         budget=budget_for_llm,
         agent=opts["agent"] or None,
         repo_root=repo_root,
@@ -314,18 +339,16 @@ def _run_one_iteration(
             "safety": safety,
         }
 
-    # 5. Run the eval suite against the candidate skill.
-    #    The candidate skill is the incumbent + the patch. For the eval
-    #    run, we use the incumbent skill (the patch is staged, not
-    #    applied). A full run would apply the patch to a temp copy and
-    #    eval that; for this CLI we eval the incumbent as a baseline
-    #    reference and note that the candidate's eval requires applying
-    #    the patch (a future SI task). This keeps the CLI end-to-end
-    #    runnable today.
+    # 5. Run the eval suite against the CANDIDATE skill (not the incumbent).
+    #    Per H1 (captain-approved fix): apply the staged patch to an
+    #    isolated temp copy of the incumbent, eval THAT copy, and keep
+    #    the incumbent untouched. The temp dir is cleaned up after the
+    #    eval run. If the patch doesn't apply cleanly, the candidate is
+    #    rejected (safe failure — incumbent is untouched).
     if not opts["quiet"]:
         labutil.log(
-            f"lab-improve: running eval suite on incumbent "
-            f"(candidate patch staged at {candidate_id})"
+            f"lab-improve: applying candidate patch to temp copy for eval "
+            f"(candidate {candidate_id})"
         )
 
     if not LE.isolation_available():
@@ -333,6 +356,25 @@ def _run_one_iteration(
             "phase": "eval",
             "status": "isolation_unavailable",
             "error": "bwrap not found — cannot run eval (ADR-0003 §3)",
+            "candidate_id": candidate_id,
+            "candidate": asdict(candidate),
+            "safety": safety,
+        }
+
+    # Apply the candidate patch to a temp copy of the incumbent.
+    import shutil as _shutil
+    temp_skill: Path | None = None
+    temp_dir: Path | None = None
+    try:
+        temp_skill, temp_dir = LI.apply_candidate_to_temp_copy(
+            incumbent_skill_path=skill_path,
+            patch=candidate.patch,
+        )
+    except LI.CandidateApplyError as e:
+        return {
+            "phase": "eval",
+            "status": "patch_failed",
+            "error": f"candidate patch does not apply cleanly: {e}",
             "candidate_id": candidate_id,
             "candidate": asdict(candidate),
             "safety": safety,
@@ -347,7 +389,7 @@ def _run_one_iteration(
     try:
         suite_result = LE.run_suite(
             suite_dir=suite_dir,
-            skill_path=skill_path,
+            skill_path=temp_skill,  # the candidate copy, not the incumbent
             budget=case_budget,
             split="all",
             agent=f"candidate-{candidate_id[:8]}",
@@ -361,6 +403,10 @@ def _run_one_iteration(
             "candidate": asdict(candidate),
             "safety": safety,
         }
+    finally:
+        # Clean up the temp copy regardless of eval outcome.
+        if temp_dir is not None:
+            _shutil.rmtree(temp_dir, ignore_errors=True)
 
     # 6. Score the eval results against the private labels.
     expected_labels = _load_private_labels(suite_dir)
@@ -418,10 +464,17 @@ def main() -> int:
     # Run the iterations.
     iterations: list[dict[str, Any]] = []
     final_exit = 0
+    # M2: the previous iteration's per-case eval results, fed into the
+    # next iteration's propose_candidate call. None for the first
+    # iteration (falls back to --baseline-results).
+    prev_eval_results: list[dict[str, Any]] | None = None
     for it_idx in range(int(opts["max_iterations"])):
         if not opts["quiet"]:
             labutil.log(f"lab-improve: iteration {it_idx + 1}/{opts['max_iterations']}")
-        result = _run_one_iteration(opts, skill_path, suite_dir, repo_root)
+        result = _run_one_iteration(
+            opts, skill_path, suite_dir, repo_root,
+            prev_eval_results=prev_eval_results,
+        )
         iterations.append(result)
 
         # Map the phase/status to an exit code (the last iteration wins).
@@ -431,12 +484,32 @@ def main() -> int:
             final_exit = 2
         elif result["status"] == "isolation_unavailable":
             final_exit = 3
+        elif result["status"] == "patch_failed":
+            final_exit = 2
         else:
             final_exit = 0
 
         # If this iteration failed, stop (no point iterating further).
         if result["status"] != "ok":
             break
+
+        # M2: extract this iteration's per-case eval results to feed
+        # into the next iteration's propose_candidate call. The eval
+        # results are the per-case EvalResult dicts (asdict form) from
+        # suite_result.results. The LLM sees only the public fields
+        # (case_id, passed, partial_credit, hard_failure, reason) —
+        # propose_candidate._public_eval_summary hides private labels.
+        eval_block = result.get("eval")
+        if isinstance(eval_block, dict):
+            eval_results_raw = eval_block.get("results", [])
+            if isinstance(eval_results_raw, list):
+                prev_eval_results = [
+                    r for r in eval_results_raw if isinstance(r, dict)
+                ]
+            else:
+                prev_eval_results = []
+        else:
+            prev_eval_results = None
 
     out = {
         "skill": str(skill_path),

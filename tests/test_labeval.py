@@ -723,6 +723,30 @@ class TestRunnerHelpers:
         val = LE.isolation_available()
         assert isinstance(val, bool)
 
+    def test_isolation_required_in_ci(self):
+        """In CI, bwrap MUST be available so ADR-0003 isolation tests run.
+
+        This test FAILS (does not skip) when running in CI
+        (``CI=true`` env var, set by GitHub Actions) and bwrap is not
+        on PATH. Outside CI, it passes silently (local dev without
+        bwrap is fine — the isolation tests skip themselves).
+
+        Per the fix-round R1: the CI pytest job installs bubblewrap
+        and this test enforces that the install actually succeeded,
+        so the ADR-0003 isolation tests run instead of silently
+        skipping.
+        """
+        if os.environ.get("CI") != "true":
+            # Not in CI — don't enforce bwrap on local dev.
+            return
+        # In CI — bwrap MUST be available.
+        assert LE.isolation_available(), (
+            "ADR-0003 isolation unavailable in CI: bwrap not found on PATH. "
+            "The CI pytest job must install bubblewrap "
+            "(sudo apt-get install -y bubblewrap) so the isolation tests "
+            "run instead of silently skipping."
+        )
+
     def test_budget_to_limit_dict_shape(self):
         b = LE.Budget(max_wall_seconds=10, max_tokens=100, max_tool_calls=5, budget_usd=2.5)
         d = b.to_limit_dict()
@@ -970,15 +994,62 @@ class TestRunCaseIsolation:
         assert result.run_kind == "isolated"
         assert result.completed is True
         assert result.hard_failure is False
-        assert result.verdict.get("case_id") == "case-001"
+        # The case_id comes from case.yaml (c-001), NOT the directory name
+        # (case-001). The shim passes the resolved case_id from the parent.
+        assert result.verdict.get("case_id") == "c-001"
         # The stub verdict has these fields.
         assert result.verdict.get("technical_verdict") == "inconclusive"
         assert result.verdict.get("reportability") == "gather_more_evidence"
+        # The stub verdict is tagged with "stub": True so downstream
+        # consumers reading verdict.json can tell no real agent ran.
+        assert result.verdict.get("stub") is True
         # Budget was tracked.
         assert result.budget_used["actual_tokens"] > 0
         assert result.budget_used["actual_tool_calls"] >= 1
         assert result.budget_used["actual_usd"] > 0
         assert result.budget_used["actual_wall_seconds"] >= 0
+
+    def test_isolated_run_uses_resolved_case_id_not_dir_name(
+        self, lab_root: Path, skill_file: Path
+    ):
+        """The verdict's case_id must come from case.yaml, not the directory name.
+
+        This is a regression guard for B1: the shim must pass the resolved
+        case_id (from case.yaml) through to the verdict, not the directory
+        name. scoring.score_run keys expected_labels by verdict["case_id"],
+        so a mismatch silently fails to score against the expected label.
+        """
+        if not LE.isolation_available():
+            pytest.skip("bwrap not available — ADR-0003 isolation unavailable")
+        # Build a case whose directory name differs from its case_id.
+        suite = lab_root / "evals" / "iso-cid"
+        suite.mkdir(parents=True, exist_ok=True)
+        case = suite / "cases" / "my-case-dir"
+        (case / "inputs").mkdir(parents=True, exist_ok=True)
+        (case / "case.yaml").write_text(
+            "schema: security-lab/eval-case/v1\n"
+            "case_id: resolved-id-from-yaml\n"
+            "suite: iso-cid\nsplit: train\n",
+            encoding="utf-8",
+        )
+        payload = b'{"ok":true}'
+        (case / "inputs" / "resp.json").write_bytes(payload)
+        hashes = {"inputs/resp.json": hashlib.sha256(payload).hexdigest()}
+        (case / "hashes.json").write_text(json.dumps(hashes, sort_keys=True))
+        (suite / "private").mkdir(parents=True, exist_ok=True)
+        (suite / "private" / "labels.json").write_text("{}", encoding="utf-8")
+
+        result = LE.run_case(
+            case_path=case,
+            skill_path=skill_file,
+            budget=LE.Budget(max_wall_seconds=30, max_tokens=100000,
+                             max_tool_calls=100, budget_usd=10.0),
+        )
+        assert result.completed is True
+        # The verdict must use the resolved case_id from case.yaml, not
+        # the directory name "my-case-dir".
+        assert result.verdict.get("case_id") == "resolved-id-from-yaml"
+        assert result.verdict.get("case_id") != "my-case-dir"
 
     def test_isolated_run_budget_exhausted_on_wall_time(
         self, isolated_suite: Path, skill_file: Path

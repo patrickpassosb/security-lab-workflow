@@ -449,7 +449,91 @@ def stage_candidate(
     return metadata
 
 
-# ─── propose_candidate (SI-029, Phase 4 outer loop) ────────────────────────────
+# ─── apply_candidate_to_temp_copy (H1: real candidate eval) ───────────────────
+
+
+class LabImproveError(Exception):
+    """Base class for labimprove errors."""
+
+
+class CandidateApplyError(LabImproveError):
+    """Raised when a candidate patch cannot be applied to the incumbent skill.
+
+    The caller (lab-improve CLI) treats this as a safe eval-phase failure:
+    the candidate is rejected (its patch doesn't apply cleanly), but the
+    incumbent is untouched and the run continues.
+    """
+
+
+def apply_candidate_to_temp_copy(
+    incumbent_skill_path: Path,
+    patch: str,
+) -> tuple[Path, Path]:
+    """Apply a candidate patch to an isolated temp copy of the incumbent.
+
+    Per H1 (captain-approved fix): the eval phase must evaluate the
+    CANDIDATE skill (incumbent + patch), not the incumbent. This function:
+
+      1. Reads the incumbent skill text.
+      2. Applies the unified diff (``patch``) to the text using the
+         same ``_apply_patch_to_text`` the safety tests use.
+      3. Writes the patched content to a temp file in a fresh temp dir.
+      4. Returns ``(temp_skill_path, temp_dir)``.
+
+    The incumbent is NEVER modified. The temp dir is owned by the caller
+    for cleanup (``shutil.rmtree(temp_dir)`` after the eval run).
+
+    Args:
+        incumbent_skill_path: path to the incumbent skill file.
+        patch: the unified diff text (from ``CandidatePatch.patch`` or
+            ``stage_candidate``'s ``skill.patch``).
+
+    Returns:
+        ``(temp_skill_path, temp_dir)``. ``temp_skill_path`` is the path
+        to the patched skill file (to pass to ``labeval.run_suite``).
+        ``temp_dir`` is the parent temp directory (to clean up after).
+
+    Raises:
+        CandidateApplyError: when the patch cannot be applied (malformed
+            diff, context mismatch, or the incumbent skill is missing).
+            The caller treats this as a safe eval-phase failure — the
+            candidate is rejected, but the incumbent is untouched.
+    """
+    incumbent = Path(incumbent_skill_path).resolve()
+    if not incumbent.is_file():
+        raise CandidateApplyError(
+            f"incumbent skill not found: {incumbent}"
+        )
+    try:
+        base_text = incumbent.read_text(encoding="utf-8")
+    except OSError as e:
+        raise CandidateApplyError(
+            f"could not read incumbent skill: {type(e).__name__}: {e}"
+        ) from e
+
+    try:
+        patched_text = _apply_patch_to_text(base_text, patch)
+    except ValueError as e:
+        raise CandidateApplyError(
+            f"patch does not apply cleanly: {type(e).__name__}: {e}"
+        ) from e
+
+    # Write the patched content to a temp dir. The temp file keeps the
+    # incumbent's filename so the eval runner's skill-path logging is
+    # meaningful (e.g. "SKILL.md" rather than "tmpXYZ.txt").
+    import tempfile
+    temp_dir = Path(tempfile.mkdtemp(prefix="labimprove-cand-"))
+    temp_skill = temp_dir / incumbent.name
+    try:
+        temp_skill.write_text(patched_text, encoding="utf-8")
+    except OSError as e:
+        # Best-effort cleanup before raising.
+        shutil.rmtree(temp_dir, ignore_errors=True)
+        raise CandidateApplyError(
+            f"could not write patched skill to temp: {type(e).__name__}: {e}"
+        ) from e
+
+    return temp_skill, temp_dir
 
 
 @dataclass
@@ -734,18 +818,135 @@ def _parse_llm_response(
     return patch, rationale, linked_lessons
 
 
+# Per-agent non-interactive invocation (M1 fix).
+#
+# Each supported agent CLI has a different invocation syntax for
+# non-interactive (print-mode) operation. This table maps the agent
+# name to a function that builds the argv + stdin payload. The
+# functions are tested in test_labimprove.py without making real model
+# calls (we only assert the argv shape and prompt transport).
+#
+# Supported agents (verified against their --help output):
+#   - claude: `claude -p` reads the prompt from stdin.
+#   - codex:  `codex exec` reads the prompt from stdin (when piped) or
+#             as a positional arg. We use stdin to avoid shell-quoting
+#             issues with long prompts.
+#   - opencode: `opencode run -- <prompt>` takes the prompt as positional
+#             args. opencode has no stdin support, so we pass the prompt
+#             as a single positional arg after `--` (the end-of-options
+#             separator, which prevents the prompt from being parsed as
+#             flags if it starts with `-`).
+#
+# Unsupported agents are NOT advertised in the defaults. If a user
+# sets LAB_IMPROVE_AGENT to an unsupported agent, they get a clear
+# error. Agents are only added to this table after their invocation is
+# verified and tested.
+
+# Timeout for the LLM call (10 minutes). LLM calls can be slow; the
+# outer loop's budget enforcement is the real ceiling.
+_LLM_CALL_TIMEOUT = 600
+
+
+def _claude_argv() -> list[str]:
+    """Build the argv for non-interactive claude (print mode, stdin prompt)."""
+    return ["claude", "-p"]
+
+
+def _codex_argv() -> list[str]:
+    """Build the argv for non-interactive codex (exec mode, stdin prompt).
+
+    `codex exec` reads the prompt from stdin when stdin is piped. We
+    use stdin to avoid shell-quoting issues with long prompts.
+    """
+    return ["codex", "exec"]
+
+
+def _opencode_argv() -> list[str]:
+    """Build the argv for non-interactive opencode (run mode, positional arg).
+
+    `opencode run` takes the prompt as positional args. It has no stdin
+    support, so we pass the prompt as a single positional arg. The
+    caller (_default_llm_call) passes the prompt via the `input` arg
+    to subprocess.run, but for opencode we instead append it to argv
+    (see _invoke_agent below).
+    """
+    return ["opencode", "run"]
+
+
+# Dispatch table: agent name -> (argv_builder, prompt_transport).
+# prompt_transport is "stdin" (prompt piped to stdin) or "argv" (prompt
+# appended to argv as a single positional arg).
+_AGENT_DISPATCH: dict[str, tuple[Callable[[], list[str]], str]] = {
+    "claude": (_claude_argv, "stdin"),
+    "codex": (_codex_argv, "stdin"),
+    "opencode": (_opencode_argv, "argv"),
+}
+
+
+def _build_agent_argv_and_input(
+    agent: str, prompt: str
+) -> tuple[list[str], str | None]:
+    """Build the (argv, stdin_input) for a given agent and prompt.
+
+    Returns ``(argv, stdin_input)``. When ``stdin_input`` is None, the
+    prompt is passed via argv (as a positional arg) instead of stdin.
+    """
+    if agent not in _AGENT_DISPATCH:
+        raise FileNotFoundError(
+            f"unsupported agent {agent!r}. Supported: "
+            + ", ".join(sorted(_AGENT_DISPATCH))
+            + ". Set LAB_IMPROVE_AGENT to one of these."
+        )
+    builder, transport = _AGENT_DISPATCH[agent]
+    argv = builder()
+    if transport == "stdin":
+        return argv, prompt
+    # transport == "argv": append the prompt as a single positional arg.
+    # Use "--" to separate options from the prompt (in case the prompt
+    # starts with "-").
+    argv.append("--")
+    argv.append(prompt)
+    return argv, None
+
+
+def _invoke_agent(agent: str, prompt: str) -> tuple[str, str]:
+    """Invoke the agent CLI non-interactively and return (stdout, stderr).
+
+    Raises TimeoutError on timeout, RuntimeError on non-zero exit.
+    """
+    argv, stdin_input = _build_agent_argv_and_input(agent, prompt)
+    try:
+        result = subprocess.run(
+            argv,
+            input=stdin_input,
+            capture_output=True,
+            text=True,
+            timeout=_LLM_CALL_TIMEOUT,
+        )
+    except subprocess.TimeoutExpired as e:
+        raise TimeoutError(
+            f"agent CLI {agent} timed out after {_LLM_CALL_TIMEOUT}s: {e}"
+        ) from e
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"agent CLI {agent} exited {result.returncode}: "
+            f"{result.stderr[:500]}"
+        )
+    return result.stdout, result.stderr
+
+
 def _default_llm_call(prompt: str, agent: str | None = None) -> tuple[str, str, str]:
     """Default LLM call: shell out to an agent CLI (claude/codex/opencode).
 
     Returns ``(response_text, model_id, agent_name)``. The agent is
     chosen in this order: the ``agent`` argument (when provided), then
-    ``$LAB_IMPROVE_AGENT`` env var, then the first available of
-    ``claude``, ``codex``, ``opencode``.
+    ``$LAB_IMPROVE_AGENT`` env var, then the first available agent in
+    the dispatch table (claude, codex, opencode).
 
-    The agent is invoked with ``-p`` (print mode / non-interactive) and
-    the prompt on stdin. We use a generous timeout (10 minutes) since
-    LLM calls can be slow; the outer loop's budget enforcement is the
-    real ceiling.
+    Each agent has a different non-interactive invocation (M1 fix):
+      - claude:  ``claude -p`` (prompt on stdin)
+      - codex:   ``codex exec`` (prompt on stdin)
+      - opencode: ``opencode run -- <prompt>`` (prompt as positional arg)
 
     This runs in the TRUSTED parent process (not the eval sandbox), so
     it MAY make network calls to the model API. Per ADR-0003, the
@@ -759,45 +960,29 @@ def _default_llm_call(prompt: str, agent: str | None = None) -> tuple[str, str, 
     env_agent = os.environ.get("LAB_IMPROVE_AGENT")
     if env_agent:
         candidates.append(env_agent)
-    candidates.extend(["claude", "codex", "opencode"])
+    # Only advertise agents we actually support (M1: no guessing).
+    candidates.extend(list(_AGENT_DISPATCH.keys()))
 
     chosen: str | None = None
     for c in candidates:
-        if shutil.which(c):
+        if c in _AGENT_DISPATCH and shutil.which(c):
             chosen = c
             break
     if chosen is None:
+        available = [a for a in _AGENT_DISPATCH if shutil.which(a)]
         raise FileNotFoundError(
-            "no agent CLI found for propose_candidate (tried: "
-            + ", ".join(candidates)
-            + "). Set LAB_IMPROVE_AGENT or install one of them."
+            "no supported agent CLI found for propose_candidate. "
+            f"Supported (installed): {available or 'none'}. "
+            f"Tried (in order): {', '.join(candidates)}. "
+            "Set LAB_IMPROVE_AGENT or install one of: "
+            + ", ".join(sorted(_AGENT_DISPATCH))
+            + "."
         )
 
-    # Invoke the agent with the prompt on stdin. ``-p`` puts claude /
-    # codex in print mode (non-interactive). opencode uses a different
-    # invocation; we try the common ``-p`` flag and fall back to a
-    # bare invocation if the agent doesn't support it.
-    argv: list[str] = [chosen, "-p"]
-    try:
-        result = subprocess.run(
-            argv,
-            input=prompt,
-            capture_output=True,
-            text=True,
-            timeout=600,  # 10 minutes
-        )
-    except subprocess.TimeoutExpired as e:
-        raise TimeoutError(
-            f"agent CLI {chosen} timed out after 600s: {e}"
-        ) from e
-    if result.returncode != 0:
-        raise RuntimeError(
-            f"agent CLI {chosen} exited {result.returncode}: "
-            f"{result.stderr[:500]}"
-        )
+    stdout, _stderr = _invoke_agent(chosen, prompt)
     # Best-effort model id — we don't parse the agent's output for it.
     model_id = os.environ.get("LAB_IMPROVE_MODEL", "")
-    return result.stdout, model_id, chosen
+    return stdout, model_id, chosen
 
 
 def propose_candidate(
@@ -1402,6 +1587,9 @@ def run_safety_tests(
 __all__ = [
     "CANDIDATES_DIR",
     "CandidatePatch",
+    "CandidateApplyError",
+    "LabImproveError",
+    "apply_candidate_to_temp_copy",
     "stage_candidate",
     "propose_candidate",
     "run_safety_tests",

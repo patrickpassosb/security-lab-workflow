@@ -11,12 +11,16 @@ Covers:
   - end-to-end run with a fake LLM (via LAB_IMPROVE_AGENT override) —
     verifies the JSON output structure
   - run with no agent available exits 4 (LLM call failed)
+  - M2: --max-iterations > 1 feeds iteration 1 eval results into
+    iteration 2's propose_candidate call
 
 Run: PYTHONPATH=lib pytest tests/test_lab_improve_cli.py -v
 """
 
 from __future__ import annotations
 
+import importlib.machinery
+import importlib.util
 import json
 import subprocess
 import sys
@@ -26,6 +30,18 @@ import pytest
 
 HERE = Path(__file__).resolve().parent
 LAB_IMPROVE = HERE.parent / "bin" / "lab-improve"
+
+# Make lib/ importable for the CLI module import below.
+sys.path.insert(0, str(HERE.parent / "lib"))
+
+# Import the lab-improve CLI module (extensionless) via SourceFileLoader
+# so we can test _run_one_iteration directly (for the M2 feedback test).
+_loader = importlib.machinery.SourceFileLoader(
+    "lab_improve_cli", str(LAB_IMPROVE)
+)
+_spec = importlib.util.spec_from_loader("lab_improve_cli", _loader)
+cli = importlib.util.module_from_spec(_spec)
+_loader.exec_module(cli)
 
 
 def _run_lab_improve(args: list[str], *, env: dict | None = None) -> tuple[int, str, str]:
@@ -253,3 +269,161 @@ class TestLabImproveRun:
         assert "iterations" in data
         assert "final_exit" in data
         assert isinstance(data["iterations"], list)
+
+
+# ─── M2: iteration feedback ───────────────────────────────────────────────────
+
+
+class TestIterationFeedback:
+    """Tests for M2: --max-iterations > 1 feeds iteration 1 eval results into iteration 2.
+
+    These tests verify that ``_run_one_iteration`` receives the previous
+    iteration's per-case eval results as ``prev_eval_results`` and passes
+    them through to ``propose_candidate`` as ``eval_results``. We test
+    the internal function directly (imported via SourceFileLoader) with
+    a monkeypatched ``propose_candidate`` that captures its arguments.
+    """
+
+    def test_iteration_2_receives_iteration_1_eval_results(
+        self, fake_repo: Path, monkeypatch
+    ):
+        """The second iteration's propose_candidate must receive iteration 1's eval results."""
+        import labimprove as LI
+
+        skill = fake_repo / "skills" / "security" / "bounty-attack" / "SKILL.md"
+        suite_dir = fake_repo / "evals" / "test"
+
+        # Track the eval_results passed to each propose_candidate call.
+        eval_results_seen: list[list] = []
+        original_propose = LI.propose_candidate
+
+        def capturing_propose(incumbent_skill_path, lessons, eval_results, budget, **kw):
+            eval_results_seen.append(list(eval_results))
+            return original_propose(
+                incumbent_skill_path, lessons, eval_results, budget, **kw
+            )
+
+        monkeypatch.setattr(cli.LI, "propose_candidate", capturing_propose)
+
+        # Build eval results that look like iteration 1's output.
+        iter1_eval_results = [
+            {
+                "case_id": "c-001",
+                "passed": False,
+                "partial_credit": 0.5,
+                "hard_failure": False,
+                "reason": "wrong reportability",
+                "verdict": {"case_id": "c-001",
+                            "technical_verdict": "inconclusive",
+                            "reportability": "gather_more_evidence",
+                            "impact_demonstrated": False,
+                            "novelty": "unknown"},
+            }
+        ]
+
+        opts = cli._parse_args([
+            "--skill", str(skill),
+            "--suite", str(suite_dir),
+            "--agent", "nonexistent-agent-xyz",
+            "--quiet",
+        ])
+
+        # Call 1: first iteration (no prev_eval_results).
+        cli._run_one_iteration(
+            opts, skill, suite_dir, fake_repo, prev_eval_results=None
+        )
+        # Call 2: second iteration (with iteration 1's eval results).
+        cli._run_one_iteration(
+            opts, skill, suite_dir, fake_repo, prev_eval_results=iter1_eval_results
+        )
+
+        # The first call saw eval_results=[] (no baseline, no prev).
+        assert len(eval_results_seen) == 2
+        assert eval_results_seen[0] == []
+        # The second call saw iteration 1's eval results.
+        assert eval_results_seen[1] == iter1_eval_results
+
+    def test_first_iteration_uses_baseline_when_no_prev(
+        self, fake_repo: Path, monkeypatch, tmp_path: Path
+    ):
+        """The first iteration uses --baseline-results when prev_eval_results is None."""
+        import labimprove as LI
+
+        skill = fake_repo / "skills" / "security" / "bounty-attack" / "SKILL.md"
+        suite_dir = fake_repo / "evals" / "test"
+
+        # Write a baseline results file.
+        baseline_path = tmp_path / "baseline.json"
+        baseline_data = [
+            {"case_id": "b-001", "passed": True, "partial_credit": 1.0,
+             "hard_failure": False, "reason": "baseline pass"},
+        ]
+        baseline_path.write_text(json.dumps(baseline_data), encoding="utf-8")
+
+        eval_results_seen: list[list] = []
+        original_propose = LI.propose_candidate
+
+        def capturing_propose(incumbent_skill_path, lessons, eval_results, budget, **kw):
+            eval_results_seen.append(list(eval_results))
+            return original_propose(
+                incumbent_skill_path, lessons, eval_results, budget, **kw
+            )
+
+        monkeypatch.setattr(cli.LI, "propose_candidate", capturing_propose)
+
+        opts = cli._parse_args([
+            "--skill", str(skill),
+            "--suite", str(suite_dir),
+            "--agent", "nonexistent-agent-xyz",
+            "--baseline-results", str(baseline_path),
+            "--quiet",
+        ])
+
+        # First iteration: should use the baseline results file.
+        cli._run_one_iteration(opts, skill, suite_dir, fake_repo, prev_eval_results=None)
+        assert len(eval_results_seen) == 1
+        assert eval_results_seen[0] == baseline_data
+
+    def test_second_iteration_ignores_baseline_when_prev_exists(
+        self, fake_repo: Path, monkeypatch, tmp_path: Path
+    ):
+        """When prev_eval_results is provided, it overrides --baseline-results."""
+        import labimprove as LI
+
+        skill = fake_repo / "skills" / "security" / "bounty-attack" / "SKILL.md"
+        suite_dir = fake_repo / "evals" / "test"
+
+        # Write a baseline results file (should be IGNORED when prev is given).
+        baseline_path = tmp_path / "baseline.json"
+        baseline_path.write_text(json.dumps([
+            {"case_id": "SHOULD-NOT-APPEAR", "passed": True},
+        ]), encoding="utf-8")
+
+        eval_results_seen: list[list] = []
+        original_propose = LI.propose_candidate
+
+        def capturing_propose(incumbent_skill_path, lessons, eval_results, budget, **kw):
+            eval_results_seen.append(list(eval_results))
+            return original_propose(
+                incumbent_skill_path, lessons, eval_results, budget, **kw
+            )
+
+        monkeypatch.setattr(cli.LI, "propose_candidate", capturing_propose)
+
+        prev_results = [
+            {"case_id": "prev-001", "passed": False, "reason": "prev iter result"},
+        ]
+
+        opts = cli._parse_args([
+            "--skill", str(skill),
+            "--suite", str(suite_dir),
+            "--agent", "nonexistent-agent-xyz",
+            "--baseline-results", str(baseline_path),
+            "--quiet",
+        ])
+
+        cli._run_one_iteration(opts, skill, suite_dir, fake_repo, prev_eval_results=prev_results)
+        assert len(eval_results_seen) == 1
+        # The prev_results were used, NOT the baseline file.
+        assert eval_results_seen[0] == prev_results
+        assert all(r.get("case_id") != "SHOULD-NOT-APPEAR" for r in eval_results_seen[0])

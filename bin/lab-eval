@@ -9,8 +9,28 @@ output file.
 
 Usage:
     lab-eval --suite <dir> --skill <path> [--budget <seconds>]
+             [--max-tokens <n>] [--max-tool-calls <n>] [--budget-usd <usd>]
              [--split <train|val|holdout|all>] [--agent <name>]
-             [--out <path>] [--quiet]
+             [--out <path>] [--quiet] [--validate]
+
+Budget options:
+    --budget <seconds>       wall-clock seconds per case (default: 300)
+    --max-tokens <n>         max tokens per case (default: 50000)
+    --max-tool-calls <n>     max tool calls per case (default: 30)
+    --budget-usd <usd>       max USD per case (default: 1.0)
+
+    All budget ceilings are enforced by the parent process (SIGKILL on
+    exhaustion). The same budget applies to every case in the suite.
+
+Other options:
+    --split <name>           run only cases with this split field
+                            (train|val|holdout|ood|all; default: all)
+    --agent <name>           agent identifier for the run record
+                            (default: baseline)
+    --out <path>             write JSON results to this file
+    --quiet                  suppress human-readable summary on stderr
+    --validate               only validate the suite structure, then exit
+                            (exit 0 if valid, 2 if invalid)
 
 Examples:
     # Run the baseline (current bounty-attack skill) on the synthetic suite

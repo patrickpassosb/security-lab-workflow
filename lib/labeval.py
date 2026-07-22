@@ -613,17 +613,6 @@ class IsolationUnavailable(LabEvalError):
     """
 
 
-class BudgetExhausted(LabEvalError):
-    """Raised when a budget ceiling is hit during ``run_case``.
-
-    The child subprocess is killed by the parent (SIGKILL). The parent
-    then raises this so the caller can record the hard failure. The
-    parent catches this internally and converts it to an EvalResult with
-    ``hard_failure=True``; callers that want to handle it directly can
-    catch it.
-    """
-
-
 @dataclass
 class Budget:
     """Run/case budget envelope (immutable per roadmap §15.1).
@@ -782,17 +771,6 @@ def _find_bwrap() -> str | None:
     often does not, e.g. in CI sandboxes).
     """
     return shutil.which("bwrap")
-
-
-def _find_unshare() -> str | None:
-    """Return the path to ``unshare`` if available, else None.
-
-    The ADR names ``unshare --net`` as the isolation primitive. We
-    prefer ``bwrap`` (which wraps unshare + mount setup cleanly) but
-    keep this helper so the runner can report which primitive it would
-    have used.
-    """
-    return shutil.which("unshare")
 
 
 def isolation_available() -> bool:
@@ -995,7 +973,11 @@ def main() -> int:
     # Produce a deterministic placeholder verdict. This is the same
     # stub shape lib/canary.py uses (technical_verdict=inconclusive,
     # reportability=gather_more_evidence) so the scoring path produces
-    # a non-trivial RunScore without implying a real agent ran.
+    # a non-trivial RunScore without implying a real agent ran. The
+    # "stub": True field lets downstream consumers reading verdict.json
+    # tell no real agent ran (the parent's EvalResult.run_kind also
+    # carries this, but that field is not in the verdict dict written
+    # to disk).
     verdict = {
         "case_id": case_id,  # resolved case_id passed from parent
         "technical_verdict": "inconclusive",
@@ -1004,6 +986,7 @@ def main() -> int:
         "novelty": "unknown",
         "evidence_cited": [str(p) for p in input_files[:3]],
         "reasoning_summary": "Framework stub verdict — no real agent ran.",
+        "stub": True,  # marks this as a framework stub verdict
     }
 
     # Write the verdict to the output dir (the only writable path).
@@ -1739,7 +1722,6 @@ __all__ = [
     "REQUIRED_GITIGNORE_PATTERNS",
     "LabEvalError",
     "IsolationUnavailable",
-    "BudgetExhausted",
     "Budget",
     "EvalCase",
     "EvalResult",
