@@ -239,6 +239,23 @@ At the end of any meaningful session, run `gbrain-debrief` AND `obsidian-debrief
 
 This is how future-you (or future-agents) avoid repeating the same work.
 
+## CI & local development parity
+
+- **`make check`** runs the full CI surface locally: shellcheck + ruff (full
+  repo, incl. S rules) + pytest (timeout 60s/test, coverage baseline, JUnit XML)
+  + JSON Schema validation (`bin/validate-schemas`) + mypy (non-blocking). Use
+  it before pushing.
+- **`make test`** runs just pytest with coverage + JUnit XML; **`make lint`**
+  runs shellcheck + ruff. Both mirror the CI jobs of the same name.
+- CI tests on **Python 3.11 and 3.12** (matrix). `ruff.toml` targets py311.
+- Config lives in: `pyproject.toml` (pytest, coverage, mypy),
+  `ruff.toml` (lint rules + per-file S-rule suppressions), `.github/workflows/ci.yml`.
+- Ruff S rules (flake8-bandit) are enabled with **justified per-file
+  suppressions** — see `ruff.toml` for the rationale on each. Do not blanket-disable.
+- Coverage is **captured but not enforced** (no `--fail-under`); the baseline
+  number is printed in CI for tracking. mypy is **non-blocking**
+  (`continue-on-error: true`) — it reports, it does not gate.
+
 ## When in doubt
 
 - `~/security-lab/docs/ARCHITECTURE.md` — the lab architecture overview

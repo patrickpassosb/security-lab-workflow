@@ -1,0 +1,120 @@
+#!/usr/bin/env python3
+"""validate-schemas — JSON Schema validation for schemas/*.json.
+
+CI modernization item 6: upgrade the CI schema-validation step from a bare
+``json.load`` (syntax-only) to real JSON Schema validation via the
+``jsonschema`` package. This catches semantic errors (wrong types, missing
+required fields, malformed ``$ref``) that ``json.load`` silently accepts.
+
+Each ``schemas/*.json`` file is:
+  1. Parsed as JSON (catches syntax errors).
+  2. Validated against its declared draft (``$schema`` field) as a JSON Schema
+     meta-document — confirms the schema itself is well-formed.
+
+The schemas are consumed by ``lib/labutil.py`` and other loaders at runtime;
+this script guards against malformed schemas before they ship. It is a
+no-op (exit 0) when ``schemas/`` has no ``.json`` files.
+
+Usage:
+    validate-schemas            # validate schemas/*.json
+    validate-schemas <dir>      # validate <dir>/*.json
+
+Exit codes:
+    0 = all schemas valid (or no schemas found)
+    1 = at least one schema failed validation
+
+Dependencies: jsonschema (in requirements.txt for CI).
+"""
+
+import glob
+import json
+import os
+import sys
+
+# jsonschema provides ``validator_for(schema)`` which inspects the schema's
+# ``$schema`` field and returns the validator class for the declared draft,
+# falling back to the latest supported draft when ``$schema`` is absent. We
+# use that instead of hand-mapping draft URIs, which is fragile across
+# jsonschema versions (the MetaChecker attribute changed names historically).
+
+
+def _validator_for(schema: dict) -> object | None:
+    """Return the jsonschema validator class matching the schema's $schema,
+    or None if jsonschema isn't installed."""
+    try:
+        from jsonschema import validators
+    except ImportError:
+        return None
+    try:
+        return validators.validator_for(schema)
+    except Exception:  # noqa: BLE001  (defensive; rare draft-resolution errors)
+        return None
+
+
+def validate_dir(schema_dir: str) -> int:
+    files = sorted(glob.glob(os.path.join(schema_dir, "*.json")))
+    if not files:
+        print(f"validate-schemas: no .json files in {schema_dir}/ — nothing to do")
+        return 0
+
+    try:
+        import jsonschema  # noqa: F401  (presence check; used below)
+        have_lib = True
+    except ImportError:
+        have_lib = False
+        print(
+            "validate-schemas: WARNING — jsonschema not installed; "
+            "falling back to JSON syntax-only validation",
+            file=sys.stderr,
+        )
+
+    failures = 0
+    for path in files:
+        name = os.path.basename(path)
+        # 1. JSON syntax.
+        try:
+            with open(path, encoding="utf-8") as fh:
+                doc = json.load(fh)
+        except json.JSONDecodeError as exc:
+            print(f"  FAIL {name}: invalid JSON: {exc}")
+            failures += 1
+            continue
+
+        # 2. JSON Schema meta-validation (only if it looks like a schema doc
+        #    and jsonschema is available).
+        if not isinstance(doc, dict):
+            print(f"  ok   {name}: valid JSON (not a schema document)")
+            continue
+        if not have_lib:
+            print(f"  ok   {name}: valid JSON (meta-validation skipped — jsonschema not installed)")
+            continue
+        if not any(k in doc for k in ("$schema", "type", "properties")):
+            print(f"  ok   {name}: valid JSON (no schema fields — skipped meta-validation)")
+            continue
+
+        validator_cls = _validator_for(doc)
+        if validator_cls is None:
+            print(f"  ok   {name}: valid JSON (unknown $schema draft — skipped meta-validation)")
+            continue
+        try:
+            validator_cls.check_schema(doc)
+            print(f"  ok   {name}: valid JSON Schema ({doc.get('$schema', 'default draft')})")
+        except Exception as exc:  # noqa: BLE001  (jsonschema raises various)
+            print(f"  FAIL {name}: invalid JSON Schema: {exc}")
+            failures += 1
+
+    method = " (jsonschema)" if have_lib else " (syntax-only)"
+    print(f"validate-schemas: validated {len(files)} schema file(s){method}")
+    return 1 if failures else 0
+
+
+def main(argv: list[str]) -> int:
+    schema_dir = argv[1] if len(argv) > 1 else "schemas"
+    if not os.path.isdir(schema_dir):
+        print(f"validate-schemas: {schema_dir}/ does not exist — nothing to do")
+        return 0
+    return validate_dir(schema_dir)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv))

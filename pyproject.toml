@@ -1,0 +1,77 @@
+# pyproject.toml for security-lab-workflow
+#
+# Centralizes Python tool configuration that previously lived only in ruff.toml
+# and the Makefile. ruff.toml remains the single source of truth for ruff lint
+# rules (it is the older, richer config); this file only adds pytest, coverage,
+# and mypy sections so that `make test`, `make lint`, and `make check` produce
+# the same artifacts CI does.
+
+[tool.pytest.ini_options]
+# CI parity: the same options the Makefile `test` target and the CI `pytest`
+# job use. Keeping them here means a bare `pytest` invocation matches CI even
+# without the Makefile wrapper.
+minversion = "7.0"
+testpaths = ["tests"]
+pythonpath = ["lib"]
+# SI-022 / CI modernization:
+#   - timeout=60: per-test 60s wall clock. A hung test should fail fast, not
+#     burn the whole job's timeout-minutes. 60s is generous for the eval
+#     subprocess tests (bwrap spawn + candidate run) while still catching
+#     deadlocks. Override per-test with @pytest.mark.timeout(N) if needed.
+#   - junit-xml: always write test-results.xml so CI can upload it as an
+#     artifact on both success and failure. Local runs ignore the file.
+addopts = "--timeout=60 --junit-xml=test-results.xml"
+# Surface asserts + useful tracebacks but keep output scannable.
+filterwarnings = [
+  "error",
+  # bwrap isolation tests spawn subprocesses that close fds in a way pytest
+  # warns about on some platforms; not actionable.
+  "ignore::ResourceWarning",
+]
+
+[tool.coverage.run]
+# Capture but do NOT enforce a threshold yet (CI modernization item 4).
+# Coverage is reported as a baseline number in CI output; no --fail-under.
+branch = true
+source = ["lib", "bin"]
+# Extensionless bin/ scripts are not importable; coverage picks them up via
+# the `source` setting when they exec lib/ modules. Exclude them from the
+# *collection* noise.
+omit = [
+  "*/__pycache__/*",
+  "*/.venv/*",
+  "tests/*",
+  "evals/*",
+]
+
+[tool.coverage.report]
+# Show what we have without gating on it.
+show_missing = true
+skip_covered = false
+# Exclude obvious non-coverage lines from the report so the baseline number
+# reflects real logic, not defensive branches.
+exclude_lines = [
+  "pragma: no cover",
+  "if __name__ == .__main__.:",
+  "if TYPE_CHECKING:",
+  "raise NotImplementedError",
+]
+
+[tool.mypy]
+# Non-blocking CI step (CI modernization item 7). mypy runs and reports, but
+# its exit code does not fail the job. Keep config here so `make check`
+# (local) and CI use the same settings.
+python_version = "3.11"
+# lib/ is the typed surface; bin/ scripts are entry points with sys.path hacks
+# (E402-ignored in ruff) that mypy struggles with. Scope mypy to lib/ + tests/
+# and treat bin/ as untyped scripts.
+files = ["lib", "tests"]
+# This is a security lab with heavy subprocess/duck-typing — start permissive
+# and tighten over time. Non-blocking means we surface issues without
+# blocking on them.
+ignore_missing_imports = true
+warn_unused_ignores = false
+warn_redundant_casts = true
+# Don't require annotations on every function yet; the baseline is advisory.
+disallow_untyped_defs = false
+check_untyped_defs = true
