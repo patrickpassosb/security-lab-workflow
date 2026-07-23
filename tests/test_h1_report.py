@@ -1859,15 +1859,18 @@ class TestPrepare:
         # The pre-existing package must be untouched.
         assert (pre / "manifest.json").read_text() == "{}"
 
-    def test_mid_copy_failure_leaves_no_final_package(self, tmp_path):
+    def test_mid_copy_failure_leaves_no_final_package(self, tmp_path, monkeypatch):
         ws = _make_workspace(tmp_path)
         lab = _make_engagement(tmp_path)
-        # Create an attachment that exists (so check + review pass) but
-        # make it unreadable via chmod before prepare copies it. The
-        # semantic review reads the attachment, so we must make it
-        # unreadable AFTER the review but BEFORE the copy. Since
-        # prepare_report runs review+copy in one call, we instead break
-        # the copy by making the submission dir's temp area unwritable.
+        # Create an attachment so check + review pass. We inject a
+        # failure into the stream copy itself (not via chmod, which is
+        # fragile under root and conflates a review-read failure with a
+        # copy failure). prepare_report runs review+copy in one call;
+        # the review reads the attachment, then packaging creates the
+        # temp dir and copies files via _stream_copy_hash. We patch
+        # _stream_copy_hash to raise once the temp package dir exists
+        # but before the copy completes, so the cleanup path must tear
+        # down the temp dir and leave no final package.
         (ws / "evidence").mkdir()
         att = ws / "evidence" / "req.txt"
         att.write_text(
@@ -1886,20 +1889,17 @@ class TestPrepare:
         # Run check first to confirm it's valid.
         issues = h1report.check_report(ws, lab_root=lab)
         assert not [i for i in issues if i.level == "ERROR"]
-        # Make the attachment unreadable (chmod 000) to break the stream copy.
-        # The semantic review has already read it (we run review_report
-        # separately first to confirm it passes), then prepare re-runs
-        # review which will fail to read the chmod'd file — but that's
-        # the point: prepare must not leave a partial package on ANY
-        # failure, including a review failure caused by a mid-flight
-        # filesystem change.
-        os.chmod(att, 0o000)
-        try:
-            with pytest.raises((h1report.PackageError, h1report.ReportValidationError)):
-                h1report.prepare_report(ws, lab_root=lab)
-        finally:
-            os.chmod(att, 0o644)
-        # No final prepared-* package should exist.
+        # Inject a mid-copy failure: _stream_copy_hash is called after
+        # the temp package dir is created (report_h1.md copy first).
+        # Raising PackageError here exercises the cleanup branch that
+        # must remove the temp dir and leave no prepared-* package.
+        def _boom(source_abs, dest_abs):
+            raise h1report.PackageError("injected copy failure")
+
+        monkeypatch.setattr(h1report, "_stream_copy_hash", _boom)
+        with pytest.raises(h1report.PackageError):
+            h1report.prepare_report(ws, lab_root=lab)
+        # No final prepared-* package should remain.
         submission = ws / "submission"
         if submission.is_dir():
             prepared = [d for d in submission.iterdir() if d.name.startswith("prepared-")]
