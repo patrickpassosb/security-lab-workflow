@@ -1,0 +1,303 @@
+#!/usr/bin/env python3
+"""lab-hunt-lesson — per-program hunting playbook read/write CLI.
+
+The recursive learning loop for the security lab:
+
+    rejected submission -> dead-end lesson -> next hunt avoids it
+
+Per-program playbooks accumulate hunting knowledge (dead ends, design
+intents, viable surfaces, what worked, what failed, OOS traps) so each
+hunt starts from the accumulated lessons of prior hunts instead of from
+scratch.
+
+Storage:
+    playbooks/<program>.jsonl   append-only machine-readable ledger
+    playbooks/<program>.md      human-readable markdown, GENERATED from
+                                the JSONL (never hand-edit)
+
+Usage:
+    lab-hunt-lesson add <program> --category <cat> --lesson "<text>" \
+        [--evidence "<ref>"] [--date <YYYY-MM-DD>]
+    lab-hunt-lesson read <program> [--category <cat>]
+    lab-hunt-lesson list
+
+Categories:
+    dead_end        do NOT report (investigated + confirmed non-issue)
+    viable_surface  prioritize (promising lead, not exhausted yet)
+    design_intent   check before claiming (behavior is by design)
+    what_worked     emulate (confirmed to produce a finding)
+    what_failed     avoid (approach that wasted time)
+    oos_trap        never report (OOS per program policy)
+
+This CLI is a thin wrapper over lib/huntlesson.py. Audit events are written
+via labutil.audit (canonical schema, JSON-safe). No network or subprocess
+calls. The program name is validated via labutil.validate_name
+(path-traversal guard) before any filesystem operation.
+"""
+
+from __future__ import annotations
+
+import os
+import sys
+from pathlib import Path
+
+# Import shared labutil helpers and the huntlesson library.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib"))
+import huntlesson  # noqa: E402
+import labutil  # noqa: E402
+
+AUDIT_ACTION_ADD = "hunt-lesson-add"
+AUDIT_ACTION_READ = "hunt-lesson-read"
+AUDIT_ACTION_LIST = "hunt-lesson-list"
+
+
+def _resolve_playbooks_dir() -> Path:
+    """Resolve the playbooks directory.
+
+    Defaults to ``playbooks/`` relative to the lab root ($HACKING_LAB or
+    ~/security-lab), so lessons land in the right lab even when HACKING_LAB
+    is overridden by tests. Tests pass an explicit dir via the library
+    functions, so this only affects the CLI path.
+    """
+    lab_root = Path(os.environ.get("HACKING_LAB", os.path.expanduser("~/security-lab")))
+    # Keep labutil's audit log path in sync with the runtime lab root.
+    labutil.AUDIT_LOG_PATH = lab_root / "findings" / ".agent-audit.jsonl"
+    return lab_root / "playbooks"
+
+
+def usage() -> None:
+    print(__doc__)
+
+
+def _audit(action: str, target: str, exit_code: int, *, detail: str = "") -> None:
+    """Write a hunt-lesson audit entry. Single helper so every subcommand
+    records action, target, exit with the same shape."""
+    labutil.audit(action, target=target, exit_code=exit_code, detail=detail)
+
+
+# ─── arg parsing ──────────────────────────────────────────────────────────────
+
+
+def _parse_add_args(args: list[str]) -> tuple[str, dict[str, str], int]:
+    """Parse `add` args. Returns (program, flags, exit_code).
+
+    exit_code is 0 on success, 1 on usage error. Supports both --flag value
+    and --flag=value syntax. Required: --category, --lesson. Optional:
+    --evidence, --date.
+    """
+    program: str | None = None
+    flags: dict[str, str] = {}
+    required = ("--category", "--lesson")
+    optional = ("--evidence", "--date")
+    all_flags = required + optional
+    i = 0
+    while i < len(args):
+        a = args[i]
+        # --flag=value syntax.
+        if a.startswith("--") and "=" in a:
+            name, _, value = a.partition("=")
+            if name in all_flags:
+                flags[name] = value
+                i += 1
+                continue
+            print(f"unknown flag: {a}", file=sys.stderr)
+            return "", {}, 1
+        if a in all_flags:
+            if i + 1 >= len(args):
+                print(f"flag {a} requires a value", file=sys.stderr)
+                return "", {}, 1
+            flags[a] = args[i + 1]
+            i += 2
+            continue
+        if a.startswith("-"):
+            print(f"unknown flag: {a}", file=sys.stderr)
+            return "", {}, 1
+        # Positional -> program (only one allowed).
+        if program is not None:
+            print(
+                f"add takes exactly one program argument; got: {args}",
+                file=sys.stderr,
+            )
+            return "", {}, 1
+        program = a
+        i += 1
+    if program is None:
+        print("add requires a <program> argument", file=sys.stderr)
+        return "", {}, 1
+    for r in required:
+        if r not in flags:
+            print(f"add requires {r}", file=sys.stderr)
+            return "", {}, 1
+    return program, flags, 0
+
+
+def _parse_read_args(args: list[str]) -> tuple[str, str | None, int]:
+    """Parse `read` args. Returns (program, category_filter, exit_code)."""
+    program: str | None = None
+    category: str | None = None
+    i = 0
+    while i < len(args):
+        a = args[i]
+        if a in ("--category",):
+            if i + 1 >= len(args):
+                print(f"flag {a} requires a value", file=sys.stderr)
+                return "", None, 1
+            category = args[i + 1]
+            i += 2
+            continue
+        if a.startswith("--category="):
+            category = a.split("=", 1)[1]
+            i += 1
+            continue
+        if a.startswith("-"):
+            print(f"unknown flag: {a}", file=sys.stderr)
+            return "", None, 1
+        if program is not None:
+            print(
+                f"read takes exactly one program argument; got: {args}",
+                file=sys.stderr,
+            )
+            return "", None, 1
+        program = a
+        i += 1
+    if program is None:
+        print("read requires a <program> argument", file=sys.stderr)
+        return "", None, 1
+    return program, category, 0
+
+
+# ─── commands ──────────────────────────────────────────────────────────────────
+
+
+def cmd_add(args: list[str]) -> int:
+    """Add a lesson to a program playbook. Exit 0 on success (including the
+    idempotent no-op case), 2 on validation failure, 1 on usage error."""
+    program, flags, parse_rc = _parse_add_args(args)
+    if parse_rc != 0:
+        return parse_rc
+
+    playbooks_dir = _resolve_playbooks_dir()
+
+    # Validate program via labutil.validate_name (path-traversal guard).
+    if not labutil.validate_name(program):
+        print(
+            f"ERROR: invalid program {program!r}. Use only letters, numbers, "
+            f"dots, hyphens, underscores. No '..', '/', or '\\'.",
+            file=sys.stderr,
+        )
+        _audit(AUDIT_ACTION_ADD, program, 2, detail="invalid program name")
+        return 2
+
+    category = flags["--category"]
+    claim = flags["--lesson"]
+    evidence = flags.get("--evidence") or None
+    date = flags.get("--date") or None
+
+    # Determine added_by provenance from the environment.
+    agent = os.environ.get("USER", os.environ.get("LOGNAME", "agent"))
+    model = os.environ.get("OPENCODE_MODEL") or None
+    added_by = {"agent": agent, "model": model}
+
+    try:
+        lesson = huntlesson.add_lesson(
+            program=program,
+            category=category,
+            claim=claim,
+            evidence=evidence,
+            date=date,
+            added_by=added_by,
+            playbooks_dir=playbooks_dir,
+        )
+    except huntlesson.HuntLessonValidationError as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        _audit(
+            AUDIT_ACTION_ADD, program, 2,
+            detail=f"validation failed: {e}",
+        )
+        return 2
+
+    print(f"ADDED: {lesson['lesson_id']}")
+    print(f"PROGRAM: {program}")
+    print(f"CATEGORY: {lesson['category']}")
+    print(f"DATE: {lesson['date']}")
+    if lesson.get("evidence"):
+        print(f"EVIDENCE: {lesson['evidence']}")
+    _audit(
+        AUDIT_ACTION_ADD, program, 0,
+        detail=f"category={category} lesson_id={lesson['lesson_id']}",
+    )
+    return 0
+
+
+def cmd_read(args: list[str]) -> int:
+    """Print a program's playbook (markdown). Exit 0 on success, 2 on
+    invalid category filter, 1 on usage error."""
+    program, category, parse_rc = _parse_read_args(args)
+    if parse_rc != 0:
+        return parse_rc
+
+    playbooks_dir = _resolve_playbooks_dir()
+
+    if not labutil.validate_name(program):
+        print(
+            f"ERROR: invalid program {program!r}.",
+            file=sys.stderr,
+        )
+        _audit(AUDIT_ACTION_READ, program, 2, detail="invalid program name")
+        return 2
+
+    try:
+        md = huntlesson.read_playbook(
+            program, category=category, playbooks_dir=playbooks_dir
+        )
+    except huntlesson.HuntLessonValidationError as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        _audit(AUDIT_ACTION_READ, program, 2, detail=f"invalid category: {e}")
+        return 2
+
+    # Print the markdown to stdout (no trailing extra newline).
+    sys.stdout.write(md)
+    _audit(AUDIT_ACTION_READ, program, 0, detail="read playbook")
+    return 0
+
+
+def cmd_list(args: list[str]) -> int:
+    """List all programs with playbooks. Exit 0 on success."""
+    if args:
+        print(f"list takes no arguments; got: {args}", file=sys.stderr)
+        return 1
+    playbooks_dir = _resolve_playbooks_dir()
+    programs = huntlesson.list_programs(playbooks_dir=playbooks_dir)
+    if not programs:
+        print("(no playbooks yet)")
+        _audit(AUDIT_ACTION_LIST, "", 0, detail="no playbooks")
+        return 0
+    for p in programs:
+        print(p)
+    _audit(AUDIT_ACTION_LIST, "", 0, detail=f"{len(programs)} playbooks")
+    return 0
+
+
+# ─── dispatch ──────────────────────────────────────────────────────────────────
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = list(argv if argv is not None else sys.argv[1:])
+    if not args or args[0] in ("-h", "--help"):
+        usage()
+        return 0
+    cmd = args[0]
+    rest = args[1:]
+    if cmd == "add":
+        return cmd_add(rest)
+    if cmd == "read":
+        return cmd_read(rest)
+    if cmd == "list":
+        return cmd_list(rest)
+    print(f"Unknown command: {cmd}", file=sys.stderr)
+    usage()
+    return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

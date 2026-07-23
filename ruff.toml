@@ -99,6 +99,14 @@ select = ["E", "W", "F", "I", "B", "UP", "SIM", "S"]
   "S603",  # candidate-skill subprocess under bwrap isolation (ADR-0003)
 ]
 
+# scripts/seed_hunt_playbooks.py: E501 — the seed tuples carry long lesson
+# claim strings (real human-readable hunting lessons). Wrapping each claim
+# across lines would make the data harder to read and edit; the claims are
+# data, not code. Revisit only if the seeder grows code beyond data tuples.
+"scripts/seed_hunt_playbooks.py" = [
+  "E501",  # long lesson-claim data tuples; wrapping hurts readability
+]
+
 [format]
 # Don't auto-format on lint; just check. Use `ruff format` explicitly.
 indent-style = "space"

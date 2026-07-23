@@ -21,6 +21,12 @@ masscan, or any tool that sends large volumes of automated requests.
 
 ## Before you start
 
+0. **Read the program playbook**: `lab-hunt-lesson read <program>`
+   - If no playbook exists, proceed with general hunting but record lessons as you go.
+   - Do NOT report anything listed in "Dead ends" — these have been investigated and confirmed as non-issues.
+   - Check "Known design intents" before claiming a finding — if the behavior is by design, it's not a bug.
+   - Prioritize "Viable attack surfaces" — these are leads that haven't been exhausted yet.
+   - List available programs: `lab-hunt-lesson list`.
 1. **Read the program's AGENTS.md** — it has the rules, scope, OOS list, bounty amounts.
 2. **Scope check** the target: `lab-scope <target> --engagement <name>`
 3. **Create a workspace**: `lab-new bounty <finding-name> --target <url> --engagement <name>`
@@ -218,6 +224,29 @@ metadata lives only in `record.json` inside the prepared package. See
 - [ ] Attachments are explicit, relative, non-symlink, and pass secret scanning
 - [ ] No `TODO`/`TBD`/`{{FIELD}}` placeholders left in the body
 - [ ] `lab-h1-report review` prints `REVIEW: pass` (or `warn` for non-blocking warnings)
+
+## After your hunt
+
+Write back what you learned so the next hunt starts smarter:
+
+```bash
+lab-hunt-lesson add <program> --category <category> --lesson "<text>" [--evidence "<reference>"]
+```
+
+- For every dead end (investigated + confirmed non-issue): `--category dead_end`
+- For every design intent discovered (behavior is by design): `--category design_intent`
+- For every promising surface (lead not exhausted yet): `--category viable_surface`
+- For what worked (a finding approach that was confirmed to work): `--category what_worked`
+- For what didn't work (approach that wasted time — too large, no impact, OOS): `--category what_failed`
+- For OOS traps discovered (looks like a bug but is OOS per program policy): `--category oos_trap`
+
+The playbook markdown (`playbooks/<program>.md`) is generated from the JSONL
+ledger — never hand-edit it, always go through the CLI. Lessons are deduped by
+(program, claim) so re-discovering the same dead end is a no-op. When
+`lab-h1-report record-outcome` records a `not_applicable` or `informative`
+state, it automatically appends a dead_end lesson to the program playbook —
+this is the recursive learning loop: rejected submission → dead-end lesson →
+next hunt avoids it.
 
 ## Rate limits
 

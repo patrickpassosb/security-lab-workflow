@@ -1,0 +1,108 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://security-lab/schemas/hunt-lesson-v1.schema.json",
+  "title": "Hunt Lesson v1",
+  "description": "A per-program hunting lesson captured in the recursive learning loop\n(rejected submission -> dead-end lesson -> next hunt avoids it). One JSON\nobject per line in playbooks/<program>.jsonl. The human-readable markdown\nplaybook (playbooks/<program>.md) is GENERATED from this ledger — never\nhand-edited; always go through `lab-hunt-lesson`.\n\nPer the recursive-learning design (SI / hunt playbook):\n  - Categories: dead_end, viable_surface, design_intent, what_worked,\n    what_failed, oos_trap. (`what_failed` covers approaches that wasted\n    time; `dead_end` covers investigated-and-confirmed non-issues; `oos_trap`\n    covers out-of-scope patterns that look like bugs but are OOS per the\n    program policy.)\n  - `superseded: false` by default; set true by a later lesson that\n    replaces this one (e.g. a dead_end later disproven becomes what_worked).\n  - Idempotency: same (program, claim) pair = no-op. The CLI dedupes by\n    the claim string; capture never generates a duplicate ledger line.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "lesson_id",
+    "program",
+    "category",
+    "claim",
+    "date",
+    "added_by",
+    "superseded"
+  ],
+  "properties": {
+    "schema": {
+      "type": "string",
+      "description": "Schema identifier. Must be exactly 'security-lab/hunt-lesson/v1'.",
+      "const": "security-lab/hunt-lesson/v1",
+      "examples": ["security-lab/hunt-lesson/v1"]
+    },
+    "lesson_id": {
+      "type": "string",
+      "description": "Stable identifier for this lesson. Convention: 'hunt-lesson-<uuid>'.",
+      "minLength": 1,
+      "pattern": "^hunt-lesson-[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
+      "examples": ["hunt-lesson-f81d4fae-7dec-11d0-a765-00a0c91e6bf6"]
+    },
+    "program": {
+      "type": "string",
+      "description": "Program slug this lesson belongs to (e.g. 'gitlab', 'notion', '_general').\n'_general' is a cross-program playbook for lessons that apply broadly.",
+      "minLength": 1,
+      "examples": ["gitlab", "notion", "_general"]
+    },
+    "category": {
+      "type": "string",
+      "description": "Lesson category — controls how the hunting workflow consumes it.\n- dead_end: investigated-and-confirmed non-issue. Do NOT report.\n- viable_surface: promising attack surface worth testing.\n- design_intent: behavior that is by design (check before reporting).\n- what_worked: a finding approach that was confirmed to work.\n- what_failed: an approach that wasted time (too large, no impact, OOS).\n- oos_trap: out-of-scope pattern that looks like a bug but is OOS.",
+      "enum": [
+        "dead_end",
+        "viable_surface",
+        "design_intent",
+        "what_worked",
+        "what_failed",
+        "oos_trap"
+      ],
+      "examples": ["dead_end", "viable_surface"]
+    },
+    "claim": {
+      "type": "string",
+      "description": "The lesson text. One falsifiable, actionable sentence. This is the\ndeduplication key — same (program, claim) = no-op.",
+      "minLength": 1,
+      "examples": [
+        "NuGet symbol server is unauthenticated by design — the 3-key lookup IS the security boundary"
+      ]
+    },
+    "evidence": {
+      "type": ["string", "null"],
+      "description": "Reference that grounds the claim (file:line, MR reference, report ID,\ncommit hash). null when the lesson is fully abstract.",
+      "examples": ["MR !134564, lib/api/nuget_group_packages.rb:70-72", null]
+    },
+    "date": {
+      "type": "string",
+      "description": "Date the lesson was captured (YYYY-MM-DD).",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}$",
+      "examples": ["2026-07-23"]
+    },
+    "added_by": {
+      "type": "object",
+      "description": "Provenance of the capturing agent.",
+      "additionalProperties": false,
+      "required": ["agent"],
+      "properties": {
+        "agent": {
+          "type": "string",
+          "description": "Agent name (e.g. 'opencode', 'claude', 'codex') or 'record-outcome'\n(for the automatic feedback loop from rejected submissions).",
+          "examples": ["opencode", "record-outcome"]
+        },
+        "model": {
+          "type": ["string", "null"],
+          "description": "Model identifier (e.g. 'glm-5.2', 'claude-opus-4-6'). null when\nthe lesson was captured by a non-LLM path (e.g. record-outcome).",
+          "examples": ["glm-5.2", null]
+        }
+      }
+    },
+    "superseded": {
+      "type": "boolean",
+      "description": "True when a later lesson replaces this one. False by default. The\nmarkdown renderer skips superseded lessons unless --include-superseded is\npassed.",
+      "default": false,
+      "examples": [false]
+    }
+  },
+  "examples": [
+    {
+      "schema": "security-lab/hunt-lesson/v1",
+      "lesson_id": "hunt-lesson-f81d4fae-7dec-11d0-a765-00a0c91e6bf6",
+      "program": "gitlab",
+      "category": "dead_end",
+      "claim": "NuGet symbol server is unauthenticated by design — the 3-key lookup IS the security boundary",
+      "evidence": "MR !134564, lib/api/nuget_group_packages.rb:70-72",
+      "date": "2026-07-23",
+      "added_by": {"agent": "opencode", "model": "glm-5.2"},
+      "superseded": false
+    }
+  ]
+}

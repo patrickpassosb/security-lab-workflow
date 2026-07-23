@@ -57,6 +57,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib"))
 import finding_events  # noqa: E402
 import h1report  # noqa: E402
+import huntlesson  # noqa: E402
 import labutil  # noqa: E402
 import workspace  # noqa: E402
 
@@ -949,6 +950,9 @@ def cmd_record_outcome(args: list[str]) -> int:
         status = store.derive_finding_status(report_id, workspace_path=ws)
     except Exception as e:  # noqa: BLE001 — defensive; status is best-effort
         print(f"RECORDED: outcome_id={outcome_id} (status derivation failed: {e})")
+        # Recursive-learning auto-feedback (best-effort) — see the main
+        # success path below for rationale.
+        _maybe_record_dead_end_lesson(ws, eng_name, state, report_id, notes, lab_root)
         _audit_h1(
             AUDIT_ACTION_RECORD_OUTCOME, str(ws), eng_name, 0,
             int((time.monotonic() - start_time) * 1000), ws,
@@ -967,12 +971,64 @@ def cmd_record_outcome(args: list[str]) -> int:
     print(f"  reportability: {status.get('reportability')}")
     print(f"  last_event_ts: {status.get('last_event_ts')}")
 
+    # Recursive-learning auto-feedback loop (SI / hunt playbook): when the
+    # platform closed this as not_applicable or informative, feed the
+    # rejection back into the program playbook as a dead_end lesson so the
+    # next hunt on this program avoids the same behavior. Best-effort —
+    # never blocks record-outcome. The outcome event is the source of
+    # truth; the lesson is a derived convenience.
+    _maybe_record_dead_end_lesson(ws, eng_name, state, report_id, notes, lab_root)
+
     _audit_h1(
         AUDIT_ACTION_RECORD_OUTCOME, str(ws), eng_name, 0,
         int((time.monotonic() - start_time) * 1000), ws,
         detail=f"recorded state={state} outcome_id={outcome_id}",
     )
     return 0
+
+
+def _maybe_record_dead_end_lesson(
+    ws: Path,
+    eng_name: str,
+    state: str,
+    report_id: str,
+    notes: str,
+    lab_root: Path,
+) -> None:
+    """Best-effort recursive-learning auto-feedback (SI / hunt playbook).
+
+    When `state` is `not_applicable` or `informative`, feed the rejection
+    back into the program playbook as a dead_end lesson so the next hunt
+    avoids the same behavior. Never raises — a failure to capture the
+    lesson must not break record-outcome. The outcome event is the source
+    of truth; the lesson is a derived convenience.
+
+    The program slug is derived from the engagement name (bounty-<program>
+    -> <program>). The report title is read best-effort from report_h1.md
+    frontmatter to ground the lesson. When either is missing, the lesson
+    is skipped (the auto-loop is opportunistic, not required).
+    """
+    program = huntlesson.program_slug_for_engagement(eng_name)
+    if not program:
+        return
+    # Read the report title best-effort (so the lesson names what was
+    # reported, not just the report ID).
+    title = ""
+    with contextlib.suppress(Exception):
+        report_path = h1report.find_report_file(ws)
+        report = h1report.parse_report(report_path)
+        title = str(report.frontmatter.get("title", "") or "")
+    playbooks_dir = lab_root / "playbooks"
+    lesson = huntlesson.add_dead_end_from_outcome(
+        program=program,
+        state=state,
+        report_id=report_id,
+        title=title,
+        notes=notes,
+        playbooks_dir=playbooks_dir,
+    )
+    if lesson is not None:
+        print(f"HUNT_LESSON: {lesson['lesson_id']} (dead_end fed back to {program} playbook)")
 
 
 # ─── assess (SI-015) ───────────────────────────────────────────────────────────
