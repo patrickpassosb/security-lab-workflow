@@ -10,7 +10,7 @@ ruff==0.6.9
 #    hash: sha256:xxx  # add after first pip-compile
 
 # Runtime deps for bin/ scripts
-pyyaml==6.0.2
+pyyaml==6.0.3
 #    hash: sha256:xxx  # add after first pip-compile
 
 requests==2.32.3
