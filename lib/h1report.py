@@ -2699,6 +2699,7 @@ def prepare_report(
         "scope_snapshots": len(scope_snaps),
         "review_verdict": review_verdict,
         "review_blocking": review_blocking,
+        "review_dimensions": review_dimensions,
     }
 
 

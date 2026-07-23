@@ -573,10 +573,10 @@ class OutcomeStore:
         # event is validated by _validate_workspace_event before it
         # lands, so these fields are trusted evidence — not
         # self-asserted prose. We fold the latest non-null
-        # technical_verdict / confidence across all events for this
-        # report_id (a later event that revises the verdict wins).
+        # technical_verdict / confidence across all events in the workspace
+        # (a later event that revises the verdict wins).
         technical_verdict, confidence, ws_event_ts = self._fold_workspace_events(
-            workspace_path, report_id
+            workspace_path
         )
         # SI-031: include the latest workspace-event timestamp in
         # last_event_ts so the status accurately identifies the event
@@ -650,10 +650,9 @@ class OutcomeStore:
     def _fold_workspace_events(
         self,
         workspace_path: Path | str | None,
-        report_id: str,
     ) -> tuple[str, float, str]:
-        """Fold the workspace event ledger for `report_id` to derive
-        `technical_verdict`, `confidence`, and the latest event timestamp.
+        """Fold the workspace event ledger to derive `technical_verdict`,
+        `confidence`, and the latest event timestamp.
 
         Returns (technical_verdict, confidence, last_event_ts). When no
         workspace is provided, no ledger exists, or no event carries the

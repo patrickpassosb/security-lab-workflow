@@ -18,11 +18,11 @@ submission:
 
   # SI-031: semantic/adversarial review gate (audit section 6.2).
   # When true, `prepare` runs the semantic review after `check` and
-  # aborts on overall=fail. WARN is non-blocking (the human sees the
-  # warnings in the package manifest). Set to false to bypass the
-  # semantic review (not recommended — the audit's root cause was that
-  # only structural checks ran). `prepare --skip-review` overrides this
-  # at the CLI for backward compat with old drafts.
+  # aborts unless overall=pass. Both WARN and FAIL block packaging
+  # (the report must pass the content-quality gate, not just survive
+  # it). Set to false to bypass the semantic review (not recommended
+  # — the audit's root cause was that only structural checks ran).
+  # `prepare` always honors require_llm_review and runs the review.
   require_llm_review: true
 
   # Known Informative precedent check.

@@ -112,10 +112,11 @@ check -> review -> prepare -> human submits -> record-submission -> status
   content-quality review (SI-031). Returns a structured per-dimension verdict;
   `overall=fail` blocks packaging. Deterministic structure checks alone are
   insufficient.
-- `lab-h1-report prepare [workspace] [--skip-review]` stages an immutable
-  submission package with attachment hashes + the review verdict. Runs `check`
-  AND `review` internally; refuses to package unless both pass (review WARN is
-  non-blocking; FAIL aborts). Packages are never overwritten.
+- `lab-h1-report prepare [workspace]` stages an immutable submission package
+  with attachment hashes + the review verdict. Runs `check` AND `review`
+  internally; refuses to package unless both pass (review must return
+  overall=pass; both WARN and FAIL abort packaging). Packages are never
+  overwritten.
 - **Agents MUST NOT submit a report.** There is no `submit` command. Final
   submission is a human action in the HackerOne UI. The human returns the
   accepted HackerOne report ID and URL.

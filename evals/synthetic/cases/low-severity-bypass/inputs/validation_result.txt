@@ -5,7 +5,7 @@ PASS - limitations explains why a state-changing PoC is not feasible
 
 lab-h1-report review output (synthetic):
 
-REVIEW: pass (or warn for concrete_harm — theoretical impact is acceptable for low severity)
+REVIEW: pass
 BLOCKING_DIMENSIONS: []
 DIMENSIONS:
   poc_state_change: pass — poc.type=theoretical with limitations explaining why

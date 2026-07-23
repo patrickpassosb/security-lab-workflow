@@ -316,17 +316,20 @@ def score_case(
     # SI-031 (audit section 8.3): when the expected label carries
     # content-quality fields, compare them too. When the expected label
     # does NOT carry them, skip (backward compat — old verdicts/labels
-    # score against the core fields only). This means the content-quality
-    # fields only affect the score when the eval suite author opted into
-    # them, so existing suites are unaffected.
+    # score against the core fields only). Only score fields that are
+    # present in the expected label — do not penalize verdicts for
+    # optional fields omitted from the expected label. This means the
+    # content-quality fields only affect the score when the eval suite
+    # author opted into them, so existing suites are unaffected.
     content_fields_present = any(
         fname in expected for fname in _CONTENT_QUALITY_FIELDS
     )
     if content_fields_present:
         for fname in _CONTENT_QUALITY_FIELDS:
-            got = verdict.get(fname)
-            exp = expected.get(fname)
-            matches.append((fname, _field_matches(fname, got, exp)))
+            if fname in expected:
+                got = verdict.get(fname)
+                exp = expected.get(fname)
+                matches.append((fname, _field_matches(fname, got, exp)))
 
     n_match = sum(1 for _, ok in matches if ok)
     n_total = len(matches)

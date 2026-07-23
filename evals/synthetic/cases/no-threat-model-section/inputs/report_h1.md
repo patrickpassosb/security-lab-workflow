@@ -27,9 +27,9 @@ threat_model:
 evidence_index: []
 limitations: ["only /api/fetch was tested"]
 poc:
-  type: state_changing
+  type: read_only
   attachment: ""
-  state_changed: true
+  state_changed: false
 ---
 
 # SSRF in /api/fetch

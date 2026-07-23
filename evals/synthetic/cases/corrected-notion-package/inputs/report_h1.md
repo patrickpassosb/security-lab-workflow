@@ -72,7 +72,7 @@ count for any workspace ID.
 ### PoC
 
 The response to `GET /endpointA?workspace_id=123` returns:
-```
+```http
 HTTP/1.1 200 OK
 Content-Type: application/json
 
@@ -99,7 +99,7 @@ An unauthenticated attacker can read the owner email and member count
 for any workspace by iterating `workspace_id` values. The owner email
 enables targeted phishing; the member count leaks organizational size.
 The response in evidence/01_response.txt shows the actual data
-returned, including a real owner email address.
+returned.
 
 ## Limitations
 

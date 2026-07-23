@@ -12,7 +12,7 @@ PASS - ## Limitations present
 
 lab-h1-report review output (synthetic):
 
-REVIEW: pass (or warn for redaction)
+REVIEW: pass
 BLOCKING_DIMENSIONS: []
 DIMENSIONS:
   attacker_victim_chain: pass
@@ -20,8 +20,8 @@ DIMENSIONS:
   poc_state_change: pass
   evidence_to_claim_mapping: pass
   disconfirming_controls: pass
-  redaction: warn (evidence contains an email — consider redacting)
+  redaction: pass
   honest_limitations: pass
-RECOMMENDATION: Review warnings before submitting.
+RECOMMENDATION: Ready to package.
 
 0 failures. The corrected package passes all SI-031 deterministic + semantic gates.

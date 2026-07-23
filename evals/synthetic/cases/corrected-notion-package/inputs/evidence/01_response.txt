@@ -2,4 +2,4 @@ HTTP/1.1 200 OK
 Content-Type: application/json
 X-Request-Id: req_abc123456789
 
-{"workspace_name":"Acme","owner_email":"owner@acme.example","member_count":42,"plan":"team"}
+{"workspace_name":"Acme","owner_email":"REDACTED@example.com","member_count":42,"plan":"team"}

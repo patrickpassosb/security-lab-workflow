@@ -34,10 +34,9 @@ in improvement/config/submission.yaml. It returns PASS/HOLD/BLOCK and exits
 check (SI-031) runs the deterministic structural + content-quality gates
 (threat_model, poc, evidence_index, limitations, finding-class rules).
 review (SI-031) runs the semantic/adversarial content-quality review and
-prints a structured per-dimension verdict. prepare runs check, then
-review, and refuses to package unless both pass (review WARN is
-non-blocking; FAIL aborts). Pass --skip-review to bypass the semantic
-review (backward compat for old drafts; the audit log records the bypass).
+prints a structured per-dimension verdict. prepare runs check, then review,
+and refuses to package unless both pass (review must return overall=pass;
+both WARN and FAIL abort packaging).
 
 This CLI is a thin wrapper over lib/h1report.py, lib/h1review.py, and
 lib/finding_events.py. Audit events are written via labutil.audit (canonical
@@ -244,8 +243,8 @@ AUDIT_ACTION_REVIEW = "h1-report-review"
 
 def cmd_review(args: list[str]) -> int:
     """Run the semantic/adversarial review on a report. Exit 0 if the
-    review passes (overall=pass), 0 if it warns (overall=warn — non-
-    blocking, same as check), 2 if it fails (overall=fail — blocking),
+    review passes (overall=pass) or warns (overall=warn — non-blocking
+    for review command alone), 2 if it fails (overall=fail — blocking),
     1 for usage/filesystem/parse errors.
 
     The review is the semantic gate (SI-031): it reads the report body
@@ -306,7 +305,7 @@ def cmd_review(args: list[str]) -> int:
         engagement_name = str(report.frontmatter.get("engagement", "") or "")
 
     duration_ms = int((time.monotonic() - start_time) * 1000)
-    exit_code = 0 if result.overall == "pass" else 2
+    exit_code = 0 if result.overall in ("pass", "warn") else 2
     _audit_h1(
         AUDIT_ACTION_REVIEW, str(ws), engagement_name, exit_code,
         duration_ms, ws,

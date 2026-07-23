@@ -174,14 +174,13 @@ check -> review -> prepare -> human submits -> record-submission -> status
    honest_limitations). `overall=pass` exits 0; `warn` exits 0 (non-blocking);
    `fail` exits 2 (blocking). Deterministic structure checks alone are
    insufficient — this is the content gate.
-4. **`lab-h1-report prepare [workspace] [--skip-review]`** — stage an immutable
-   submission package under `submission/prepared-<UTC>/` containing `report_h1.md`,
+4. **`lab-h1-report prepare [workspace]`** — stage an immutable submission
+   package under `submission/prepared-<UTC>/` containing `report_h1.md`,
    `report.md` (frontmatter-stripped body for HackerOne), `attachments/`, and
    `manifest.json` (SHA-256 + size for every file + the review verdict). Runs
-   `check` AND `review` internally and aborts on any validation error or semantic
-   `fail`. `--skip-review` bypasses the semantic review (backward compat with
-   old drafts; the audit log records the bypass). Refuses to overwrite an existing
-   package.
+   `check` AND `review` internally and aborts unless both pass (review must
+   return overall=pass; both WARN and FAIL abort packaging). Refuses to
+   overwrite an existing package.
 5. **HUMAN submits via the HackerOne UI.** The human copies `report.md`, uploads
    the staged attachments, and submits. **Agents MUST NOT submit a report.**
    There is no `submit` command and there never will be. The human returns the

@@ -2,7 +2,7 @@ schema: security-lab/eval-case/v1
 case_id: synthetic-corrected-notion-package-001
 suite: synthetic
 split: train
-description: "Corrected Notion package: full threat model, state-changing PoC with evidence, evidence index, disconfirming controls, and limitations. Passes all SI-031 deterministic + semantic gates."
+description: "Corrected Notion package: full threat model, state-changing PoC with evidence, evidence index, disconfirming controls, limitations, and proper redaction. Passes all SI-031 deterministic + semantic gates with zero failures."
 category: content-quality
 tags: [h1-reporting, threat-model, poc, evidence-index, si-031]
 regression_source: bounty-quality-gates-audit
