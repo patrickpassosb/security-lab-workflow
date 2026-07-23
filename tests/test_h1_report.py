@@ -45,6 +45,19 @@ VALID_SOURCE_FRONTMATTER = {
         "owned_accounts_only": True,
         "destructive_operations": False,
     },
+    "threat_model": {
+        "attacker": "anonymous remote attacker",
+        "victim": "the vendor AWS account",
+        "trust_boundary": "server-side fetch crosses into internal metadata service",
+        "state_change": "IAM credentials read from instance metadata",
+    },
+    "evidence_index": [],
+    "limitations": ["only the /api/fetch endpoint was tested"],
+    "poc": {
+        "type": "state_changing",
+        "attachment": "",
+        "state_changed": True,
+    },
 }
 
 VALID_LIVE_FRONTMATTER = {
@@ -54,11 +67,23 @@ VALID_LIVE_FRONTMATTER = {
     "asset_name": "Public API",
     "live_targets": ["https://api.example.com/v1/fetch"],
     "severity": {"rating": "high", "score": 8.0, "vector": "CVSS:3.1/AV:N/AC:L"},
+    "poc": {
+        "type": "state_changing",
+        "attachment": "",
+        "state_changed": True,
+    },
 }
 
 
 VALID_BODY = """\
 # SSRF in /api/fetch
+
+## Threat model
+
+The attacker is an anonymous remote user who can reach `/api/fetch`. The
+victim is the vendor's AWS account. The trust boundary crossed is the
+server-side fetch, which reaches the instance metadata service. The
+state change is that IAM credentials are read from the metadata service.
 
 ## Description
 
@@ -66,19 +91,31 @@ The `/api/fetch` endpoint accepts a `url` parameter and fetches it server-side
 without validation. An attacker can supply an internal URL such as
 `http://169.254.169.254/` and exfiltrate the AWS instance metadata.
 
+### PoC
+
+1. Send a request to `/api/fetch?url=http://169.254.169.254/latest/meta-data/`.
+2. Observe the IAM role credentials returned in the response body — this
+   demonstrates a state change (credentials read from the instance metadata
+   service).
+
+### Disconfirming controls
+
+The sibling endpoint `/api/proxy` was tested and rejects internal URLs via
+an allowlist, confirming the SSRF is specific to `/api/fetch`.
+
+### Remediation
+
+Validate the URL host against an allowlist before fetching.
+
 ## Impact
 
 An attacker can read IAM credentials from the instance metadata service and
 pivot to other AWS services in the account, leading to full account compromise.
 
-## Steps to Reproduce
+## Limitations
 
-1. Send a request to `/api/fetch?url=http://169.254.169.254/latest/meta-data/`.
-2. Observe the IAM role credentials returned in the response body.
-
-## Remediation
-
-Validate the URL host against an allowlist before fetching.
+Only the `/api/fetch` endpoint was tested; other server-side fetch paths may
+exist.
 """
 
 
@@ -88,11 +125,39 @@ def _write_report(
     body: str = VALID_BODY,
     filename: str = "report_h1.md",
 ) -> Path:
-    """Write a report_h1.md with YAML frontmatter + Markdown body into `ws`."""
+    """Write a report_h1.md with YAML frontmatter + Markdown body into `ws`.
+
+    When `frontmatter` is None (the default fixture), also creates any
+    evidence files referenced in the default `attachments[]` list so the
+    strict readiness gates (SI-031) can validate the evidence_index +
+    poc.attachment links. When `frontmatter` is explicitly passed, the
+    caller is responsible for creating the files it references (tests that
+    exercise missing-file / blocked-extension / symlink rejection paths
+    intentionally do NOT want the helper to create the files).
+    """
+    is_default = frontmatter is None
     fm = copy.deepcopy(frontmatter if frontmatter is not None else VALID_SOURCE_FRONTMATTER)
     text = "---\n" + yaml.safe_dump(fm, sort_keys=False) + "---\n\n" + body
     p = ws / filename
     p.write_text(text, encoding="utf-8")
+    # Only auto-create evidence files for the default fixture. Tests that
+    # pass custom frontmatter own their filesystem setup.
+    if not is_default:
+        return p
+    atts = fm.get("attachments") if isinstance(fm, dict) else None
+    if isinstance(atts, list):
+        for a in atts:
+            if not isinstance(a, dict):
+                continue
+            source = a.get("source")
+            if not isinstance(source, str) or not source:
+                continue
+            evp = ws / source
+            if not evp.exists():
+                with contextlib.suppress(OSError):
+                    evp.parent.mkdir(parents=True, exist_ok=True)
+                with contextlib.suppress(OSError):
+                    evp.write_text("evidence fixture\n", encoding="utf-8")
     return p
 
 
@@ -693,6 +758,9 @@ class TestAttachments:
         fm["attachments"] = [
             {"source": "evidence/req.txt", "classification": "attachment-candidate"}
         ]
+        fm["evidence_index"] = [
+            {"claim": "attacker can read IAM credentials", "attachment": "evidence/req.txt"},
+        ]
         _write_report(ws, fm)
         issues = h1report.check_report(ws, lab_root=lab)
         errors = [i for i in issues if i.level == "ERROR"]
@@ -747,6 +815,9 @@ class TestAttachments:
         fm = copy.deepcopy(VALID_SOURCE_FRONTMATTER)
         fm["attachments"] = [
             {"source": "evidence/nope.txt", "classification": "attachment-candidate"}
+        ]
+        fm["evidence_index"] = [
+            {"claim": "missing evidence", "attachment": "evidence/nope.txt"},
         ]
         _write_report(ws, fm)
         issues = h1report.check_report(ws, lab_root=lab)
@@ -1036,13 +1107,27 @@ class TestSecrets:
 # ─── warning-only identifiers ─────────────────────────────────────────────────
 
 class TestWarningOnly:
+    def _body_with_extra(self, extra: str) -> str:
+        """Build a body that satisfies the strict readiness gates (SI-031)
+        and injects `extra` into the Description section so warning-only
+        identifier detection still runs against it."""
+        return (
+            "# Title\n\n"
+            "## Threat model\n\nAttacker crosses a boundary; state changes.\n\n"
+            "## Description\n\n"
+            f"{extra}\n\n"
+            "### PoC\n\nA state-changing request returns credentials.\n\n"
+            "### Disconfirming controls\n\nnone tested — single endpoint.\n\n"
+            "### Remediation\n\nAdd a check.\n\n"
+            "## Impact\n\nreal impact\n\n"
+            "## Limitations\n\nnone\n"
+        )
+
     def test_uuid_is_warning(self, tmp_path):
         ws = _make_workspace(tmp_path)
         lab = _make_engagement(tmp_path)
-        body = (
-            "# Title\n\n## Description\n\n"
-            "Request id: 550e8400-e29b-41d4-a716-446655440000 was logged.\n\n"
-            "## Impact\n\nreal impact\n"
+        body = self._body_with_extra(
+            "Request id: 550e8400-e29b-41d4-a716-446655440000 was logged."
         )
         _write_report(ws, body=body)
         issues = h1report.check_report(ws, lab_root=lab)
@@ -1056,10 +1141,8 @@ class TestWarningOnly:
     def test_request_id_is_warning(self, tmp_path):
         ws = _make_workspace(tmp_path)
         lab = _make_engagement(tmp_path)
-        body = (
-            "# Title\n\n## Description\n\n"
-            "X-Request-Id: req_abc123456789 was returned by the server.\n\n"
-            "## Impact\n\nreal impact\n"
+        body = self._body_with_extra(
+            "X-Request-Id: req_abc123456789 was returned by the server."
         )
         _write_report(ws, body=body)
         issues = h1report.check_report(ws, lab_root=lab)
@@ -1071,10 +1154,8 @@ class TestWarningOnly:
     def test_email_is_warning(self, tmp_path):
         ws = _make_workspace(tmp_path)
         lab = _make_engagement(tmp_path)
-        body = (
-            "# Title\n\n## Description\n\n"
-            "The admin email is admin@example.com per the config.\n\n"
-            "## Impact\n\nreal impact\n"
+        body = self._body_with_extra(
+            "The admin email is admin@example.com per the config."
         )
         _write_report(ws, body=body)
         issues = h1report.check_report(ws, lab_root=lab)
@@ -1086,10 +1167,8 @@ class TestWarningOnly:
     def test_absolute_local_path_is_warning(self, tmp_path):
         ws = _make_workspace(tmp_path)
         lab = _make_engagement(tmp_path)
-        body = (
-            "# Title\n\n## Description\n\n"
-            "The file /tmp/workspace/repo/app.py contains the sink.\n\n"
-            "## Impact\n\nreal impact\n"
+        body = self._body_with_extra(
+            "The file /tmp/workspace/repo/app.py contains the sink."
         )
         _write_report(ws, body=body)
         issues = h1report.check_report(ws, lab_root=lab)
@@ -1136,7 +1215,11 @@ class TestReadOnly:
         lab = _make_engagement(tmp_path)
         (ws / "evidence").mkdir()
         att = ws / "evidence" / "req.txt"
-        att.write_text("GET / HTTP/1.1\n", encoding="utf-8")
+        att.write_text(
+            "GET / HTTP/1.1\nHost: api.example.com\n\n"
+            "200 OK response body with IAM credentials\n",
+            encoding="utf-8",
+        )
         fm = copy.deepcopy(VALID_SOURCE_FRONTMATTER)
         fm["attachments"] = [
             {"source": "evidence/req.txt", "classification": "attachment-candidate"}
@@ -1451,6 +1534,31 @@ class TestExecutable:
     def test_bin_is_executable(self):
         p = HERE.parent / "bin" / "lab-h1-report"
         mode = p.stat().st_mode
+        if mode & stat.S_IXUSR:
+            return
+        # CI checkouts (e.g. GitHub Actions `actions/checkout`) strip the
+        # executable bit from the working tree even when git tracks the file
+        # as mode 100755. Fall back to the git-tracked mode so the test is
+        # resilient in those environments.
+        import subprocess
+
+        rel = p.relative_to(HERE.parent)
+        try:
+            out = subprocess.run(
+                ["git", "ls-files", "-s", "--", str(rel)],
+                cwd=str(HERE.parent),
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout.strip()
+        except (subprocess.CalledProcessError, FileNotFoundError):
+            out = ""
+        if out:
+            git_mode = out.split()[0]
+            assert git_mode == "100755", (
+                f"lab-h1-report not executable: fs={oct(mode)} git={git_mode}"
+            )
+            return
         assert mode & stat.S_IXUSR, f"lab-h1-report not executable: {oct(mode)}"
 
 
@@ -1488,6 +1596,12 @@ def _make_valid_report_with_attachment(
     if staged_name is not None:
         att["staged_name"] = staged_name
     base["attachments"] = [att]
+    # Keep evidence_index consistent with the overridden attachment so
+    # the strict readiness gates (SI-031) pass: every attachment-backed
+    # claim must map to a listed attachment.
+    base["evidence_index"] = [
+        {"claim": "evidence for the finding", "attachment": attachment_name},
+    ]
     return _write_report(ws, base)
 
 
@@ -1529,6 +1643,10 @@ class TestPrepare:
             {"source": "evidence/a.txt", "classification": "attachment-candidate"},
             {"source": "evidence/b.txt", "classification": "attachment-candidate"},
         ]
+        fm["evidence_index"] = [
+            {"claim": "evidence a", "attachment": "evidence/a.txt"},
+            {"claim": "evidence b", "attachment": "evidence/b.txt"},
+        ]
         _write_report(ws, fm)
         result = h1report.prepare_report(ws, lab_root=lab)
         assert result["attachments_copied"] == 2
@@ -1547,6 +1665,10 @@ class TestPrepare:
         fm["attachments"] = [
             {"source": "ev1/req.txt", "classification": "attachment-candidate"},
             {"source": "ev2/req.txt", "classification": "attachment-candidate"},
+        ]
+        fm["evidence_index"] = [
+            {"claim": "first evidence", "attachment": "ev1/req.txt"},
+            {"claim": "second evidence", "attachment": "ev2/req.txt"},
         ]
         _write_report(ws, fm)
         result = h1report.prepare_report(ws, lab_root=lab)
@@ -1703,6 +1825,9 @@ class TestPrepare:
         fm["attachments"] = [
             {"source": "evidence/blob.out", "classification": "attachment-candidate"}
         ]
+        fm["evidence_index"] = [
+            {"claim": "binary evidence", "attachment": "evidence/blob.out"},
+        ]
         _write_report(ws, fm)
         result = h1report.prepare_report(ws, lab_root=lab)
         pkg = Path(result["package_path"])
@@ -1734,30 +1859,47 @@ class TestPrepare:
         # The pre-existing package must be untouched.
         assert (pre / "manifest.json").read_text() == "{}"
 
-    def test_mid_copy_failure_leaves_no_final_package(self, tmp_path):
+    def test_mid_copy_failure_leaves_no_final_package(self, tmp_path, monkeypatch):
         ws = _make_workspace(tmp_path)
         lab = _make_engagement(tmp_path)
-        # Create an attachment that exists (so check passes) but make it
-        # unreadable via chmod before prepare copies it.
+        # Create an attachment so check + review pass. We inject a
+        # failure into the stream copy itself (not via chmod, which is
+        # fragile under root and conflates a review-read failure with a
+        # copy failure). prepare_report runs review+copy in one call;
+        # the review reads the attachment, then packaging creates the
+        # temp dir and copies files via _stream_copy_hash. We patch
+        # _stream_copy_hash to raise once the temp package dir exists
+        # but before the copy completes, so the cleanup path must tear
+        # down the temp dir and leave no final package.
         (ws / "evidence").mkdir()
         att = ws / "evidence" / "req.txt"
-        att.write_text("GET / HTTP/1.1\n", encoding="utf-8")
+        att.write_text(
+            "GET / HTTP/1.1\nHost: api.example.com\n\n"
+            "200 OK response body with IAM credentials\n",
+            encoding="utf-8",
+        )
         fm = copy.deepcopy(VALID_SOURCE_FRONTMATTER)
         fm["attachments"] = [
             {"source": "evidence/req.txt", "classification": "attachment-candidate"}
+        ]
+        fm["evidence_index"] = [
+            {"claim": "request evidence", "attachment": "evidence/req.txt"},
         ]
         _write_report(ws, fm)
         # Run check first to confirm it's valid.
         issues = h1report.check_report(ws, lab_root=lab)
         assert not [i for i in issues if i.level == "ERROR"]
-        # Now make the attachment unreadable (chmod 000) to break the stream copy.
-        os.chmod(att, 0o000)
-        try:
-            with pytest.raises(h1report.PackageError):
-                h1report.prepare_report(ws, lab_root=lab)
-        finally:
-            os.chmod(att, 0o644)
-        # No final prepared-* package should exist.
+        # Inject a mid-copy failure: _stream_copy_hash is called after
+        # the temp package dir is created (report_h1.md copy first).
+        # Raising PackageError here exercises the cleanup branch that
+        # must remove the temp dir and leave no prepared-* package.
+        def _boom(source_abs, dest_abs):
+            raise h1report.PackageError("injected copy failure")
+
+        monkeypatch.setattr(h1report, "_stream_copy_hash", _boom)
+        with pytest.raises(h1report.PackageError):
+            h1report.prepare_report(ws, lab_root=lab)
+        # No final prepared-* package should remain.
         submission = ws / "submission"
         if submission.is_dir():
             prepared = [d for d in submission.iterdir() if d.name.startswith("prepared-")]
@@ -1768,11 +1910,18 @@ class TestPrepare:
         lab = _make_engagement(tmp_path)
         (ws / "evidence").mkdir()
         att = ws / "evidence" / "req.txt"
-        att.write_text("GET / HTTP/1.1\n", encoding="utf-8")
+        att.write_text(
+            "GET / HTTP/1.1\nHost: api.example.com\n\n"
+            "200 OK response body with IAM credentials\n",
+            encoding="utf-8",
+        )
         report_path = _write_report(ws, VALID_SOURCE_FRONTMATTER)
         fm = copy.deepcopy(VALID_SOURCE_FRONTMATTER)
         fm["attachments"] = [
             {"source": "evidence/req.txt", "classification": "attachment-candidate"}
+        ]
+        fm["evidence_index"] = [
+            {"claim": "request evidence", "attachment": "evidence/req.txt"},
         ]
         _write_report(ws, fm)
         att_hash_before = _sha256_file(att)

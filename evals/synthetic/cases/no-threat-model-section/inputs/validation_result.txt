@@ -1,0 +1,6 @@
+lab-h1-report check output (synthetic):
+
+FAIL - body must contain a '## Threat model' section
+
+1 failure. The report has all frontmatter fields but the body is
+missing the ## Threat model section (old style).

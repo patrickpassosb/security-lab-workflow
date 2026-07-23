@@ -1,0 +1,13 @@
+lab-h1-report check output (synthetic):
+
+PASS (deterministic gates pass — the section is non-empty)
+
+lab-h1-report review output (synthetic):
+
+REVIEW: warn
+BLOCKING_DIMENSIONS: []
+DIMENSIONS:
+  concrete_harm: warn — ## Impact relies on hedging language ('could potentially', 'may expose') without specifying the concrete harm
+RECOMMENDATION: Review warnings before submitting.
+
+1 failure (semantic only — the deterministic gate passes because the section is non-empty, but the semantic review warns on hedging).

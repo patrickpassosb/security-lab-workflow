@@ -16,6 +16,15 @@ submission:
   require_novelty_check: true       # must search known_outcomes.yaml for prior reports
   require_evidence_attachments: true # report must have attached evidence
 
+  # SI-031: semantic/adversarial review gate (audit section 6.2).
+  # When true, `prepare` runs the semantic review after `check` and
+  # aborts unless overall=pass. Both WARN and FAIL block packaging
+  # (the report must pass the content-quality gate, not just survive
+  # it). Set to false to bypass the semantic review (not recommended
+  # — the audit's root cause was that only structural checks ran).
+  # `prepare` always honors require_llm_review and runs the review.
+  require_llm_review: true
+
   # Known Informative precedent check.
   # If the behavior matches a known_outcomes.yaml entry with state=informative,
   # `assess` recommends do_not_report regardless of technical verdict.

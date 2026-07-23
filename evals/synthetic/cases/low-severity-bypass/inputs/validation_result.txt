@@ -1,0 +1,15 @@
+lab-h1-report check output (synthetic):
+
+PASS - low-severity bypass: poc.type=theoretical allowed when severity.score < 4.0
+PASS - limitations explains why a state-changing PoC is not feasible
+
+lab-h1-report review output (synthetic):
+
+REVIEW: pass
+BLOCKING_DIMENSIONS: []
+DIMENSIONS:
+  poc_state_change: pass — poc.type=theoretical with limitations explaining why
+  honest_limitations: pass — limitations acknowledges the token is public telemetry
+RECOMMENDATION: All dimensions pass — ready to package.
+
+0 failures. The low-severity bypass allows a theoretical PoC with limitations.

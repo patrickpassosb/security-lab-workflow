@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-"""lab-h1-report — HackerOne report check, prepare, record-submission, status,
-record-outcome, assess.
+"""lab-h1-report — HackerOne report check, review, prepare, record-submission,
+status, record-outcome, assess.
 
 Read-only and local-only commands for HackerOne report_h1.md workspaces.
 
 Usage:
     lab-h1-report check [workspace]
+    lab-h1-report review [workspace]
     lab-h1-report prepare [workspace]
     lab-h1-report status [workspace]
     lab-h1-report assess [workspace]
@@ -30,10 +31,18 @@ state, the engagement's precedent registry, and the submission thresholds
 in improvement/config/submission.yaml. It returns PASS/HOLD/BLOCK and exits
 0/2/1 respectively (3 for filesystem/parse errors).
 
-This CLI is a thin wrapper over lib/h1report.py and lib/finding_events.py.
-Audit events are written via labutil.audit (canonical schema, JSON-safe,
-no secrets in detail). Per ADR-0002, derive_finding_status() has ONE owner:
-lib/finding_events.py — this CLI imports and calls it, never reimplements it.
+check (SI-031) runs the deterministic structural + content-quality gates
+(threat_model, poc, evidence_index, limitations, finding-class rules).
+review (SI-031) runs the semantic/adversarial content-quality review and
+prints a structured per-dimension verdict. prepare runs check, then review,
+and refuses to package unless both pass (review must return overall=pass;
+both WARN and FAIL abort packaging).
+
+This CLI is a thin wrapper over lib/h1report.py, lib/h1review.py, and
+lib/finding_events.py. Audit events are written via labutil.audit (canonical
+schema, JSON-safe, no secrets in detail). Per ADR-0002, derive_finding_status()
+has ONE owner: lib/finding_events.py — this CLI imports and calls it, never
+reimplements it.
 """
 
 from __future__ import annotations
@@ -229,6 +238,82 @@ def cmd_check(args: list[str]) -> int:
     return 2
 
 
+AUDIT_ACTION_REVIEW = "h1-report-review"
+
+
+def cmd_review(args: list[str]) -> int:
+    """Run the semantic/adversarial review on a report. Exit 0 if the
+    review passes (overall=pass) or warns (overall=warn — non-blocking
+    for review command alone), 2 if it fails (overall=fail — blocking),
+    1 for usage/filesystem/parse errors.
+
+    The review is the semantic gate (SI-031): it reads the report body
+    and evidence and returns a structured per-dimension verdict.
+    Deterministic structure checks (check) alone are insufficient.
+    """
+    workspace: str | None = None
+    if len(args) > 1:
+        print(f"review takes at most one optional workspace argument; got: {args}", file=sys.stderr)
+        return 1
+    if len(args) == 1:
+        workspace = args[0]
+
+    lab_root = _resolve_lab_root()
+    start_time = time.monotonic()
+
+    try:
+        import h1review  # noqa: E402
+    except Exception as e:  # pragma: no cover
+        print(f"ERROR: semantic review module unavailable: {e}", file=sys.stderr)
+        return 1
+
+    try:
+        ws = h1report.resolve_workspace(workspace)
+    except h1report.ReportFileError as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        _audit_h1(
+            AUDIT_ACTION_REVIEW, str(workspace or ""), "", 1,
+            int((time.monotonic() - start_time) * 1000), None,
+            detail="report file not found",
+        )
+        return 1
+
+    try:
+        result = h1review.review_report(ws, lab_root=lab_root)
+    except h1report.ReportFileError as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        _audit_h1(
+            AUDIT_ACTION_REVIEW, str(ws), "", 1,
+            int((time.monotonic() - start_time) * 1000), ws,
+            detail="report file not found",
+        )
+        return 1
+    except h1report.ReportParseError as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        _audit_h1(
+            AUDIT_ACTION_REVIEW, str(ws), "", 1,
+            int((time.monotonic() - start_time) * 1000), ws,
+            detail="report parse error",
+        )
+        return 1
+
+    print(h1review.format_human_review(result))
+
+    engagement_name = ""
+    with contextlib.suppress(Exception):
+        report = h1report.parse_report(h1report.find_report_file(ws))
+        engagement_name = str(report.frontmatter.get("engagement", "") or "")
+
+    duration_ms = int((time.monotonic() - start_time) * 1000)
+    exit_code = 0 if result.overall in ("pass", "warn") else 2
+    _audit_h1(
+        AUDIT_ACTION_REVIEW, str(ws), engagement_name, exit_code,
+        duration_ms, ws,
+        detail=f"overall={result.overall} blocking={result.blocking_dimensions}",
+    )
+    return exit_code
+
+
 def cmd_status(args: list[str]) -> int:
     """Print report metadata + package + submission status. Exit 0 on success,
     1 on fs/parse errors."""
@@ -362,11 +447,17 @@ def cmd_prepare(args: list[str]) -> int:
     """Prepare an immutable submission package. Exit 0 on success, 2 on
     validation failure, 1 on fs/parse/internal errors."""
     workspace: str | None = None
-    if len(args) > 1:
-        print(f"prepare takes at most one optional workspace argument; got: {args}", file=sys.stderr)
-        return 1
-    if len(args) == 1:
-        workspace = args[0]
+    i = 0
+    while i < len(args):
+        a = args[i]
+        if a.startswith("-"):
+            print(f"unknown flag: {a}", file=sys.stderr)
+            return 1
+        if workspace is not None:
+            print(f"prepare takes at most one workspace argument; got: {args}", file=sys.stderr)
+            return 1
+        workspace = a
+        i += 1
 
     lab_root = _resolve_lab_root()
     start_time = time.monotonic()
@@ -422,9 +513,10 @@ def cmd_prepare(args: list[str]) -> int:
     pkg_id = result.get("package_id", "")
     copied = result.get("attachments_copied", 0)
     snaps = result.get("scope_snapshots", 0)
+    review_verdict = result.get("review_verdict", "")
     print(
         f"SUMMARY: prepared=1 attachments={copied} scope_snapshots={snaps} "
-        f"package={pkg_id}"
+        f"review={review_verdict} package={pkg_id}"
     )
     print(f"PACKAGE: {result.get('package_path', '')}")
     # Resolve the workspace Path for workspace_id attribution (best-effort;
@@ -972,12 +1064,20 @@ def _match_precedent(
          metadata leak via endpointA endpoint" (shared tokens:
          getpublicpagedata, metadata — 2 distinctive tokens).
 
+    SI-031 cross-program promotion (audit §10.3): a precedent is a hard
+    BLOCK only when `confirmed_by_programs` lists 2+ independent
+    programs. A single-program precedent is advisory: it surfaces a HOLD
+    (candidate_informative semantics) with a provenance label so the
+    agent knows which program triaged it as Informative. This prevents
+    overfitting to one program's triager preferences (audit §10.2).
+
     Returns (matched_precedent_or_None, block_reason_or_None). When a
     match is found and the precedent's state is `informative` or
-    `duplicate`, the block_reason is set. When the match is
-    `candidate_informative`, the block_reason is None (the assess command
-    treats candidate_informative as a HOLD signal, not a hard BLOCK —
-    the program has not definitively closed it yet).
+    `duplicate` AND `confirmed_by_programs` has 2+ entries, the
+    block_reason is set (hard BLOCK). When the match is single-program,
+    block_reason is None (the assess command treats it as a HOLD — the
+    program has not been cross-validated, so it's advisory). When the
+    match is `candidate_informative`, block_reason is None (soft signal).
     """
     if not behavior:
         return None, None
@@ -999,6 +1099,23 @@ def _match_precedent(
             if t not in _STOP and len(t) >= 3
         }
 
+    def _confirmed_programs(p: dict) -> list[str]:
+        """Return the confirmed_by_programs list (audit section 10.3).
+        Deduplicates nonempty normalized names so [notion, notion]
+        counts as ONE program, not two. Falls back to [] when the field
+        is absent (single-program = advisory, not blocking)."""
+        cbp = p.get("confirmed_by_programs")
+        if isinstance(cbp, list):
+            seen: set[str] = set()
+            out: list[str] = []
+            for x in cbp:
+                name = str(x).strip().lower()
+                if name and name not in seen:
+                    seen.add(name)
+                    out.append(str(x))
+            return out
+        return []
+
     needle_tokens = _distinctive_tokens(needle)
     for p in precedents:
         pbehavior = str(p.get("behavior", "") or "").strip()
@@ -1016,12 +1133,20 @@ def _match_precedent(
                 overlap = pb_tokens & needle_tokens
                 if len(overlap) >= 2:
                     matched = True
-        if matched:
-            state = str(p.get("state", "") or "").strip().lower()
-            if state in ("informative", "duplicate"):
-                return p, f"Known {state} behavior for this program"
-            # candidate_informative is a soft signal — not a hard BLOCK.
-            return p, None
+        if not matched:
+            continue
+        state = str(p.get("state", "") or "").strip().lower()
+        # SI-031: hard BLOCK only when cross-confirmed by 2+ programs.
+        # A single-program precedent is advisory (HOLD, not BLOCK) so
+        # one program's triager preferences don't block all programs
+        # (audit §10.2 overfitting risk).
+        confirmed = _confirmed_programs(p)
+        if state in ("informative", "duplicate") and len(confirmed) >= 2:
+            return p, f"Known {state} behavior (cross-confirmed by {len(confirmed)} programs)"
+        # candidate_informative OR single-program informative/duplicate:
+        # advisory HOLD, not a hard BLOCK. Return the precedent with no
+        # block_reason so the assess command treats it as a soft signal.
+        return p, None
     return None, None
 
 
@@ -1291,9 +1416,19 @@ def cmd_assess(args: list[str]) -> int:
         )
         return ASSESS_EXIT_HOLD
 
-    # candidate_informative precedent match (soft signal) — HOLD, not BLOCK.
+    # candidate_informative OR single-program precedent match (soft
+    # signal) — HOLD, not BLOCK. SI-031 (audit §10.3): a single-program
+    # precedent is advisory (provenance-labelled) because one program's
+    # triager preferences should not block all programs (overfitting
+    # risk). Only 2+-program-confirmed precedents hard-BLOCK (handled
+    # above via precedent_reason).
     if matched is not None:
         state = str(matched.get("state", "") or "").strip().lower()
+        confirmed = matched.get("confirmed_by_programs")
+        confirmed_count = (
+            len([str(x) for x in confirmed if isinstance(x, (str, int))])
+            if isinstance(confirmed, list) else 0
+        )
         if state == "candidate_informative":
             reason = (
                 "Behavior matches a candidate_informative precedent — "
@@ -1307,6 +1442,25 @@ def cmd_assess(args: list[str]) -> int:
                 AUDIT_ACTION_ASSESS, str(ws), eng_name, ASSESS_EXIT_HOLD,
                 int((time.monotonic() - start_time) * 1000), ws,
                 detail=f"HOLD candidate_informative_precedent report_id={report_id}",
+            )
+            return ASSESS_EXIT_HOLD
+        if state in ("informative", "duplicate") and confirmed_count < 2:
+            reason = (
+                f"Behavior matches a single-program {state} precedent "
+                f"(program={matched.get('program', '?')!r}, "
+                f"confirmed_by_programs={confirmed_count}) — advisory "
+                f"only; cross-program confirmation (2+ programs) is "
+                f"required before this becomes a hard BLOCK. Confirm "
+                f"this program's stance before submitting."
+            )
+            _print_assess_result(
+                "HOLD", reason, status, report_id, behavior, eng_name,
+                precedent=matched,
+            )
+            _audit_h1(
+                AUDIT_ACTION_ASSESS, str(ws), eng_name, ASSESS_EXIT_HOLD,
+                int((time.monotonic() - start_time) * 1000), ws,
+                detail=f"HOLD single_program_precedent state={state} confirmed={confirmed_count} report_id={report_id}",
             )
             return ASSESS_EXIT_HOLD
 
@@ -1363,6 +1517,8 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if cmd == "check":
         return cmd_check(rest)
+    if cmd == "review":
+        return cmd_review(rest)
     if cmd == "prepare":
         return cmd_prepare(rest)
     if cmd == "status":

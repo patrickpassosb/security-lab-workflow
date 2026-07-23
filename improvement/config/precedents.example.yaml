@@ -14,10 +14,20 @@
 #
 # The `assess` command (SI-015, `lab-h1-report assess`) loads the
 # engagement's precedents.yaml via finding_events.load_precedents() and
-# BLOCKS submission when the finding's behavior matches an entry with
-# state=informative (or candidate_informative — treated as a soft block
-# when the program has a history of closing similar behaviors as
-# Informative).
+# applies SI-031 cross-program promotion (audit section 10.3):
+#
+#   - A precedent with `state=informative|duplicate` is a hard BLOCK only
+#     when `confirmed_by_programs` lists 2+ independent programs. This
+#     prevents overfitting to one program's triager preferences (audit
+#     section 10.2): one program triaging metadata leaks as Informative
+#     should not block metadata leaks for ALL programs.
+#   - A single-program precedent (confirmed_by_programs absent or < 2
+#     entries) is ADVISORY: assess returns a HOLD with a provenance label
+#     (which program triaged it, how many programs confirmed) so the
+#     agent knows it is not cross-validated. The agent confirms the
+#     program's stance before submitting.
+#   - `candidate_informative` is always a soft HOLD (the program has not
+#     definitively closed it yet).
 #
 # Entry fields:
 #   program:    the program name (must match the engagement's program)
@@ -28,9 +38,17 @@
 #   date:       ISO 8601 date the outcome was observed
 #   note:       free-text context (why it was Informative, what the program
 #               said, etc.)
+#   confirmed_by_programs: (SI-031) list of program names that
+#               independently confirmed this behavior as the same state.
+#               Omit or leave empty for a single-program precedent
+#               (advisory). BLOCK only when len >= 2. Provenance is
+#               preserved so the agent can audit which programs
+#               contributed to the promotion.
 
 precedents:
   # Example: a behavior previously assessed as Informative by a program.
+  # This is a SINGLE-PROGRAM precedent (no confirmed_by_programs) —
+  # advisory HOLD, not a hard BLOCK (audit section 10.3).
   - program: <PROGRAM>
     behavior: "<PROGRAM_ENDPOINT> unauthenticated metadata leak"
     report_id: <H1_REPORT_ID>
@@ -57,7 +75,25 @@ precedents:
     date: "YYYY-MM-DD"
     note: "Duplicate of an earlier report; original was closed Informative"
 
+  # Example (SI-031): a CROSS-PROGRAM confirmed precedent. Two
+  # independent programs (notion, atlassian) both triaged this behavior
+  # as Informative. assess hard-BLOCKs this for ALL engagements because
+  # the behavior is cross-validated. The confirmed_by_programs list
+  # preserves provenance so the agent can audit which programs
+  # contributed.
+  - program: <PROGRAM>
+    behavior: "unauthenticated metadata leak with sensitive fields removed"
+    report_id: <H1_REPORT_ID>
+    state: informative
+    date: "YYYY-MM-DD"
+    note: "Cross-program confirmed: both programs triage this as Informative"
+    confirmed_by_programs:
+      - <PROGRAM_A>
+      - <PROGRAM_B>
+
 # The `assess` command checks this registry before recommending submission.
 # If the finding's behavior (derived from report_h1.md title or workspace
-# name) matches an entry with state=informative, assess returns BLOCK
-# ("Known Informative behavior for this program").
+# name) matches an entry with state=informative AND confirmed_by_programs
+# has 2+ entries, assess returns BLOCK ("Known informative behavior
+# (cross-confirmed by N programs)"). A single-program match returns HOLD
+# (advisory; the agent confirms the program's stance before submitting).

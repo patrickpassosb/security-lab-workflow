@@ -172,7 +172,25 @@ REQUIRED_FIELDS = (
     "schema", "engagement", "platform", "program", "program_url",
     "title", "asset_id", "asset_name", "weakness", "severity",
     "finding_type", "live_targets", "attachments", "testing",
+    "threat_model", "evidence_index", "limitations", "poc",
 )
+
+# Strict readiness gates (SI-031). New content-quality frontmatter fields
+# required by EVERY HackerOne report — not gated by severity class. The
+# template carries the contract; `check` enforces the shape. These field
+# names mirror the template so there is one source of truth.
+THREAT_MODEL_SUBFIELDS = ("attacker", "victim", "trust_boundary", "state_change")
+POC_TYPES = ("state_changing", "read_only", "theoretical", "not_feasible")
+EVIDENCE_INDEX_FIELDS = ("claim", "attachment")
+# Minimum severity score for the state-changing-PoC requirement on live_web
+# findings (audit §5.3). Below this threshold a read_only / theoretical PoC
+# with limitations is acceptable; at or above it `theoretical` is blocked
+# unless finding_type is source_code (source-code bypass, audit §5.3).
+MIN_SEVERITY_FOR_STATE_CHANGING_POC = 4.0
+# Attachment budget (WARN, not ERROR — audit §5.4). Tunable via config in a
+# later phase; the defaults match the audit.
+ATTACHMENT_BUDGET_COUNT = 10
+ATTACHMENT_BUDGET_BYTES = 5 * 1024 * 1024  # 5 MiB
 
 
 # ─── Exceptions ────────────────────────────────────────────────────────────────
@@ -993,6 +1011,314 @@ def _validate_testing(fm: dict[str, Any], path: Path) -> list[Issue]:
     return issues
 
 
+# ─── Strict readiness gates (SI-031) ────────────────────────────────────────────
+#
+# Deterministic content-quality gates enforced by `check` for EVERY
+# HackerOne report (not gated by severity class — the audit's root cause
+# was that only structural checks ran). These validators cover the
+# frontmatter shape; the body-section validators (`_validate_body`) cover
+# the corresponding `## Threat model` / `### PoC` / `### Disconfirming
+# controls` / `## Limitations` sections. Finding-class rules
+# (`poc.state_changing` for medium+ live_web, `victim` for IDOR, ...) are
+# applied after both shape + body checks pass.
+
+def _validate_threat_model(fm: dict[str, Any], path: Path) -> list[Issue]:
+    """Validate the universal `threat_model` frontmatter mapping.
+
+    Requires all four subfields (attacker, victim, trust_boundary,
+    state_change) to be present and non-empty strings. An empty threat
+    model is the single most common way an incomplete report reaches
+    submission (audit §3.4), so this is an ERROR, not a WARN.
+    """
+    issues: list[Issue] = []
+    loc = str(path)
+    tm = fm.get("threat_model")
+    if tm is None:
+        issues.append(Issue("ERROR", loc, "missing required field: threat_model"))
+        return issues
+    if not isinstance(tm, dict):
+        kind = type(tm).__name__
+        issues.append(Issue("ERROR", loc, f"threat_model must be a mapping, got {kind}"))
+        return issues
+    for sub in THREAT_MODEL_SUBFIELDS:
+        v = tm.get(sub)
+        if not _is_nonempty_str(v):
+            issues.append(Issue(
+                "ERROR", loc,
+                f"threat_model.{sub} must be a nonempty string",
+            ))
+    return issues
+
+
+def _validate_poc(fm: dict[str, Any], path: Path) -> list[Issue]:
+    """Validate the universal `poc` frontmatter mapping.
+
+    Requires `type` to be one of POC_TYPES, `state_changed` to be a bool,
+    and (if `attachment` is non-empty) that it exists in `attachments[]`.
+    The body-section validator (`### PoC`) handles the prose; this handles
+    the structured fields the reducer and finding-class gates consume.
+    """
+    issues: list[Issue] = []
+    loc = str(path)
+    poc = fm.get("poc")
+    if poc is None:
+        issues.append(Issue("ERROR", loc, "missing required field: poc"))
+        return issues
+    if not isinstance(poc, dict):
+        kind = type(poc).__name__
+        issues.append(Issue("ERROR", loc, f"poc must be a mapping, got {kind}"))
+        return issues
+    ptype = poc.get("type")
+    if not _is_nonempty_str(ptype):
+        issues.append(Issue("ERROR", loc, "poc.type must be a nonempty string"))
+    elif ptype not in POC_TYPES:
+        issues.append(Issue(
+            "ERROR", loc,
+            f"poc.type must be one of {POC_TYPES}, got {ptype!r}",
+        ))
+    state_changed = poc.get("state_changed")
+    if not isinstance(state_changed, bool):
+        kind = type(state_changed).__name__
+        issues.append(Issue(
+            "ERROR", loc,
+            f"poc.state_changed must be a boolean, got {kind}",
+        ))
+    poc_attachment = poc.get("attachment")
+    if _is_nonempty_str(poc_attachment):
+        # The attachment must exist in the report's `attachments[]` list
+        # (the audit's POC_ATTACHMENT_EXISTS gate). We check membership
+        # against the declared sources; the filesystem existence check
+        # is already performed by _validate_attachments_fs.
+        atts = fm.get("attachments")
+        sources: set[str] = set()
+        if isinstance(atts, list):
+            for a in atts:
+                if isinstance(a, dict):
+                    s = a.get("source")
+                    if _is_nonempty_str(s):
+                        sources.add(s)
+        if poc_attachment not in sources:
+            issues.append(Issue(
+                "ERROR", loc,
+                f"poc.attachment {poc_attachment!r} is not listed in attachments[]",
+            ))
+    return issues
+
+
+def _validate_evidence_index(fm: dict[str, Any], path: Path) -> list[Issue]:
+    """Validate the universal `evidence_index` frontmatter list.
+
+    The field must be present and a list. When `attachments[]` is
+    non-empty, `evidence_index` must be non-empty and every entry's
+    `attachment` must exist in `attachments[]` — this is the
+    evidence-to-claim mapping the audit identified as missing (audit §3.3).
+    When `attachments[]` is empty (inline PoC, no attached evidence), an
+    empty `evidence_index` is allowed: the PoC lives in the `### PoC` body
+    section and there is no attachment to map.
+    """
+    issues: list[Issue] = []
+    loc = str(path)
+    ei = fm.get("evidence_index")
+    if ei is None:
+        issues.append(Issue("ERROR", loc, "missing required field: evidence_index"))
+        return issues
+    if not isinstance(ei, list):
+        kind = type(ei).__name__
+        issues.append(Issue("ERROR", loc, f"evidence_index must be a list, got {kind}"))
+        return issues
+    atts = fm.get("attachments")
+    has_attachments = isinstance(atts, list) and len(atts) > 0
+    if has_attachments and len(ei) == 0:
+        issues.append(Issue(
+            "ERROR", loc,
+            "evidence_index must be a non-empty list when attachments[] is "
+            "non-empty (map each claim to its evidence attachment)",
+        ))
+        return issues
+    sources: set[str] = set()
+    if isinstance(atts, list):
+        for a in atts:
+            if isinstance(a, dict):
+                s = a.get("source")
+                if _is_nonempty_str(s):
+                    sources.add(s)
+    for idx, entry in enumerate(ei):
+        if not isinstance(entry, dict):
+            issues.append(Issue(
+                "ERROR", loc,
+                f"evidence_index[{idx}] must be a mapping, got {type(entry).__name__}",
+            ))
+            continue
+        for field_name in EVIDENCE_INDEX_FIELDS:
+            v = entry.get(field_name)
+            if not _is_nonempty_str(v):
+                issues.append(Issue(
+                    "ERROR", loc,
+                    f"evidence_index[{idx}].{field_name} must be a nonempty string",
+                ))
+        claim_attachment = entry.get("attachment")
+        if _is_nonempty_str(claim_attachment) and claim_attachment not in sources:
+            issues.append(Issue(
+                "ERROR", loc,
+                f"evidence_index[{idx}].attachment {claim_attachment!r} is not "
+                f"listed in attachments[]",
+            ))
+    return issues
+
+
+def _validate_limitations(fm: dict[str, Any], path: Path) -> list[Issue]:
+    """Validate the universal `limitations` frontmatter list.
+
+    Must be a list of strings (may be empty — an empty list means "no
+    limitations", same as writing "none" in the body section). Non-string
+    entries are rejected so the reducer can join them without type checks.
+    """
+    issues: list[Issue] = []
+    loc = str(path)
+    lim = fm.get("limitations")
+    if lim is None:
+        issues.append(Issue("ERROR", loc, "missing required field: limitations"))
+        return issues
+    if not isinstance(lim, list):
+        kind = type(lim).__name__
+        issues.append(Issue("ERROR", loc, f"limitations must be a list, got {kind}"))
+        return issues
+    for idx, v in enumerate(lim):
+        if not _is_nonempty_str(v):
+            issues.append(Issue(
+                "ERROR", loc,
+                f"limitations[{idx}] must be a nonempty string",
+            ))
+    return issues
+
+
+def _extract_section_body_level3(body: str, header_re: str) -> str | None:
+    """Extract the text under a '### Header' subsection until the next
+    '## ' or '### ' header.
+
+    Returns the body lines (without the header) or None if the header is
+    absent. Used by `_validate_body` for the `### PoC` and
+    `### Disconfirming controls` subsections that live inside
+    `## Description`.
+    """
+    lines = body.split("\n")
+    in_section = False
+    out: list[str] = []
+    for line in lines:
+        if in_section and (re.match(r"^##\s", line) or re.match(r"^###\s", line)):
+            break
+        if in_section:
+            out.append(line)
+            continue
+        if re.match(header_re, line):
+            in_section = True
+            continue
+    if not in_section:
+        return None
+    return "\n".join(out)
+
+
+def _validate_finding_class_rules(fm: dict[str, Any], path: Path) -> list[Issue]:
+    """Apply finding-class gates (audit §5.3) after the universal shape
+    checks pass.
+
+    - POC_STATE_CHANGING_FOR_MEDIUM_PLUS: severity.score >= 4.0 and
+      finding_type == live_web -> poc.type must not be `theoretical`
+      (state_changing or read_only are allowed; not_feasible requires
+      limitations explaining why — enforced by the body section check).
+    - source_code bypass: poc.type=theoretical is allowed for
+      finding_type=source_code (a live target may not exist).
+    - VICTIM_FOR_IDOR: weakness contains CWE-639 or CWE-284 ->
+      threat_model.victim must be non-empty (already required by the
+      universal gate, but this surfaces a clearer message for the class).
+    """
+    issues: list[Issue] = []
+    loc = str(path)
+    ft = fm.get("finding_type")
+    sev = fm.get("severity")
+    score = 0.0
+    if isinstance(sev, dict):
+        s = sev.get("score")
+        if isinstance(s, int | float) and not isinstance(s, bool):
+            try:
+                score = float(s)
+            except (TypeError, ValueError):
+                score = 0.0
+    poc = fm.get("poc")
+    ptype = poc.get("type") if isinstance(poc, dict) else None
+
+    # POC_STATE_CHANGING_FOR_MEDIUM_PLUS (audit §5.3, §5.4).
+    if (
+        ft == "live_web"
+        and score >= MIN_SEVERITY_FOR_STATE_CHANGING_POC
+        and ptype == "theoretical"
+    ):
+        issues.append(Issue(
+            "ERROR", loc,
+            f"poc.type 'theoretical' is not allowed for live_web findings with "
+            f"severity.score >= {MIN_SEVERITY_FOR_STATE_CHANGING_POC} "
+            f"(use 'state_changing' or 'read_only'; or set finding_type to "
+            f"source_code if no live target exists)",
+        ))
+
+    # VICTIM_FOR_IDOR (audit §5.3, §5.4). threat_model.victim is already
+    # required by the universal gate; this is a clearer, class-specific
+    # message so the agent knows why a victim matters for IDOR.
+    weakness = str(fm.get("weakness", "") or "")
+    if ("CWE-639" in weakness or "CWE-284" in weakness):
+        tm = fm.get("threat_model")
+        victim = tm.get("victim") if isinstance(tm, dict) else None
+        if not _is_nonempty_str(victim):
+            issues.append(Issue(
+                "ERROR", loc,
+                "threat_model.victim must identify the victim for IDOR / access "
+                "control findings (CWE-639 / CWE-284) — who is the affected user "
+                "or tenant?",
+            ))
+    return issues
+
+
+def _validate_attachment_budget(fm: dict[str, Any], workspace: Path, path: Path) -> list[Issue]:
+    """Attachment budget WARN (audit §5.4). Count <= ATTACHMENT_BUDGET_COUNT
+    and total on-disk size <= ATTACHMENT_BUDGET_BYTES. WARN, not ERROR —
+    a report with 15 small attachments is usually unfocused, not invalid.
+    """
+    issues: list[Issue] = []
+    loc = str(path)
+    atts = fm.get("attachments")
+    if not isinstance(atts, list):
+        return issues
+    if len(atts) > ATTACHMENT_BUDGET_COUNT:
+        issues.append(Issue(
+            "WARN", loc,
+            f"attachments count {len(atts)} exceeds budget "
+            f"{ATTACHMENT_BUDGET_COUNT} — consider trimming to core evidence",
+        ))
+    total = 0
+    any_size = False
+    for a in atts:
+        if not isinstance(a, dict):
+            continue
+        source = a.get("source")
+        if not _is_nonempty_str(source):
+            continue
+        ok, _reason, resolved = _is_safe_relative_path(source, workspace)
+        if not ok or resolved is None or not resolved.is_file():
+            continue
+        try:
+            total += resolved.stat().st_size
+            any_size = True
+        except OSError:
+            pass
+    if any_size and total > ATTACHMENT_BUDGET_BYTES:
+        issues.append(Issue(
+            "WARN", loc,
+            f"attachments total size {total} bytes exceeds budget "
+            f"{ATTACHMENT_BUDGET_BYTES} bytes — consider trimming to core evidence",
+        ))
+    return issues
+
+
 # ─── Body validation ─────────────────────────────────────────────────────────────
 
 def _validate_body(body: str, path: Path) -> list[Issue]:
@@ -1022,6 +1348,70 @@ def _validate_body(body: str, path: Path) -> list[Issue]:
             issues.append(Issue(
                 "ERROR", loc,
                 "'## Impact' section contains a template placeholder",
+            ))
+
+    # Strict readiness gates (SI-031): require the new body sections.
+    # `## Threat model` is a top-level section (sibling of Description/
+    # Impact); `### PoC` and `### Disconfirming controls` are subsections
+    # of `## Description`. `## Limitations` is a top-level section. Each
+    # may say "none" / "none tested" (N/A) but the section must exist and
+    # be non-empty so a triager can see the agent considered it.
+    threat_model = _extract_section_body(body, r"^##\s+Threat\s+model\b")
+    if threat_model is None:
+        issues.append(Issue("ERROR", loc, "body must contain a '## Threat model' section"))
+    else:
+        stripped = threat_model.strip()
+        if not stripped:
+            issues.append(Issue("ERROR", loc, "'## Threat model' section is empty"))
+        elif _has_placeholder(stripped):
+            issues.append(Issue(
+                "ERROR", loc,
+                "'## Threat model' section contains a template placeholder",
+            ))
+
+    poc_section = _extract_section_body_level3(body, r"^###\s+PoC\b")
+    if poc_section is None:
+        issues.append(Issue("ERROR", loc, "body must contain a '### PoC' subsection"))
+    else:
+        stripped = poc_section.strip()
+        if not stripped:
+            issues.append(Issue("ERROR", loc, "'### PoC' subsection is empty"))
+        elif _has_placeholder(stripped):
+            issues.append(Issue(
+                "ERROR", loc,
+                "'### PoC' subsection contains a template placeholder",
+            ))
+
+    disconfirming = _extract_section_body_level3(body, r"^###\s+Disconfirming\s+controls\b")
+    if disconfirming is None:
+        issues.append(Issue(
+            "ERROR", loc,
+            "body must contain a '### Disconfirming controls' subsection",
+        ))
+    else:
+        stripped = disconfirming.strip()
+        if not stripped:
+            issues.append(Issue(
+                "ERROR", loc,
+                "'### Disconfirming controls' subsection is empty",
+            ))
+        elif _has_placeholder(stripped):
+            issues.append(Issue(
+                "ERROR", loc,
+                "'### Disconfirming controls' subsection contains a template placeholder",
+            ))
+
+    limitations = _extract_section_body(body, r"^##\s+Limitations\b")
+    if limitations is None:
+        issues.append(Issue("ERROR", loc, "body must contain a '## Limitations' section"))
+    else:
+        stripped = limitations.strip()
+        if not stripped:
+            issues.append(Issue("ERROR", loc, "'## Limitations' section is empty"))
+        elif _has_placeholder(stripped):
+            issues.append(Issue(
+                "ERROR", loc,
+                "'## Limitations' section contains a template placeholder",
             ))
     return issues
 
@@ -1380,6 +1770,15 @@ def check_report(
     issues.extend(_validate_attachments_shape(fm, p))
     issues.extend(_validate_testing(fm, p))
 
+    # 1c. Strict readiness gates (SI-031): content-quality frontmatter.
+    # These run for EVERY report, not just a severity class. The audit's
+    # root cause was that check only validated structure; these gates make
+    # threat_model / poc / evidence_index / limitations mandatory.
+    issues.extend(_validate_threat_model(fm, p))
+    issues.extend(_validate_poc(fm, p))
+    issues.extend(_validate_evidence_index(fm, p))
+    issues.extend(_validate_limitations(fm, p))
+
     # 1b. finding_type / live_targets cross-check (C8): live_web findings must
     # declare at least one live target; source_code findings with live targets
     # is a WARN (unusual but not necessarily wrong).
@@ -1473,6 +1872,13 @@ def check_report(
 
     # 7. Attachment filesystem checks.
     issues.extend(_validate_attachments_fs(fm, ws, p))
+
+    # 7b. Strict readiness gates (SI-031): finding-class rules + budget.
+    # Finding-class rules depend on finding_type/severity/weakness being
+    # valid, so they run after the shape checks. Attachment budget is a
+    # WARN (audit §5.4) — runs after fs checks so the size sum is accurate.
+    issues.extend(_validate_finding_class_rules(fm, p))
+    issues.extend(_validate_attachment_budget(fm, ws, p))
 
     # 8. Secret scanning (report body + text attachments).
     issues.extend(_validate_no_secrets(fm, body, ws, p))
@@ -2040,17 +2446,25 @@ def prepare_report(
     """Prepare an immutable submission package.
 
     1. Runs check_report; aborts (ReportValidationError) on any ERROR issue.
-    2. Builds the package in a temp sibling dir, then atomically renames it.
-    3. Refuses if the final package path already exists (PackageExistsError).
+    2. Runs the semantic/adversarial review (lib/h1review.review_report);
+       aborts (ReportValidationError) unless the review's overall verdict
+       is exactly ``pass`` (SI-031 strict readiness gate). A ``warn`` or
+       ``fail`` verdict blocks packaging — the report must pass the
+       content-quality gate, not just survive it.
+    3. Builds the package in a temp sibling dir, then atomically renames it.
+    4. Refuses if the final package path already exists (PackageExistsError).
 
     Returns a result dict with keys:
         package_path (str), package_id (str), prepared_at (str),
-        attachments_copied (int), scope_snapshots (int).
+        attachments_copied (int), scope_snapshots (int),
+        review_verdict (str), review_blocking (list[str]),
+        review_dimensions (dict).
 
     Raises:
         ReportFileError: workspace/report missing.
         ReportParseError: report YAML malformed.
-        ReportValidationError: check_report returned ERROR-level issues.
+        ReportValidationError: check_report returned ERROR-level issues OR
+            the semantic review returned overall != pass.
         PackageExistsError: final package path already exists.
         PackageError: filesystem error during staging.
     """
@@ -2065,6 +2479,46 @@ def prepare_report(
     errors = [i for i in issues if i.level == "ERROR"]
     if errors:
         raise ReportValidationError(issues)
+
+    # 1b. SI-031 strict readiness gate: semantic/adversarial review.
+    # Deterministic structure checks alone are insufficient (audit section
+    # 3.3); the semantic review reads the content and returns a structured
+    # verdict. prepare aborts unless overall == pass. WARN blocks (the
+    # report must pass the content-quality gate, not just survive it). FAIL
+    # blocks. There is no --skip-review bypass — new preparation
+    # requirements are not weakened for old drafts.
+    review_verdict = "fail"
+    review_blocking: list[str] = []
+    review_dimensions: dict[str, Any] = {}
+    try:
+        import h1review  # noqa: E402  (local import to avoid a hard dep at module load)
+    except Exception as e:  # pragma: no cover — h1review is in lib/
+        raise ReportValidationError(
+            [Issue("ERROR", str(report_path),
+                   f"semantic review module unavailable: {e}")]
+        ) from e
+    review = h1review.review_report(ws, lab_root=lab)
+    review_verdict = review.overall
+    review_blocking = list(review.blocking_dimensions)
+    review_dimensions = {
+        name: {"verdict": d.verdict, "reason": d.reason}
+        for name, d in review.dimensions.items()
+    }
+    if review_verdict != "pass":
+        blocking_issues = [
+            Issue("ERROR", str(report_path),
+                  f"semantic review {d.verdict.upper()} on dimension "
+                  f"{name!r}: {d.reason}")
+            for name, d in review.dimensions.items()
+            if d.verdict in ("fail", "warn")
+        ]
+        blocking_issues.append(Issue(
+            "ERROR", str(report_path),
+            f"semantic review overall={review_verdict} — packaging "
+            f"requires overall=pass. blocking_dimensions="
+            f"{review_blocking}; recommendation: {review.recommendation}",
+        ))
+        raise ReportValidationError(blocking_issues)
 
     # 2. Determine the final package path and refuse if it exists.
     timestamp = _utc_timestamp_now()
@@ -2208,6 +2662,16 @@ def prepare_report(
             },
             "scope_snapshots": scope_snaps,
             "attachments": manifest_attachments,
+            # SI-031: carry the semantic review verdict in the manifest
+            # so the human sees the content-quality signal before
+            # submitting (audit §6.2). The review ran before packaging;
+            # the verdict is immutable in the package.
+            "review": {
+                "schema": "security-lab/h1-review/v1",
+                "overall": review_verdict,
+                "blocking_dimensions": review_blocking,
+                "dimensions": review_dimensions,
+            },
         }
         manifest_bytes = json.dumps(manifest, indent=2, sort_keys=True).encode("utf-8")
         # S3/R2: write manifest with 0o600 (consistent with other package files).
@@ -2233,6 +2697,9 @@ def prepare_report(
         "prepared_at": manifest["prepared_at"],
         "attachments_copied": copied,
         "scope_snapshots": len(scope_snaps),
+        "review_verdict": review_verdict,
+        "review_blocking": review_blocking,
+        "review_dimensions": review_dimensions,
     }
 
 

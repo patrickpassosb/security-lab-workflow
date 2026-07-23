@@ -1,0 +1,13 @@
+lab-h1-report check output (synthetic):
+
+FAIL - poc.type 'theoretical' is not allowed for live_web findings with severity.score >= 4.0
+
+lab-h1-report review output (synthetic):
+
+REVIEW: fail
+BLOCKING_DIMENSIONS: ["poc_state_change"]
+DIMENSIONS:
+  poc_state_change: fail — poc.attachment 'evidence/01_empty.txt' is only a status line with no response body (NO_STATE_CHANGE)
+RECOMMENDATION: Do not submit. Failed dimensions: ['poc_state_change'].
+
+2 failures. The medium-severity live_web finding with a theoretical PoC and an empty response fails both the deterministic POC_STATE_CHANGING_FOR_MEDIUM_PLUS gate and the semantic poc_state_change dimension.

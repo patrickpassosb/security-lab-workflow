@@ -58,6 +58,15 @@ from typing import Any
 # equally to partial_credit. ``novelty`` is compared as a range tolerance
 # (the candidate's novelty may be within ±_NOVELTY_TOLERANCE of expected)
 # rather than an exact match, because novelty is a continuous signal.
+#
+# SI-031 (audit section 8.3): the content-quality fields are optional in
+# the verdict dict. When present, they contribute to partial_credit
+# exactly like the verdict fields. When absent, they are treated as a
+# mismatch (the candidate did not produce them). This means a candidate
+# that produces the "correct" reportability=report but whose report has
+# no PoC scores PARTIAL, not PASS. The fields are added AFTER the core
+# verdict fields so existing verdicts without them still score against
+# the core fields (backward compat).
 _REQUIRED_FIELDS: tuple[str, ...] = (
     "technical_verdict",
     "reportability",
@@ -65,6 +74,20 @@ _REQUIRED_FIELDS: tuple[str, ...] = (
     "novelty",
 )
 _NOVELTY_TOLERANCE = 0.1  # ±0.1 on a 0.0–1.0 novelty score
+
+# SI-031 content-quality fields (audit section 8.3). These are OPTIONAL
+# in the verdict dict — a verdict without them scores against the core
+# _REQUIRED_FIELDS only (backward compat). When the expected label
+# includes them, a verdict that omits them is a mismatch on those
+# dimensions. This lets the eval suite grade content quality alongside
+# verdict correctness.
+_CONTENT_QUALITY_FIELDS: tuple[str, ...] = (
+    "threat_model_present",       # bool
+    "poc_type",                   # enum: state_changing | read_only | theoretical | not_feasible
+    "evidence_index_complete",    # bool (all claims mapped)
+    "limitations_present",        # bool
+    "disconfirming_controls_present",  # bool
+)
 
 # Valid values for the categorical fields (used to detect malformed input
 # — a value outside these sets is a mismatch, not a partial match).
@@ -289,6 +312,24 @@ def score_case(
         got = verdict.get(fname)
         exp = expected.get(fname)
         matches.append((fname, _field_matches(fname, got, exp)))
+
+    # SI-031 (audit section 8.3): when the expected label carries
+    # content-quality fields, compare them too. When the expected label
+    # does NOT carry them, skip (backward compat — old verdicts/labels
+    # score against the core fields only). Only score fields that are
+    # present in the expected label — do not penalize verdicts for
+    # optional fields omitted from the expected label. This means the
+    # content-quality fields only affect the score when the eval suite
+    # author opted into them, so existing suites are unaffected.
+    content_fields_present = any(
+        fname in expected for fname in _CONTENT_QUALITY_FIELDS
+    )
+    if content_fields_present:
+        for fname in _CONTENT_QUALITY_FIELDS:
+            if fname in expected:
+                got = verdict.get(fname)
+                exp = expected.get(fname)
+                matches.append((fname, _field_matches(fname, got, exp)))
 
     n_match = sum(1 for _, ok in matches if ok)
     n_total = len(matches)

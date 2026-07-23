@@ -261,7 +261,8 @@ class TestAssessBlock:
         self, lab, submission_config, capsys, monkeypatch
     ):
         """BLOCK (exit 1) when the finding's behavior matches a known
-        Informative precedent, even when platform_state is None."""
+        Informative precedent that is cross-confirmed by 2+ programs
+        (SI-031 cross-program promotion, audit section 10.3)."""
         ws = _make_workspace(lab)
         _write_report(
             ws,
@@ -276,6 +277,7 @@ class TestAssessBlock:
                 "state": "informative",
                 "date": "2026-07-15",
                 "note": "Program assessed metadata as acceptable",
+                "confirmed_by_programs": ["notion", "atlassian"],
             }
         ])
         # No platform outcome — platform_state is None, so the BLOCK comes
@@ -285,7 +287,39 @@ class TestAssessBlock:
         out = capsys.readouterr().out
         assert rc == 1
         assert "ASSESS: BLOCK" in out
-        assert "Known informative behavior" in out.lower() or "known informative" in out.lower()
+        assert "cross-confirmed" in out.lower() or "known informative" in out.lower()
+
+    def test_hold_when_single_program_precedent_is_advisory(
+        self, lab, submission_config, capsys, monkeypatch
+    ):
+        """HOLD (exit 2), not BLOCK, when a single-program Informative
+        precedent matches (SI-031: single-program feedback is advisory,
+        provenance-labelled; cross-program confirmation (2+ programs) is
+        required before it becomes a hard BLOCK)."""
+        ws = _make_workspace(lab)
+        _write_report(
+            ws,
+            title="Unauthenticated workspace metadata leak via endpointA endpoint",
+        )
+        _write_record(ws, "999")
+        _write_precedents(lab, [
+            {
+                "program": "notion",
+                "behavior": "endpointA metadata leak",
+                "report_id": "7654321",
+                "state": "informative",
+                "date": "2026-07-15",
+                "note": "Program assessed metadata as acceptable",
+                # No confirmed_by_programs — single-program = advisory.
+            }
+        ])
+        _patch_status(monkeypatch, platform_state=None, technical_verdict="confirmed")
+        rc = cli.main(["assess", str(ws)])
+        out = capsys.readouterr().out
+        assert rc == 2  # HOLD, not BLOCK
+        assert "ASSESS: HOLD" in out
+        assert "single-program" in out.lower()
+        assert "advisory" in out.lower()
 
     def test_block_when_technical_verdict_not_confirmed(
         self, lab, submission_config, capsys, monkeypatch
@@ -759,8 +793,9 @@ class TestAssessIntegration:
         self, lab, submission_config, capsys, monkeypatch
     ):
         """When there is no platform outcome yet (platform_state=None),
-        but the behavior matches a known Informative precedent, assess
-        BLOCKs on the precedent match."""
+        but the behavior matches a known Informative precedent that is
+        cross-confirmed by 2+ programs, assess BLOCKs on the precedent
+        match (SI-031 cross-program promotion)."""
         ws = _make_workspace(lab, name="case-002")
         _write_report(
             ws,
@@ -775,6 +810,7 @@ class TestAssessIntegration:
                 "state": "informative",
                 "date": "2026-07-15",
                 "note": "Program assessed as acceptable",
+                "confirmed_by_programs": ["notion", "atlassian"],
             }
         ])
         # No outcome in the store, so platform_state is None. Patch to

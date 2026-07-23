@@ -1,0 +1,9 @@
+schema: security-lab/eval-case/v1
+case_id: synthetic-low-severity-bypass-001
+suite: synthetic
+split: train
+description: "Low-severity (score 2.0) finding with a theoretical PoC and limitations explaining why. Passes the SI-031 low-severity bypass (theoretical PoC allowed when severity < 4.0)."
+category: content-quality
+tags: [h1-reporting, poc, low-severity, bypass, si-031]
+regression_source: bounty-quality-gates-audit
+expected_failures: 0
