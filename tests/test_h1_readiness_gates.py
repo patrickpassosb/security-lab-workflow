@@ -254,7 +254,8 @@ def _write_report(
                 evp.parent.mkdir(parents=True, exist_ok=True)
                 evp.write_text(
                     'HTTP/1.1 200 OK\nContent-Type: application/json\n\n'
-                    '{"workspace_name":"Victim","owner_email":"victim@example.com","member_count":7}\n',
+                    '{"workspace_name":"Acme","owner_id":"[REDACTED]",'
+                    '"member_count":7}\n',
                     encoding="utf-8",
                 )
     return p
@@ -490,8 +491,9 @@ class TestSemanticReview:
         assert "poc_state_change" in result.blocking_dimensions
         assert "NO_STATE_CHANGE" in result.dimensions["poc_state_change"].reason
 
-    def test_hedging_impact_warns_review(self, tmp_path):
-        """Concrete harm: hedging language in Impact warns (not fails)."""
+    def test_hedging_impact_fails_review(self, tmp_path):
+        """Concrete harm: hedging language in Impact FAILS (mandatory
+        refusal for hypothetical business impact)."""
         ws = _make_ws(tmp_path)
         lab = _make_lab(tmp_path)
         body = VALID_BODY.replace(
@@ -505,7 +507,7 @@ class TestSemanticReview:
         )
         _write_report(ws, body=body)
         result = h1review.review_report(ws, lab_root=lab)
-        assert result.dimensions["concrete_harm"].verdict == "warn"
+        assert result.dimensions["concrete_harm"].verdict == "fail"
 
     def test_missing_attacker_fails_review(self, tmp_path):
         """Attacker-victim chain: empty threat_model.attacker fails."""
@@ -550,30 +552,37 @@ class TestPrepareEnforcement:
             prepared = [d for d in submission.iterdir() if d.name.startswith("prepared-")]
             assert prepared == [], f"unexpected package: {prepared}"
 
+    def test_prepare_refuses_on_semantic_warn(self, tmp_path):
+        """WARN blocks packaging: prepare refuses when the semantic
+        review returns overall=warn (SI-031 — PASS required, not just
+        survival)."""
+        ws = _make_ws(tmp_path)
+        lab = _make_lab(tmp_path)
+        _write_report(ws)
+        # Add PII to the evidence so the redaction dimension warns.
+        (ws / "evidence" / "01_idor.txt").write_text(
+            "HTTP/1.1 200 OK\n\n"
+            '{"owner_email":"real-victim@company.com","member_count":7}\n',
+            encoding="utf-8",
+        )
+        # The review should warn (redaction), and prepare must refuse.
+        with pytest.raises(h1report.ReportValidationError):
+            h1report.prepare_report(ws, lab_root=lab)
+
     def test_prepare_succeeds_on_pass(self, tmp_path):
-        """Prepare succeeds when both deterministic + semantic gates pass."""
+        """Prepare succeeds only when both deterministic + semantic gates
+        pass (overall=pass)."""
         ws = _make_ws(tmp_path)
         lab = _make_lab(tmp_path)
         _write_report(ws)
         result = h1report.prepare_report(ws, lab_root=lab)
-        assert result["review_verdict"] in ("pass", "warn")
+        assert result["review_verdict"] == "pass"
         pkg = Path(result["package_path"])
         assert pkg.is_dir()
         # The manifest carries the review verdict.
         manifest = json.loads((pkg / "manifest.json").read_text())
         assert "review" in manifest
-        assert manifest["review"]["overall"] in ("pass", "warn")
-
-    def test_prepare_skip_review_bypasses_semantic(self, tmp_path):
-        """--skip-review bypasses the semantic review and records a WARN."""
-        ws = _make_ws(tmp_path)
-        lab = _make_lab(tmp_path)
-        _write_report(ws)
-        result = h1report.prepare_report(ws, lab_root=lab, skip_review=True)
-        assert result["review_verdict"] == "skipped"
-        pkg = Path(result["package_path"])
-        manifest = json.loads((pkg / "manifest.json").read_text())
-        assert manifest["review"]["overall"] == "skipped"
+        assert manifest["review"]["overall"] == "pass"
 
     def test_prepare_re_runs_review_not_cached(self, tmp_path):
         """Stale review / changed report bytes after review: prepare
@@ -585,7 +594,7 @@ class TestPrepareEnforcement:
         _write_report(ws)
         # First, run a manual review (passes).
         r1 = h1review.review_report(ws, lab_root=lab)
-        assert r1.overall in ("pass", "warn")
+        assert r1.overall == "pass"
         # Now change the report to make it fail the semantic review
         # (empty the PoC attachment).
         (ws / "evidence" / "01_idor.txt").write_text(
@@ -598,41 +607,40 @@ class TestPrepareEnforcement:
     def test_prepare_catches_attachment_change(self, tmp_path):
         """Attachment changes: prepare re-runs check + review, so
         changing an attachment's content between a manual review and
-        prepare is caught."""
+        prepare is caught. PII in the evidence triggers a redaction WARN
+        which now blocks packaging (overall=warn != pass)."""
         ws = _make_ws(tmp_path)
         lab = _make_lab(tmp_path)
         _write_report(ws)
         # Manual review passes.
         r1 = h1review.review_report(ws, lab_root=lab)
-        assert r1.overall in ("pass", "warn")
-        # Replace the attachment with PII-laden content (review warns).
+        assert r1.overall == "pass"
+        # Replace the attachment with PII-laden content (review warns on
+        # redaction — now blocking since WARN != PASS).
         (ws / "evidence" / "01_idor.txt").write_text(
             "HTTP/1.1 200 OK\n\n"
             '{"owner_email":"real-victim@company.com","ssn":"123-45-6789"}\n',
             encoding="utf-8",
         )
-        # prepare still succeeds (redaction is a WARN, not a fail), but
-        # the review verdict must reflect the new content.
-        result = h1report.prepare_report(ws, lab_root=lab)
-        assert result["review_verdict"] == "warn"  # redaction warned
-        pkg = Path(result["package_path"])
-        manifest = json.loads((pkg / "manifest.json").read_text())
-        assert manifest["review"]["overall"] == "warn"
-        assert manifest["review"]["dimensions"]["redaction"]["verdict"] == "warn"
+        # prepare must refuse (WARN blocks).
+        with pytest.raises(h1report.ReportValidationError):
+            h1report.prepare_report(ws, lab_root=lab)
 
 
 # ─── Phase 3: reducer population ───────────────────────────────────────────────
 
 class TestReducerPopulation:
     def test_reducer_reads_poc_state_changed(self, tmp_path):
-        """The reducer populates impact_demonstrated from the report's
-        validated poc.state_changed frontmatter field (not hardcoded
-        False)."""
+        """The reducer derives impact_demonstrated from BOTH the
+        frontmatter poc.state_changed AND the semantic review's
+        poc_state_change dimension (not self-assertion alone)."""
         import finding_events as fe
         ws = _make_ws(tmp_path)
         _write_report(ws)
         store = fe.OutcomeStore(tmp_path / "outcomes.jsonl")
         status = store.derive_finding_status("123", workspace_path=ws)
+        # impact_demonstrated requires the semantic review to confirm.
+        # When the semantic review passes (valid report), it's True.
         assert status["impact_demonstrated"] is True
         assert status["technical_verdict"] == "inconclusive"  # no events
         assert status["confidence"] == 0.0  # no events
@@ -674,6 +682,8 @@ class TestReducerPopulation:
         assert status["confidence"] == 0.9
         assert status["impact_demonstrated"] is True  # from poc.state_changed
         assert status["reportability"] == "report"  # all three signals present
+        # SI-031: last_event_ts includes the workspace event timestamp.
+        assert "2026-07-22T12:00:00Z" in status["last_event_ts"]
 
     def test_reducer_conservative_when_no_evidence(self, tmp_path):
         """When there is no event ledger and no report, the reducer
@@ -749,4 +759,25 @@ class TestPrecedentPromotion:
         )
         assert matched is not None
         assert reason is None  # advisory
+
+    def test_duplicate_programs_deduplicated(self, tmp_path):
+        """confirmed_by_programs with duplicate entries counts as ONE
+        program (SI-031 audit section 10.3 dedup)."""
+        precedents = [
+            {
+                "program": "notion",
+                "behavior": "endpointA metadata leak",
+                "report_id": "7654321",
+                "state": "informative",
+                "date": "2026-07-15",
+                # Duplicate entries — should count as 1, not 2.
+                "confirmed_by_programs": ["notion", "notion"],
+            }
+        ]
+        matched, reason = cli._match_precedent(
+            "Unauthenticated endpointA metadata leak", precedents
+        )
+        assert matched is not None
+        # Only 1 distinct program — advisory HOLD, not hard BLOCK.
+        assert reason is None  # single distinct program = advisory
 

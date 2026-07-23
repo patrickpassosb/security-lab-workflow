@@ -2442,31 +2442,29 @@ def prepare_report(
     workspace: str | Path | None = None,
     *,
     lab_root: str | Path | None = None,
-    skip_review: bool = False,
 ) -> dict[str, Any]:
     """Prepare an immutable submission package.
 
     1. Runs check_report; aborts (ReportValidationError) on any ERROR issue.
     2. Runs the semantic/adversarial review (lib/h1review.review_report);
-       aborts (ReportValidationError) when the review's overall verdict
-       is FAIL (SI-031 strict readiness gate). A WARN verdict does not
-       abort — the human sees the warnings in the package manifest.
-       Pass `skip_review=True` to bypass the semantic review (the audit
-       log records the bypass; intended for backward-compat with old
-       drafts that predate the gates, not for routine use).
+       aborts (ReportValidationError) unless the review's overall verdict
+       is exactly ``pass`` (SI-031 strict readiness gate). A ``warn`` or
+       ``fail`` verdict blocks packaging — the report must pass the
+       content-quality gate, not just survive it.
     3. Builds the package in a temp sibling dir, then atomically renames it.
     4. Refuses if the final package path already exists (PackageExistsError).
 
     Returns a result dict with keys:
         package_path (str), package_id (str), prepared_at (str),
         attachments_copied (int), scope_snapshots (int),
-        review_verdict (str), review_blocking (list[str]).
+        review_verdict (str), review_blocking (list[str]),
+        review_dimensions (dict).
 
     Raises:
         ReportFileError: workspace/report missing.
         ReportParseError: report YAML malformed.
         ReportValidationError: check_report returned ERROR-level issues OR
-            the semantic review returned overall=fail.
+            the semantic review returned overall != pass.
         PackageExistsError: final package path already exists.
         PackageError: filesystem error during staging.
     """
@@ -2483,47 +2481,44 @@ def prepare_report(
         raise ReportValidationError(issues)
 
     # 1b. SI-031 strict readiness gate: semantic/adversarial review.
-    # Deterministic structure checks alone are insufficient (audit §3.3);
-    # the semantic review reads the content and returns a structured
-    # verdict. prepare aborts on overall=fail; warn is non-blocking.
-    review_verdict = "skipped"
+    # Deterministic structure checks alone are insufficient (audit section
+    # 3.3); the semantic review reads the content and returns a structured
+    # verdict. prepare aborts unless overall == pass. WARN blocks (the
+    # report must pass the content-quality gate, not just survive it). FAIL
+    # blocks. There is no --skip-review bypass — new preparation
+    # requirements are not weakened for old drafts.
+    review_verdict = "fail"
     review_blocking: list[str] = []
     review_dimensions: dict[str, Any] = {}
-    if not skip_review:
-        try:
-            import h1review  # noqa: E402  (local import to avoid a hard dep at module load)
-        except Exception as e:  # pragma: no cover — h1review is in lib/
-            raise ReportValidationError(
-                [Issue("ERROR", str(report_path),
-                       f"semantic review module unavailable: {e}")]
-            ) from e
-        review = h1review.review_report(ws, lab_root=lab)
-        review_verdict = review.overall
-        review_blocking = list(review.blocking_dimensions)
-        review_dimensions = {
-            name: {"verdict": d.verdict, "reason": d.reason}
+    try:
+        import h1review  # noqa: E402  (local import to avoid a hard dep at module load)
+    except Exception as e:  # pragma: no cover — h1review is in lib/
+        raise ReportValidationError(
+            [Issue("ERROR", str(report_path),
+                   f"semantic review module unavailable: {e}")]
+        ) from e
+    review = h1review.review_report(ws, lab_root=lab)
+    review_verdict = review.overall
+    review_blocking = list(review.blocking_dimensions)
+    review_dimensions = {
+        name: {"verdict": d.verdict, "reason": d.reason}
+        for name, d in review.dimensions.items()
+    }
+    if review_verdict != "pass":
+        blocking_issues = [
+            Issue("ERROR", str(report_path),
+                  f"semantic review {d.verdict.upper()} on dimension "
+                  f"{name!r}: {d.reason}")
             for name, d in review.dimensions.items()
-        }
-        if review.is_blocking():
-            fail_issues = [
-                Issue("ERROR", str(report_path),
-                      f"semantic review FAILED on dimension {name!r}: {d.reason}")
-                for name, d in review.dimensions.items()
-                if d.verdict == "fail"
-            ]
-            fail_issues.append(Issue(
-                "ERROR", str(report_path),
-                f"semantic review overall=fail, blocking_dimensions="
-                f"{review_blocking}; recommendation: {review.recommendation}",
-            ))
-            raise ReportValidationError(fail_issues)
-    else:
-        issues.append(Issue(
-            "WARN", str(report_path),
-            "semantic review skipped (--skip-review) — the package will "
-            "not carry a content-quality signal; intended for backward "
-            "compat with old drafts, not routine use",
+            if d.verdict in ("fail", "warn")
+        ]
+        blocking_issues.append(Issue(
+            "ERROR", str(report_path),
+            f"semantic review overall={review_verdict} — packaging "
+            f"requires overall=pass. blocking_dimensions="
+            f"{review_blocking}; recommendation: {review.recommendation}",
         ))
+        raise ReportValidationError(blocking_issues)
 
     # 2. Determine the final package path and refuse if it exists.
     timestamp = _utc_timestamp_now()

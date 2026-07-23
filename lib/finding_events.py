@@ -575,18 +575,32 @@ class OutcomeStore:
         # self-asserted prose. We fold the latest non-null
         # technical_verdict / confidence across all events for this
         # report_id (a later event that revises the verdict wins).
-        technical_verdict, confidence = self._fold_workspace_events(
+        technical_verdict, confidence, ws_event_ts = self._fold_workspace_events(
             workspace_path, report_id
         )
+        # SI-031: include the latest workspace-event timestamp in
+        # last_event_ts so the status accurately identifies the event
+        # that informed the verdict/confidence (not just platform
+        # outcomes or the current time). When a workspace event exists,
+        # its timestamp is authoritative for last_event_ts — it reflects
+        # the most recent evidence the reducer consumed. When no
+        # workspace event exists, fall back to the outcome/record/now
+        # chain.
+        if ws_event_ts:
+            last_event_ts = ws_event_ts
 
-        # ─── SI-031: populate impact_demonstrated from the report's
-        # validated `poc.state_changed` frontmatter field. The field is
-        # validated by `check` (must be a bool) and `poc.type` must be
-        # one of the enum values, so it is evidence. An event-ledger
-        # `technical_verdict=confirmed` with `impact_demonstrated` can
-        # override this if the agent recorded an explicit impact
-        # observation; otherwise the report's PoC field is authoritative.
-        impact_demonstrated = self._read_impact_from_report(
+        # ─── SI-031: populate impact_demonstrated from validated evidence.
+        # The report's `poc.state_changed` frontmatter field is necessary
+        # but NOT sufficient — it is a self-asserted bool that the report
+        # author sets. The semantic review (lib/h1review) independently
+        # inspects the PoC attachment and the body to confirm the state
+        # change is demonstrated (the poc_state_change dimension). Only
+        # when BOTH the frontmatter declares state_changed=true AND the
+        # semantic review's poc_state_change dimension passes is
+        # impact_demonstrated true. This closes the audit's root cause:
+        # self-asserted prose should not yield reportability=report
+        # without demonstrated evidence.
+        impact_demonstrated = self._derive_impact_demonstrated(
             workspace_path, technical_verdict
         )
 
@@ -637,32 +651,36 @@ class OutcomeStore:
         self,
         workspace_path: Path | str | None,
         report_id: str,
-    ) -> tuple[str, float]:
+    ) -> tuple[str, float, str]:
         """Fold the workspace event ledger for `report_id` to derive
-        `technical_verdict` and `confidence`.
+        `technical_verdict`, `confidence`, and the latest event timestamp.
 
-        Returns (technical_verdict, confidence). When no workspace is
-        provided, no ledger exists, or no event carries the fields,
-        returns the conservative defaults ("inconclusive", 0.0).
+        Returns (technical_verdict, confidence, last_event_ts). When no
+        workspace is provided, no ledger exists, or no event carries the
+        fields, returns the conservative defaults ("inconclusive", 0.0, "").
 
         The fold rule: the latest non-null `technical_verdict` wins (a
         later event that revises the verdict overrides an earlier one).
         For `confidence`, the latest non-null value wins. This mirrors
-        how an agent revises its assessment as it gathers evidence.
+        how an agent revises its assessment as it gathers evidence. The
+        `last_event_ts` is the latest `ts` across all consumed events so
+        the reducer's `last_event_ts` reflects the event that informed
+        the verdict (not just platform outcomes).
         """
         if workspace_path is None:
-            return "inconclusive", 0.0
+            return "inconclusive", 0.0, ""
         ws = Path(workspace_path)
         ledger_path = ws / ".lab" / "events.jsonl"
         if not ledger_path.is_file() or ledger_path.is_symlink():
-            return "inconclusive", 0.0
+            return "inconclusive", 0.0, ""
         technical_verdict = "inconclusive"
         confidence = 0.0
+        last_ts = ""
         try:
             ledger = WorkspaceEventLedger(ledger_path)
             evs = ledger.list_events()
         except (OSError, OutcomeError):
-            return "inconclusive", 0.0
+            return "inconclusive", 0.0, ""
         for ev in evs:
             tv = ev.get("technical_verdict")
             if tv in ("confirmed", "inconclusive", "not_vulnerable"):
@@ -675,29 +693,62 @@ class OutcomeStore:
                         confidence = c
                 except (TypeError, ValueError):
                     pass
-        return technical_verdict, confidence
+            ev_ts = str(ev.get("ts", "") or "")
+            if ev_ts and ev_ts > last_ts:
+                last_ts = ev_ts
+        return technical_verdict, confidence, last_ts
 
     @staticmethod
-    def _read_impact_from_report(
+    def _derive_impact_demonstrated(
         workspace_path: Path | str | None,
         technical_verdict: str,
     ) -> bool:
-        """Read `impact_demonstrated` from the report's validated
-        `poc.state_changed` frontmatter field.
+        """Derive `impact_demonstrated` from validated evidence, not
+        self-asserted prose.
 
-        The field is validated by `check` (must be a bool) and `poc.type`
-        must be one of the enum values, so it is evidence — not
-        self-asserted prose. When the report is missing, unparseable, or
-        the field is absent, returns False (conservative).
+        Two independent signals must agree:
+          1. The report's `poc.state_changed` frontmatter field (validated
+             by `check` — must be a bool). This is the author's claim.
+          2. The semantic review's `poc_state_change` dimension (lib/h1review)
+             which independently inspects the PoC attachment and body to
+             confirm the state change is demonstrated. This is the
+             machine-verified confirmation.
 
-        A `technical_verdict=confirmed` from the event ledger does NOT
-        alone prove impact — the PoC must declare the state change. This
-        closes the audit's dead-end where `assess` always BLOCKed because
-        the reducer returned hardcoded `impact_demonstrated=False`.
+        impact_demonstrated is True only when BOTH signals pass. This closes
+        the audit's root cause: self-asserted `state_changed: true` plus a
+        confirmed event-ledger verdict should not yield
+        reportability=report without demonstrated evidence.
+
+        When the semantic review module is unavailable or the report is
+        missing/unparseable, returns False (conservative — do not trust
+        self-assertion alone).
         """
         if workspace_path is None:
             return False
         ws = Path(workspace_path)
+        # Signal 1: the report's poc.state_changed frontmatter field.
+        state_changed = OutcomeStore._read_poc_state_changed(ws)
+        if not state_changed:
+            return False
+        # Signal 2: the semantic review's poc_state_change dimension.
+        try:
+            import h1review  # noqa: E402
+        except Exception:
+            return False  # conservative — no machine-verified confirmation
+        try:
+            result = h1review.review_report(ws)
+        except Exception:
+            return False  # conservative — review could not run
+        poc_dim = result.dimensions.get("poc_state_change")
+        if poc_dim is None:
+            return False
+        return poc_dim.verdict == "pass"
+
+    @staticmethod
+    def _read_poc_state_changed(ws: Path) -> bool:
+        """Read the report's `poc.state_changed` frontmatter field.
+        Returns False when the report is missing, unparseable, or the
+        field is absent/not a bool."""
         report_path = ws / "report_h1.md"
         if not report_path.is_file() or report_path.is_symlink():
             return False

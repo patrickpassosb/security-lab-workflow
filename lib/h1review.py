@@ -87,11 +87,15 @@ VERDICT_WARN = "warn"
 VERDICT_FAIL = "fail"
 
 # Blocking dimensions: a fail on any of these makes overall=fail (audit
-# §6.1 `blocking_dimensions`). attacker_victim_chain and
-# poc_state_change are blocking; the rest are advisory (warn) because
-# they are more subjective and the deterministic engine should not
-# block a valid report on a heuristic.
-BLOCKING_DIMENSIONS = frozenset({"attacker_victim_chain", "poc_state_change"})
+# section 6.1 `blocking_dimensions`). attacker_victim_chain,
+# poc_state_change, and concrete_harm are all blocking — the captain's
+# mandate requires mandatory refusal when proven compromise is 'nothing',
+# response is empty, or business impact is hypothetical.
+BLOCKING_DIMENSIONS = frozenset({
+    "attacker_victim_chain",
+    "poc_state_change",
+    "concrete_harm",
+})
 
 
 @dataclass
@@ -239,31 +243,48 @@ def _check_attacker_victim_chain(fm: dict, body: str) -> DimensionResult:
 
 
 def _check_concrete_harm(fm: dict, body: str) -> DimensionResult:
-    """concrete_harm: does the Impact describe specific harm?
+    """concrete_harm: does the Impact describe specific, demonstrated harm?
 
-    Falsifiable question (audit §6.3): "Does the Impact describe what
-    data/system is compromised, with specificity?" A section dominated
-    by hedging phrases ("could potentially", "may expose") fails.
+    Falsifiable question (audit section 6.3): "Does the Impact describe
+    what data/system is compromised, with specificity?" A section dominated
+    by hedging phrases ("could potentially", "may expose") FAILS — the
+    captain's mandate requires mandatory refusal when business impact is
+    hypothetical. "Nothing compromised" or an empty section also FAILS.
     """
     impact = _extract_section(body, r"^##\s+Impact\b")
     if not impact.strip():
         return DimensionResult(VERDICT_FAIL, "## Impact section is empty")
+    impact_lower = impact.strip().lower()
+    # Mandatory refusal: proven compromise is 'nothing'.
+    nothing_keywords = ("compromis", "gained", "demonstrated")
+    if "nothing" in impact_lower and any(k in impact_lower for k in nothing_keywords):
+        return DimensionResult(
+            VERDICT_FAIL,
+            "## Impact states nothing is compromised — mandatory refusal",
+        )
     hedge_count = sum(1 for p in _HEDGE_PATTERNS if p.search(impact))
     word_count = len(impact.split())
-    # If more than 25% of the sentences are hedge phrases OR the section
-    # is very short (< 10 words), it's not concrete.
+    # Mandatory refusal: business impact is hypothetical (hedging language).
+    if hedge_count >= 2:
+        return DimensionResult(
+            VERDICT_FAIL,
+            "## Impact relies on hedging language ('could potentially', "
+            "'may expose') — business impact is hypothetical; mandatory "
+            "refusal. Name the concrete data shown, privilege gained, or "
+            "resource created",
+        )
     if word_count < 10:
         return DimensionResult(
-            VERDICT_WARN,
-            "## Impact is very short — describe the concrete data/system "
-            "compromised and who is affected",
+            VERDICT_FAIL,
+            "## Impact is too short to demonstrate concrete harm — "
+            "describe the specific data/system compromised and who is "
+            "affected",
         )
-    if hedge_count >= 2 and word_count < 40:
+    if hedge_count >= 1 and word_count < 40:
         return DimensionResult(
-            VERDICT_WARN,
-            "## Impact relies on hedging language ('could potentially', "
-            "'may expose') without specifying the concrete harm — name "
-            "the data shown, the privilege gained, or the resource created",
+            VERDICT_FAIL,
+            "## Impact contains hedging language without specifying "
+            "concrete harm — mandatory refusal for hypothetical impact",
         )
     return DimensionResult(
         VERDICT_PASS,
@@ -294,6 +315,29 @@ def _check_poc_state_change(fm: dict, body: str, workspace: Path) -> DimensionRe
 
     if not ptype:
         return DimensionResult(VERDICT_FAIL, "poc.type is empty")
+    # The attachment inspection runs for ALL poc types when an
+    # attachment is referenced — including theoretical/not_feasible. An
+    # empty or status-line-only attachment is the audit's NO_STATE_CHANGE
+    # signal regardless of poc.type (the empty-response eval case uses
+    # poc.type=theoretical + an empty attachment; the deterministic gate
+    # catches it for medium+ live_web, but the semantic review must also
+    # catch it so the gate is defense-in-depth).
+    if poc_attachment:
+        content = _read_text_attachment(workspace, poc_attachment)
+        if not content.strip():
+            return DimensionResult(
+                VERDICT_FAIL,
+                f"poc.attachment {poc_attachment!r} is empty — no "
+                "state change demonstrated (NO_STATE_CHANGE)",
+            )
+        stripped = content.strip()
+        if re.fullmatch(r"HTTP/\d\.\d\s+\d{3}\s*.*", stripped) and len(stripped) < 50:
+            return DimensionResult(
+                VERDICT_FAIL,
+                f"poc.attachment {poc_attachment!r} is only a status "
+                "line with no response body — no state change "
+                "demonstrated (NO_STATE_CHANGE)",
+            )
     # theoretical / not_feasible PoCs are allowed by the deterministic
     # gate only when the finding class permits them (check enforces
     # this); the semantic gate verifies the body explains why.
@@ -318,28 +362,8 @@ def _check_poc_state_change(fm: dict, body: str, workspace: Path) -> DimensionRe
             f"poc.type={ptype!r} with limitations explaining why a "
             "state-changing PoC is not feasible",
         )
-    # state_changing / read_only: the PoC attachment (if referenced)
-    # must contain non-trivial content. An empty response body is the
-    # audit's NO_STATE_CHANGE signal.
+    # state_changing / read_only: the poc.state_changed field must match.
     if ptype in ("state_changing", "read_only"):
-        if poc_attachment:
-            content = _read_text_attachment(workspace, poc_attachment)
-            if not content.strip():
-                return DimensionResult(
-                    VERDICT_FAIL,
-                    f"poc.attachment {poc_attachment!r} is empty — no "
-                    "state change demonstrated (NO_STATE_CHANGE)",
-                )
-            # An HTTP response that is just a status line with no body
-            # is the Notion incident's empty-response signal.
-            stripped = content.strip()
-            if re.fullmatch(r"HTTP/\d\.\d\s+\d{3}\s*.*", stripped) and len(stripped) < 50:
-                return DimensionResult(
-                    VERDICT_FAIL,
-                    f"poc.attachment {poc_attachment!r} is only a status "
-                    "line with no response body — no state change "
-                    "demonstrated (NO_STATE_CHANGE)",
-                )
         if not isinstance(state_changed, bool):
             return DimensionResult(
                 VERDICT_WARN,
@@ -605,6 +629,29 @@ def _deterministic_review(
     )
 
 
+def format_human_review(result: ReviewResult) -> str:
+    """Format the review result as concise human-review output.
+
+    Removes AI-style verbosity and internal meta prose. Each dimension
+    is one line: ``PASS|WARN|FAIL  dimension  reason``. The overall
+    verdict and recommendation follow. Does not hide AI use — the review
+    is machine-generated and the output says so once, concisely.
+    """
+    lines: list[str] = []
+    lines.append(f"Review: {result.overall.upper()}")
+    lines.append("(machine-generated semantic review — SI-031)")
+    for name in DIMENSIONS:
+        dim = result.dimensions.get(name)
+        if dim is None:
+            continue
+        label = dim.verdict.upper()
+        lines.append(f"{label:4}  {name:30}  {dim.reason}")
+    if result.blocking_dimensions:
+        lines.append(f"Blocking: {', '.join(result.blocking_dimensions)}")
+    lines.append(f"Recommendation: {result.recommendation}")
+    return "\n".join(lines)
+
+
 __all__ = [
     "REVIEW_SCHEMA",
     "DIMENSIONS",
@@ -615,4 +662,5 @@ __all__ = [
     "DimensionResult",
     "ReviewResult",
     "review_report",
+    "format_human_review",
 ]

@@ -7,7 +7,7 @@ Read-only and local-only commands for HackerOne report_h1.md workspaces.
 Usage:
     lab-h1-report check [workspace]
     lab-h1-report review [workspace]
-    lab-h1-report prepare [workspace] [--skip-review]
+    lab-h1-report prepare [workspace]
     lab-h1-report status [workspace]
     lab-h1-report assess [workspace]
     lab-h1-report record-submission [workspace] --package <path|id> \
@@ -298,12 +298,7 @@ def cmd_review(args: list[str]) -> int:
         )
         return 1
 
-    print(f"REVIEW: {result.overall}")
-    print(f"BLOCKING_DIMENSIONS: {result.blocking_dimensions}")
-    print("DIMENSIONS:")
-    for name, dim in result.dimensions.items():
-        print(f"  {name}: {dim.verdict} — {dim.reason}")
-    print(f"RECOMMENDATION: {result.recommendation}")
+    print(h1review.format_human_review(result))
 
     engagement_name = ""
     with contextlib.suppress(Exception):
@@ -311,7 +306,7 @@ def cmd_review(args: list[str]) -> int:
         engagement_name = str(report.frontmatter.get("engagement", "") or "")
 
     duration_ms = int((time.monotonic() - start_time) * 1000)
-    exit_code = 0 if result.overall in ("pass", "warn") else 2
+    exit_code = 0 if result.overall == "pass" else 2
     _audit_h1(
         AUDIT_ACTION_REVIEW, str(ws), engagement_name, exit_code,
         duration_ms, ws,
@@ -453,14 +448,9 @@ def cmd_prepare(args: list[str]) -> int:
     """Prepare an immutable submission package. Exit 0 on success, 2 on
     validation failure, 1 on fs/parse/internal errors."""
     workspace: str | None = None
-    skip_review = False
     i = 0
     while i < len(args):
         a = args[i]
-        if a == "--skip-review":
-            skip_review = True
-            i += 1
-            continue
         if a.startswith("-"):
             print(f"unknown flag: {a}", file=sys.stderr)
             return 1
@@ -474,7 +464,7 @@ def cmd_prepare(args: list[str]) -> int:
     start_time = time.monotonic()
 
     try:
-        result = h1report.prepare_report(workspace, lab_root=lab_root, skip_review=skip_review)
+        result = h1report.prepare_report(workspace, lab_root=lab_root)
     except h1report.ReportFileError as e:
         print(f"ERROR: {e}", file=sys.stderr)
         _audit_h1(
@@ -530,12 +520,6 @@ def cmd_prepare(args: list[str]) -> int:
         f"review={review_verdict} package={pkg_id}"
     )
     print(f"PACKAGE: {result.get('package_path', '')}")
-    if review_verdict == "warn":
-        print(
-            "REVIEW WARN: the semantic review surfaced warnings — review them "
-            "before submitting (see manifest.json review.dimensions)",
-            file=sys.stderr,
-        )
     # Resolve the workspace Path for workspace_id attribution (best-effort;
     # prepare_report already resolved it internally, so this only fails if
     # the workspace was removed between the prepare and now — extremely
@@ -1117,12 +1101,20 @@ def _match_precedent(
         }
 
     def _confirmed_programs(p: dict) -> list[str]:
-        """Return the confirmed_by_programs list (audit §10.3).
-        Falls back to [] when the field is absent (single-program =
-        advisory, not blocking)."""
+        """Return the confirmed_by_programs list (audit section 10.3).
+        Deduplicates nonempty normalized names so [notion, notion]
+        counts as ONE program, not two. Falls back to [] when the field
+        is absent (single-program = advisory, not blocking)."""
         cbp = p.get("confirmed_by_programs")
         if isinstance(cbp, list):
-            return [str(x) for x in cbp if isinstance(x, (str, int))]
+            seen: set[str] = set()
+            out: list[str] = []
+            for x in cbp:
+                name = str(x).strip().lower()
+                if name and name not in seen:
+                    seen.add(name)
+                    out.append(str(x))
+            return out
         return []
 
     needle_tokens = _distinctive_tokens(needle)

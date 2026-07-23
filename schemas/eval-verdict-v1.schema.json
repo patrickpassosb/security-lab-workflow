@@ -100,6 +100,32 @@
       "examples": [
         "The endpoint does leak workspace metadata without authentication, but this behavior was previously assessed as Informative by the program."
       ]
+    },
+    "threat_model_present": {
+      "type": "boolean",
+      "description": "SI-031 content-quality field (audit section 8.3). Optional — when\npresent, the scorer compares it against the candidate's verdict. A\nverdict omitting it is a mismatch on this dimension. When absent from\nthe expected label, the scorer skips it (backward compat).",
+      "examples": [true, false]
+    },
+    "poc_type": {
+      "type": "string",
+      "description": "SI-031 content-quality field (audit section 8.3). Optional. The\nexpected poc.type the candidate should produce. Compared as an exact\nstring match.",
+      "enum": ["state_changing", "read_only", "theoretical", "not_feasible"],
+      "examples": ["state_changing", "read_only"]
+    },
+    "evidence_index_complete": {
+      "type": "boolean",
+      "description": "SI-031 content-quality field (audit section 8.3). Optional. Whether\nall claims are mapped to evidence in the expected verdict.",
+      "examples": [true, false]
+    },
+    "limitations_present": {
+      "type": "boolean",
+      "description": "SI-031 content-quality field (audit section 8.3). Optional. Whether\nthe expected verdict includes limitations.",
+      "examples": [true, false]
+    },
+    "disconfirming_controls_present": {
+      "type": "boolean",
+      "description": "SI-031 content-quality field (audit section 8.3). Optional. Whether\nthe expected verdict includes disconfirming controls.",
+      "examples": [true, false]
     }
   },
   "examples": [

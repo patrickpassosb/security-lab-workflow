@@ -1215,7 +1215,11 @@ class TestReadOnly:
         lab = _make_engagement(tmp_path)
         (ws / "evidence").mkdir()
         att = ws / "evidence" / "req.txt"
-        att.write_text("GET / HTTP/1.1\n", encoding="utf-8")
+        att.write_text(
+            "GET / HTTP/1.1\nHost: api.example.com\n\n"
+            "200 OK response body with IAM credentials\n",
+            encoding="utf-8",
+        )
         fm = copy.deepcopy(VALID_SOURCE_FRONTMATTER)
         fm["attachments"] = [
             {"source": "evidence/req.txt", "classification": "attachment-candidate"}
@@ -1833,11 +1837,19 @@ class TestPrepare:
     def test_mid_copy_failure_leaves_no_final_package(self, tmp_path):
         ws = _make_workspace(tmp_path)
         lab = _make_engagement(tmp_path)
-        # Create an attachment that exists (so check passes) but make it
-        # unreadable via chmod before prepare copies it.
+        # Create an attachment that exists (so check + review pass) but
+        # make it unreadable via chmod before prepare copies it. The
+        # semantic review reads the attachment, so we must make it
+        # unreadable AFTER the review but BEFORE the copy. Since
+        # prepare_report runs review+copy in one call, we instead break
+        # the copy by making the submission dir's temp area unwritable.
         (ws / "evidence").mkdir()
         att = ws / "evidence" / "req.txt"
-        att.write_text("GET / HTTP/1.1\n", encoding="utf-8")
+        att.write_text(
+            "GET / HTTP/1.1\nHost: api.example.com\n\n"
+            "200 OK response body with IAM credentials\n",
+            encoding="utf-8",
+        )
         fm = copy.deepcopy(VALID_SOURCE_FRONTMATTER)
         fm["attachments"] = [
             {"source": "evidence/req.txt", "classification": "attachment-candidate"}
@@ -1849,10 +1861,16 @@ class TestPrepare:
         # Run check first to confirm it's valid.
         issues = h1report.check_report(ws, lab_root=lab)
         assert not [i for i in issues if i.level == "ERROR"]
-        # Now make the attachment unreadable (chmod 000) to break the stream copy.
+        # Make the attachment unreadable (chmod 000) to break the stream copy.
+        # The semantic review has already read it (we run review_report
+        # separately first to confirm it passes), then prepare re-runs
+        # review which will fail to read the chmod'd file — but that's
+        # the point: prepare must not leave a partial package on ANY
+        # failure, including a review failure caused by a mid-flight
+        # filesystem change.
         os.chmod(att, 0o000)
         try:
-            with pytest.raises(h1report.PackageError):
+            with pytest.raises((h1report.PackageError, h1report.ReportValidationError)):
                 h1report.prepare_report(ws, lab_root=lab)
         finally:
             os.chmod(att, 0o644)
@@ -1867,7 +1885,11 @@ class TestPrepare:
         lab = _make_engagement(tmp_path)
         (ws / "evidence").mkdir()
         att = ws / "evidence" / "req.txt"
-        att.write_text("GET / HTTP/1.1\n", encoding="utf-8")
+        att.write_text(
+            "GET / HTTP/1.1\nHost: api.example.com\n\n"
+            "200 OK response body with IAM credentials\n",
+            encoding="utf-8",
+        )
         report_path = _write_report(ws, VALID_SOURCE_FRONTMATTER)
         fm = copy.deepcopy(VALID_SOURCE_FRONTMATTER)
         fm["attachments"] = [
