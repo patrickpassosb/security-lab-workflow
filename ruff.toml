@@ -26,17 +26,10 @@ extend-exclude = [
 #      suppressed at the rule/file level rather than disabled wholesale.
 select = ["E", "W", "F", "I", "B", "UP", "SIM", "S"]
 
-# Global ignores: rules that are wrong for this repo in general.
-# S101: `assert` detected. flake8-bandit flags assert as "removed in -O".
-# This repo uses assert pervasively in tests (correct) and in lib/ for
-# internal invariants where a bare assert is clearer than a raise. The -O
-# concern is not real here (we never ship stripped). Per-file ignores below
-# keep tests/ clean of S101 noise; lib/ assertions are intentional.
-# Suppressed globally because the alternative (hundreds of # noqa: S101) is
-# worse than the risk it mitigates in a non-production lab.
-ignore = [
-  "S101",  # use of assert is intentional (tests + internal invariants; never run with -O)
-]
+# Global ignores: none. S101 (assert) is suppressed per-file for tests + evals
+# where assert is correct (test assertions) and for specific lib/ files where
+# internal invariant checks use assert. See per-file-ignores below for
+# justification on each scope.
 
 [lint.per-file-ignores]
 # Per-file ignores: the extensionless bin/ scripts use sys.path hacks to import
@@ -93,12 +86,16 @@ ignore = [
 # lib/labeval.py + lib/labimprove.py: S603/S607 — the self-improvement runtime
 # deliberately spawns candidate-skill subprocesses under bwrap isolation
 # (ADR-0003). This is the design, not a bug; the subprocess is the untrusted
-# unit under evaluation.
+# unit under evaluation. S101 (assert) is used for internal invariant checks
+# in the eval runner; these are never stripped in production (the lab doesn't
+# ship optimized bytecode).
 "lib/labeval.py" = [
+  "S101",  # assert for internal invariants in eval runner
   "S603",  # candidate-skill subprocess under bwrap isolation (ADR-0003)
   "S607",  # partial paths (git, opencode) resolved via PATH by design
 ]
 "lib/labimprove.py" = [
+  "S101",  # assert for internal invariants in improvement loop
   "S603",  # candidate-skill subprocess under bwrap isolation (ADR-0003)
 ]
 

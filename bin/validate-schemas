@@ -82,9 +82,11 @@ def validate_dir(schema_dir: str) -> int:
 
         # 2. JSON Schema meta-validation (only if it looks like a schema doc
         #    and jsonschema is available).
-        if not have_lib or not isinstance(doc, dict):
-            suffix = " (not a schema document)" if isinstance(doc, dict) else ""
-            print(f"  ok   {name}: valid JSON{suffix}")
+        if not isinstance(doc, dict):
+            print(f"  ok   {name}: valid JSON (not a schema document)")
+            continue
+        if not have_lib:
+            print(f"  ok   {name}: valid JSON (meta-validation skipped — jsonschema not installed)")
             continue
         if not any(k in doc for k in ("$schema", "type", "properties")):
             print(f"  ok   {name}: valid JSON (no schema fields — skipped meta-validation)")
