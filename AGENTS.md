@@ -130,6 +130,21 @@ All commands are local-only (no network, no subprocess). See
 `lab-h1-report --help` and `templates/bounty/report_h1.md`. `report_h1.md` is
 the single source of truth — do not duplicate report content in `bounty_log.md`.
 
+## Recursive learning loop (hunt playbooks)
+
+Per-program hunting playbooks (`playbooks/<program>.{md,jsonl}`) accumulate
+hunting knowledge so each hunt starts from the accumulated lessons of prior
+hunts instead of from scratch. This is the lab's feedback loop from hunting
+to hunting: **rejected submission → dead-end lesson → next hunt avoids it.**
+
+- `lab-hunt-lesson add <program> --category <dead_end|viable_surface|design_intent|what_worked|what_failed|oos_trap> --lesson "<text>" [--evidence "<ref>"] [--date <YYYY-MM-DD>]` appends a lesson to `playbooks/<program>.jsonl` and regenerates the markdown. Idempotent — same (program, claim) is a no-op.
+- `lab-hunt-lesson read <program> [--category <cat>]` prints the playbook markdown (generated from the JSONL ledger; never hand-edit the markdown).
+- `lab-hunt-lesson list` lists all programs with playbooks.
+- The `bounty-attack` skill has a mandatory "Read the program playbook" step 0 before hunting and an "After your hunt" step that writes lessons back.
+- `lab-h1-report record-outcome` with `--state not_applicable|informative` **automatically** appends a `dead_end` lesson to the program playbook (keyed by the engagement's program slug) — the auto-feedback loop. Best-effort; never blocks record-outcome.
+
+Schema: `schemas/hunt-lesson-v1.schema.json`. Library: `lib/huntlesson.py` (sole owner of the markdown renderer).
+
 ## Never
 
 1. **Never exfiltrate outside the lab.** No outbound to public hosts except: Voyage API (embeddings), Supabase (if you opt in later), Caido (proxy only). For bounty engagements, you operate under the program's safe harbor — but still no data exfiltration beyond what proves the bug.
