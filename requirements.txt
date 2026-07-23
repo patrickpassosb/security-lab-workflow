@@ -16,6 +16,17 @@ pyyaml==6.0.2
 requests==2.32.3
 #    hash: sha256:xxx  # add after first pip-compile
 
+# CI / test deps (CI modernization). Not needed at runtime for the bin/
+# scripts, but required for `make test`, `make check`, and the CI pytest job.
+# Install alongside runtime deps in CI; local dev can install separately:
+#   pip install -r requirements.txt
+pytest>=8.0
+pytest-timeout>=2.3
+pytest-cov>=5.0
+junit-xml>=3.1
+jsonschema>=4.22
+mypy>=1.11
+
 # Note: --require-hashes requires ALL deps to have hashes. After the first
 # pip-compile --generate-hashes, replace the placeholder hashes above with
 # the real ones. Until then, install WITHOUT --require-hashes:

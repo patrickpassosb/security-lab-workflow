@@ -19,13 +19,88 @@ extend-exclude = [
 # B  - flake8-bugbear (likely-bugs + design issues)
 # UP - pyupgrade (modernize syntax)
 # SIM - flake8-simplify
-select = ["E", "W", "F", "I", "B", "UP", "SIM"]
+# S  - flake8-bandit (security). CI modernization item 5: enable S rules with
+#      justified suppressions below. This is a security lab that intentionally
+#      runs subprocesses, shells out to tools, and uses test fixtures with
+#      dummy secrets — those patterns are real and correct here, so they are
+#      suppressed at the rule/file level rather than disabled wholesale.
+select = ["E", "W", "F", "I", "B", "UP", "SIM", "S"]
 
+# Global ignores: rules that are wrong for this repo in general.
+# S101: `assert` detected. flake8-bandit flags assert as "removed in -O".
+# This repo uses assert pervasively in tests (correct) and in lib/ for
+# internal invariants where a bare assert is clearer than a raise. The -O
+# concern is not real here (we never ship stripped). Per-file ignores below
+# keep tests/ clean of S101 noise; lib/ assertions are intentional.
+# Suppressed globally because the alternative (hundreds of # noqa: S101) is
+# worse than the risk it mitigates in a non-production lab.
+ignore = [
+  "S101",  # use of assert is intentional (tests + internal invariants; never run with -O)
+]
+
+[lint.per-file-ignores]
 # Per-file ignores: the extensionless bin/ scripts use sys.path hacks to import
 # lib/labutil.py — that's intentional, not a lint error.
-[lint.per-file-ignores]
 "bin/*" = ["E402"]  # module-level import not at top (sys.path.insert first)
 "lib/*" = ["E402"]
+
+# CI modernization item 5 — justified S-rule suppressions per scope.
+# Each suppression has a one-line rationale so future readers know why it's
+# safe and when to revisit.
+
+# tests/: dummy secrets, subprocess stubs, and fixture strings are the whole
+# point. S105 (hardcoded password) fires on "secret"/"secret_label" fixture
+# values — these are test data, not real credentials. S603/S607 (subprocess
+# call / partial path) fire on tests that stub or invoke the lab's own CLI
+# entry points — the lab's purpose is to run tools in subprocesses.
+"tests/*" = [
+  "S101",  # assert in tests — correct, see global ignore rationale
+  "S105",  # hardcoded "secret"/"secret_label" are test fixtures, not creds
+  "S603",  # subprocess calls invoke the lab's own CLIs under test
+  "S607",  # partial executable paths (e.g. "opencode") resolved via PATH by design
+]
+
+# evals/: same testing context as tests/ — assert + subprocess-heavy.
+"evals/*" = [
+  "S101",  # assert in eval harness
+  "S603",  # subprocess calls run candidate skills in isolation
+  "S607",  # partial paths resolved via PATH by design
+]
+
+# lib/canary.py: S311 (random not crypto-safe) — uses random.Random(seed) for a
+# DETERMINISTIC statistical relabel test (seeded, not for secrets). Revisit
+# only if canary.py ever generates nonces or tokens.
+"lib/canary.py" = [
+  "S311",  # seeded random.Random for deterministic stats, not crypto
+]
+
+# lib/labutil.py: S104 (0.0.0.0 binding) is a false positive — 0.0.0.0 is an
+# entry in a DENYLIST of blocked addresses, not a bind target. S603
+# (subprocess) is the lab's core run_subprocess helper; the whole repo is
+# built around shelling out to security tools under operator control.
+"lib/labutil.py" = [
+  "S104",  # 0.0.0.0 is a denylist entry, not a bind target (false positive)
+  "S603",  # run_subprocess is the lab's intentional tool-runner
+]
+
+# lib/h1review.py: S105 ("VERDICT_PASS" = "pass") is a verdict LABEL string,
+# not a password. The constant names a HackerOne review verdict; "pass" is its
+# public enum value. Revisit only if this string becomes an actual secret.
+"lib/h1review.py" = [
+  "S105",  # "VERDICT_PASS" = "pass" is a verdict label, not a password
+]
+
+# lib/labeval.py + lib/labimprove.py: S603/S607 — the self-improvement runtime
+# deliberately spawns candidate-skill subprocesses under bwrap isolation
+# (ADR-0003). This is the design, not a bug; the subprocess is the untrusted
+# unit under evaluation.
+"lib/labeval.py" = [
+  "S603",  # candidate-skill subprocess under bwrap isolation (ADR-0003)
+  "S607",  # partial paths (git, opencode) resolved via PATH by design
+]
+"lib/labimprove.py" = [
+  "S603",  # candidate-skill subprocess under bwrap isolation (ADR-0003)
+]
 
 [format]
 # Don't auto-format on lint; just check. Use `ruff format` explicitly.

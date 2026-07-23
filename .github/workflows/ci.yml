@@ -71,17 +71,28 @@ jobs:
         # extend-exclude in ruff.toml plus file-extension detection keeps them
         # out. ruff.toml is the single source of truth for rule selection and
         # per-file ignores (e.g. bin/* E402 for sys.path hacks).
+        # CI modernization: ruff.toml now enables S (flake8-bandit) with
+        # justified per-file/global suppressions — see ruff.toml for the
+        # rationale on each suppression.
         run: ruff check .
 
   pytest:
-    name: pytest (unit tests)
+    name: pytest (unit tests, py${{ matrix.python-version }})
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      # CI modernization item 1: test on Python 3.11 AND 3.12. The repo
+      # targets py311 (ruff.toml target-version) and uses py3.11 features
+      # (PEP 604 `X | Y` unions). 3.12 must keep passing so future 3.12-only
+      # features stay opt-in, not accidental.
+      matrix:
+        python-version: ['3.11', '3.12']
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
       - uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b  # v5.3.0
         with:
-          python-version: '3.11'
+          python-version: ${{ matrix.python-version }}
       - name: Install Bubblewrap (ADR-0003 isolation)
         # ADR-0003 requires network-namespace isolation (bwrap --unshare-net)
         # for the eval runner tests. Without bwrap, the isolation tests
@@ -114,30 +125,60 @@ jobs:
             -- python3 -c "print('bwrap --unshare-net smoke test ok')" \
             || { echo "ERROR: bwrap --unshare-net failed — CI cannot run isolation tests"; exit 1; }
       - name: Install Python deps
-        # requirements.txt pins ruff + pyyaml + requests. pytest is added
-        # explicitly (not in requirements.txt — it's a CI/test-only dep).
+        # requirements.txt now carries the CI/test deps too (CI modernization):
+        # pytest, pytest-timeout, pytest-cov, junit-xml, jsonschema, mypy.
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
-          pip install pytest
       - name: Run pytest
+        # CI modernization:
+        #   - --timeout=60 (item 2): per-test 60s wall clock, fail fast on hangs.
+        #   - --junit-xml (item 8): always emit test-results.xml for artifact upload.
+        #   - --cov (item 4): coverage BASELINE reporting — captured and printed,
+        #     NOT enforced (no --fail-under). Lets us track the number over time.
         # PYTHONPATH=lib is critical so tests can import labutil, h1report,
         # and (Phase 1) finding_events directly from lib/ without packaging.
         env:
           PYTHONPATH: lib
-        run: pytest tests/ -v --tb=short
-      - name: Upload test results on failure
+        run: |
+          pytest tests/ -v --tb=short \
+            --timeout=60 \
+            --junit-xml=test-results.xml \
+            --cov=lib --cov=bin \
+            --cov-report=term-missing \
+            --cov-report=xml:coverage.xml \
+            --cov-branch
+      - name: Coverage baseline (advisory)
+        # Item 4: print a coverage baseline summary line. This is NOT a gate —
+        # there is no --fail-under. It gives us a number to track across PRs
+        # without blocking on it. Once we're happy with the baseline we can
+        # add --cov-fail-under in a separate change.
+        run: |
+          python3 -c "import xml.etree.ElementTree as ET; \
+          t=ET.parse('coverage.xml').getroot(); \
+          print(f'coverage baseline: line={t.attrib.get(\"line-rate\",\"?\")} branch={t.attrib.get(\"branch-rate\",\"?\")} (advisory, not enforced)')"
+      - name: Upload test results
+        # Always upload JUnit XML + coverage, not just on failure (item 8).
+        uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882  # v4.4.3
+        if: always()
+        with:
+          name: pytest-results-py${{ matrix.python-version }}
+          path: |
+            test-results.xml
+            coverage.xml
+          if-no-files-found: ignore
+      - name: Upload test artifacts on failure
         if: failure()
         uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882  # v4.4.3
         with:
-          name: pytest-output
+          name: pytest-output-py${{ matrix.python-version }}
           path: |
             .pytest_cache/
             **/__pycache__/
           if-no-files-found: ignore
 
   schema-validate:
-    name: schema validation (JSON syntax)
+    name: schema validation (JSON schema)
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -145,17 +186,50 @@ jobs:
       - uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b  # v5.3.0
         with:
           python-version: '3.11'
-      - name: Validate JSON schemas
-        # SI-009: schemas/ just got audit-event-v1; this step guards against
-        # malformed JSON (trailing commas, unescaped quotes, etc.) that would
-        # break runtime loaders. Syntax-only check; semantic validation is
-        # done by the consumers (lib/labutil.py, etc.) at read time.
-        # No-op when schemas/ has no .json files yet — glob returns [].
+      - name: Install jsonschema
+        # CI modernization item 6: upgrade from syntax-only json.load to real
+        # JSON Schema validation via the jsonschema package. This catches
+        # semantic errors (wrong types, missing required fields) that
+        # json.load silently accepts. requirements.txt now includes jsonschema.
         run: |
-          python3 -c "import json, glob; \
-          files = glob.glob('schemas/*.json'); \
-          [json.load(open(f)) for f in files]; \
-          print(f'validated {len(files)} schema file(s)')"
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+      - name: Validate JSON schemas
+        # CI modernization item 6: upgrade from syntax-only json.load to real
+        # JSON Schema validation via the jsonschema package. bin/validate-schemas
+        # picks the validator for each schema's declared $schema draft and runs
+        # meta-validation, catching semantic errors (wrong types, missing
+        # required fields, malformed $ref) that json.load silently accepts.
+        # The same script powers `make check` (Makefile CI parity).
+        run: |
+          python3 bin/validate-schemas
+
+  typing:
+    name: typing (mypy, non-blocking)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+      - uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b  # v5.3.0
+        with:
+          python-version: '3.11'
+      - name: Install deps
+        # CI modernization item 7: add mypy as a NON-BLOCKING CI step. It
+        # surfaces typing issues so we can tighten over time without breaking
+        # PRs on day one. requirements.txt includes mypy.
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+      - name: Run mypy (advisory)
+        # Non-blocking: the `continue-on-error: true` on this step means mypy
+        # findings are reported in the job log and the job still passes. This
+        # is intentional — the repo is not fully typed yet, and we want the
+        # step to exist and run, not to gate. pyproject.toml [tool.mypy]
+        # configures the scope (lib/ + tests/) and strictness.
+        continue-on-error: true
+        env:
+          PYTHONPATH: lib
+        run: mypy lib/ tests/
 
   gitleaks:
     name: gitleaks (secrets scan)
