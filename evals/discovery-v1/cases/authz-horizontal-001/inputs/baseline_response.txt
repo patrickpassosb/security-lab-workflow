@@ -1,0 +1,16 @@
+HTTP/1.1 200 OK
+Content-Type: application/json
+Content-Length: 312
+X-Request-Id: req_baseline_001
+Date: Mon, 27 Jul 2026 10:00:00 GMT
+
+{
+  "document": {
+    "doc_id": "DOC_A_55555555",
+    "workspace_id": "WS_A_22222222",
+    "owner_user_id": "USR_A_11111111",
+    "title": "User A private draft",
+    "visibility": "private",
+    "body": "This is User A's private document content. USER_A_MARKER"
+  }
+}

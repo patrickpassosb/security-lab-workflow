@@ -1,0 +1,16 @@
+HTTP/1.1 200 OK
+Content-Type: application/json
+Content-Length: 210
+X-Request-Id: req_skip_confirm_001
+Date: Mon, 27 Jul 2026 12:01:00 GMT
+
+{
+  "order": {
+    "order_id": "ORD_001",
+    "state": "confirmed",
+    "address_id": "ADDR_BUYER_00000001",
+    "payment_method": null,
+    "confirmed_at": "2026-07-27T12:01:00Z",
+    "total": "29.99"
+  }
+}

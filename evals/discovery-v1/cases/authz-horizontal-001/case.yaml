@@ -1,0 +1,20 @@
+schema: security-lab/eval-case/v1
+case_id: discovery-authz-horizontal-001
+suite: discovery-v1
+split: train
+description: "Horizontal authorization (CWE-639): can User A read User B's private document in a workspace User A is not a member of?"
+category: authorization
+tags: [authorization, horizontal, idor, cwe-639, discovery]
+# Discovery-specific fields (inert under the current eval-case/v1 validator;
+# carried for future discovery-case/v1 schema adoption per Phase 0 report §1.7).
+environment:
+  target: app.synth-test.example
+  target_kind: synthetic
+  max_target_requests: 0
+authorization:
+  actors:
+    - {id: USR_A_11111111, role: member, workspace: WS_A_22222222}
+    - {id: USR_B_33333333, role: member, workspace: WS_B_44444444}
+  resources:
+    - {kind: document, id: DOC_B_66666666, owner: USR_B_33333333, workspace: WS_B_44444444, visibility: private}
+# No expected answers here - those are in private/labels.json (gitignored)

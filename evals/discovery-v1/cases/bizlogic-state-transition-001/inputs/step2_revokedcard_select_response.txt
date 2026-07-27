@@ -1,0 +1,17 @@
+HTTP/1.1 200 OK
+Content-Type: application/json
+Content-Length: 230
+X-Request-Id: req_step2_revokedcard_001
+Date: Mon, 27 Jul 2026 12:02:00 GMT
+
+{
+  "order": {
+    "order_id": "ORD_002",
+    "state": "payment_selected",
+    "address_id": "ADDR_BUYER_00000002",
+    "payment_method": "SYNTHCARD_REVOKED_9999",
+    "payment_method_status": "REVOKED_CARD_MARKER",
+    "confirmed_at": null,
+    "total": "49.99"
+  }
+}

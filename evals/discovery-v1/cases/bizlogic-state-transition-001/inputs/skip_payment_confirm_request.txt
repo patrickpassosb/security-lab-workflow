@@ -1,0 +1,12 @@
+POST /api/v1/orders/ORD_001/confirm HTTP/1.1
+Host: shop.synth-test.example
+Authorization: Bearer TOKEN_BUYER
+Content-Type: application/json
+User-Agent: synth-researcher/1.0
+Accept: application/json
+
+{}
+
+# NOTE: confirm is called while the order is in state=address_selected
+# (step 2 payment selection was NEVER performed). The intended invariant
+# is that confirm requires state=payment_selected.

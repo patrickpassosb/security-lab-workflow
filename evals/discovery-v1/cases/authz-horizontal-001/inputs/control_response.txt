@@ -1,0 +1,10 @@
+HTTP/1.1 404 Not Found
+Content-Type: application/json
+Content-Length: 78
+X-Request-Id: req_control_001
+Date: Mon, 27 Jul 2026 10:02:00 GMT
+
+{
+  "error": "not_found",
+  "message": "document not found in workspace"
+}

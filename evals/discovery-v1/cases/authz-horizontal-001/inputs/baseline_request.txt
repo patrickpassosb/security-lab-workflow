@@ -1,0 +1,6 @@
+GET /api/v1/workspaces/WS_A_22222222/documents/DOC_A_55555555 HTTP/1.1
+Host: app.synth-test.example
+Authorization: Bearer TOKEN_USER_A
+X-Workspace-Id: WS_A_22222222
+User-Agent: synth-researcher/1.0
+Accept: application/json

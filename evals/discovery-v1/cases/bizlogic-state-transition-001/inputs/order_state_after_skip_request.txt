@@ -1,0 +1,5 @@
+GET /api/v1/orders/ORD_001 HTTP/1.1
+Host: shop.synth-test.example
+Authorization: Bearer TOKEN_BUYER
+User-Agent: synth-researcher/1.0
+Accept: application/json

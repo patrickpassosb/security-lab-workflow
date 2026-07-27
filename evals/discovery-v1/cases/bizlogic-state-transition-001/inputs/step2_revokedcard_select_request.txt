@@ -1,0 +1,12 @@
+POST /api/v1/orders/ORD_002/select_payment HTTP/1.1
+Host: shop.synth-test.example
+Authorization: Bearer TOKEN_BUYER
+Content-Type: application/json
+User-Agent: synth-researcher/1.0
+Accept: application/json
+
+{"payment_method_id": "SYNTHCARD_REVOKED_9999"}
+
+# NOTE: SYNTHCARD_REVOKED_9999 is a test card that has been REVOKED.
+# The intended invariant is that confirm re-checks the payment method
+# validity at confirm time and rejects a revoked method.
