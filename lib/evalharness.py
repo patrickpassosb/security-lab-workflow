@@ -102,8 +102,26 @@ LABEL_ISOLATION_FORBIDDEN_FRAGMENTS: tuple[str, ...] = (
 )
 # The fragment "evals/" is too broad on its own (the agent legitimately
 # sees evals/<suite>/cases/<case>/inputs/). The real rule is: no path
-# containing "private/" or "expected/" under evals/, and none of the
-# evaluator source files. ``check_label_isolation`` implements this.
+# containing "private/" or "expected/" anywhere in the invocation
+# (independent of an ``evals/`` prefix, so a whitespace-containing
+# path like ``evals/suite one/cases/x/private/`` is still caught), and
+# none of the evaluator source files. ``check_label_isolation``
+# implements this and is the sole consumer of this constant.
+
+# Fragments checked as plain substrings across the entire invocation
+# blob (independent of any ``evals/`` anchor). ``private/`` and
+# ``expected/`` are the label-directory names; they must never reach
+# the agent, regardless of the path prefix or whitespace in it.
+LABEL_ISOLATION_SUBSTRING_FRAGMENTS: tuple[str, ...] = tuple(
+    frag for frag in LABEL_ISOLATION_FORBIDDEN_FRAGMENTS
+    if frag in ("private/", "expected/")
+)
+
+# Evaluator source files (exact substring of the blob).
+LABEL_ISOLATION_EVALUATOR_FILES: tuple[str, ...] = tuple(
+    frag for frag in LABEL_ISOLATION_FORBIDDEN_FRAGMENTS
+    if frag.startswith("lib/") and frag.endswith(".py")
+)
 
 
 # ─── Errors ────────────────────────────────────────────────────────────────────
@@ -358,8 +376,10 @@ def check_label_isolation(invocation: AgentInvocation) -> None:
     or a future change that accidentally exposes labels.
 
     Forbidden:
-      - any path under ``evals/`` containing ``private/`` or
-        ``expected/`` (the label directories);
+      - any path containing ``private/`` or ``expected/`` (the label
+        directories), anywhere in argv/env/cwd — independent of an
+        ``evals/`` prefix, so a whitespace-containing path such as
+        ``evals/suite one/cases/x/private/`` is still caught;
       - ``lib/labeval.py``, ``lib/labimprove.py``, ``lib/scoring.py``,
         ``lib/canary.py`` (evaluator source);
       - ``labels.json`` anywhere (the private label file name).
@@ -373,7 +393,7 @@ def check_label_isolation(invocation: AgentInvocation) -> None:
     blob = "\n".join(surfaces)
 
     # Evaluator source files (exact fragment).
-    for forbidden in ("lib/labeval.py", "lib/labimprove.py", "lib/scoring.py", "lib/canary.py"):
+    for forbidden in LABEL_ISOLATION_EVALUATOR_FILES:
         if forbidden in blob:
             raise LabelIsolationError(
                 f"label isolation violation: evaluator source '{forbidden}' "
@@ -385,7 +405,19 @@ def check_label_isolation(invocation: AgentInvocation) -> None:
             "label isolation violation: 'labels.json' (private labels) "
             "would reach the agent CLI"
         )
-    # Any evals/ path containing private/ or expected/.
+    # Label directories as standalone substrings across the whole blob.
+    # This closes the whitespace bypass of the ``evals/``-anchored scan
+    # below: a path like ``evals/suite one/cases/x/private/`` stops the
+    # regex at the space, but ``private/`` is still caught here.
+    for forbidden in LABEL_ISOLATION_SUBSTRING_FRAGMENTS:
+        if forbidden in blob:
+            raise LabelIsolationError(
+                f"label isolation violation: private/expected path "
+                f"fragment '{forbidden}' would reach the agent CLI"
+            )
+    # Any evals/ path containing private/ or expected/ (kept for a
+    # path-scoped error message; the substring check above is the
+    # authoritative, whitespace-tolerant enforcement).
     for m in re.finditer(r"evals/[^\s'\"]*", blob):
         path = m.group(0)
         if "private/" in path or "/expected" in path or path.endswith("expected"):
