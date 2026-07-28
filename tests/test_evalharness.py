@@ -20,6 +20,7 @@ Run: PYTHONPATH=lib pytest tests/test_evalharness.py -v
 
 from __future__ import annotations
 
+import contextlib
 import json
 import sys
 from pathlib import Path
@@ -95,10 +96,8 @@ def _materialize_private_labels():
         yield
     finally:
         if created:
-            try:
+            with contextlib.suppress(OSError):
                 labels_path.unlink()
-            except OSError:
-                pass
 
 
 def _good_verdict(case_id: str = "discovery-authz-horizontal-001") -> dict:
