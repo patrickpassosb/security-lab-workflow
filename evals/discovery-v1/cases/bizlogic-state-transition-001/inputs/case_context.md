@@ -5,7 +5,7 @@
 You are a security researcher reviewing captured HTTP evidence for an
 e-commerce checkout workflow. The intended state machine is:
 
-```
+```text
 cart -> address_selected -> payment_selected -> confirmed
 ```
 

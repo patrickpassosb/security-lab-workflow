@@ -384,33 +384,43 @@ def check_label_isolation(invocation: AgentInvocation) -> None:
         ``lib/canary.py`` (evaluator source);
       - ``labels.json`` anywhere (the private label file name).
     """
-    # Collect every string the agent could see: argv + env values.
-    surfaces: list[str] = list(invocation.argv)
-    for v in invocation.env.values():
-        surfaces.append(v)
-    surfaces.append(str(invocation.cwd))
-    surfaces.append(str(invocation.verdict_output_path))
-    blob = "\n".join(surfaces)
+    # Collect the strings the agent could see. argv, cwd, and the
+    # verdict path are harness-controlled — the adapter puts them there.
+    # Env values are inherited from os.environ, so a substring like
+    # ``private/`` can appear incidentally (e.g. PWD=/home/user/private/...)
+    # and must NOT trigger a false positive. We therefore scan env
+    # values only for evaluator source files and ``labels.json`` (exact
+    # fragments the adapter never puts in env), and scan argv/cwd/verdict
+    # for the broader ``private/``/``expected/`` substring fragments.
+    argv_surfaces: list[str] = list(invocation.argv)
+    argv_surfaces.append(str(invocation.cwd))
+    argv_surfaces.append(str(invocation.verdict_output_path))
+    argv_blob = "\n".join(argv_surfaces)
 
-    # Evaluator source files (exact fragment).
+    env_surfaces: list[str] = list(invocation.env.values())
+    env_blob = "\n".join(env_surfaces)
+
+    # Evaluator source files (exact fragment) — scan both blobs.
     for forbidden in LABEL_ISOLATION_EVALUATOR_FILES:
-        if forbidden in blob:
+        if forbidden in argv_blob or forbidden in env_blob:
             raise LabelIsolationError(
                 f"label isolation violation: evaluator source '{forbidden}' "
                 f"would reach the agent CLI"
             )
-    # labels.json anywhere.
-    if "labels.json" in blob:
+    # labels.json anywhere — scan both blobs.
+    if "labels.json" in argv_blob or "labels.json" in env_blob:
         raise LabelIsolationError(
             "label isolation violation: 'labels.json' (private labels) "
             "would reach the agent CLI"
         )
-    # Label directories as standalone substrings across the whole blob.
+    # Label directories as standalone substrings — scan ONLY argv/cwd/verdict
+    # (harness-controlled surfaces), NOT env values (which are inherited and
+    # may contain ``private/`` or ``expected/`` incidentally, e.g. in PWD).
     # This closes the whitespace bypass of the ``evals/``-anchored scan
     # below: a path like ``evals/suite one/cases/x/private/`` stops the
     # regex at the space, but ``private/`` is still caught here.
     for forbidden in LABEL_ISOLATION_SUBSTRING_FRAGMENTS:
-        if forbidden in blob:
+        if forbidden in argv_blob:
             raise LabelIsolationError(
                 f"label isolation violation: private/expected path "
                 f"fragment '{forbidden}' would reach the agent CLI"
@@ -418,7 +428,7 @@ def check_label_isolation(invocation: AgentInvocation) -> None:
     # Any evals/ path containing private/ or expected/ (kept for a
     # path-scoped error message; the substring check above is the
     # authoritative, whitespace-tolerant enforcement).
-    for m in re.finditer(r"evals/[^\s'\"]*", blob):
+    for m in re.finditer(r"evals/[^\s'\"]*", argv_blob):
         path = m.group(0)
         if "private/" in path or "/expected" in path or path.endswith("expected"):
             raise LabelIsolationError(
@@ -898,10 +908,13 @@ def run_suite(
                 json.dumps(result.verdict, indent=2, sort_keys=True) + "\n",
                 encoding="utf-8",
             )
-        # Flag budget exhaustion at the run level.
+        # Flag budget exhaustion at the per-case level. The overrun is
+        # recorded on the case's own budget_used so score_case hard-fails
+        # only that case. The run-level safety_violation flag is reserved
+        # for run-wide circuit breakers (wall time), NOT per-case overruns.
         reason = _budget_exhausted(result.budget_used, budget_limit)
         if reason:
-            result.budget_used["safety_violation"] = False
+            result.budget_used["budget_exhausted"] = reason
             budget_exhausted = True
             if not quiet:
                 print(f"[harness] {obj.case_id}: BUDGET EXHAUSTED — {reason}", file=sys.stderr)
@@ -916,7 +929,8 @@ def run_suite(
         "actual_usd": run_usd,
         "actual_wall_seconds": run_wall,
         "actual_tool_calls": run_calls,
-        "safety_violation": budget_exhausted,
+        "safety_violation": False,
+        "budget_exhausted": budget_exhausted,
     }
     from datetime import UTC, datetime
 

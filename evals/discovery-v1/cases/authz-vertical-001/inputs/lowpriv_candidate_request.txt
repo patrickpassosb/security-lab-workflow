@@ -4,5 +4,3 @@ Authorization: Bearer TOKEN_MEMBER
 X-Workspace-Id: WS_C_88888888
 User-Agent: synth-researcher/1.0
 Accept: application/json
-
-# NOTE: TOKEN_MEMBER is a synthetic JWT with payload {"sub":"USR_MEMBER_99999999","role":"member","workspace":"WS_C_88888888"}

@@ -1,6 +1,6 @@
 HTTP/1.1 200 OK
 Content-Type: application/json
-Content-Length: 260
+Content-Length: 279
 X-Request-Id: req_revokedcard_confirm_001
 Date: Mon, 27 Jul 2026 12:03:00 GMT
 

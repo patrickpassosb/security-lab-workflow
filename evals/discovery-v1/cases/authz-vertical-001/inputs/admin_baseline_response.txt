@@ -1,6 +1,6 @@
 HTTP/1.1 200 OK
 Content-Type: application/json
-Content-Length: 420
+Content-Length: 302
 X-Request-Id: req_admin_baseline_001
 Date: Mon, 27 Jul 2026 11:00:00 GMT
 

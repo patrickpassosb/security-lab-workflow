@@ -1,6 +1,6 @@
 HTTP/1.1 200 OK
 Content-Type: application/json
-Content-Length: 312
+Content-Length: 268
 X-Request-Id: req_candidate_001
 Date: Mon, 27 Jul 2026 10:01:00 GMT
 

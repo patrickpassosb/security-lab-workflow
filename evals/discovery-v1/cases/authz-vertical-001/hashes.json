@@ -1,10 +1,10 @@
 {
   "inputs/admin_baseline_request.txt": "c815d09c44acae48cebd46c5dcfb3f33dd550501070ce4d4cf592ebbed8a0f36",
-  "inputs/admin_baseline_response.txt": "dc15358a62a12be86a90e20d6d9212109f42c54ef8e3c7f85208a2a1c7f2b7bf",
+  "inputs/admin_baseline_response.txt": "be9b44c70f7724042fe5bf6d421c3af80511e0792c47a2c574048a8a5a942024",
   "inputs/case_context.md": "39743b3dff834920fbe3fc973135ee73f6bc745cf9d8904cb13f4660e96ae4df",
-  "inputs/lowpriv_candidate_request.txt": "399b6733007aa4744f673bedde321a22c6028daf8ca725408c1089458adad6a4",
-  "inputs/lowpriv_candidate_response.txt": "1f046d39621b6282231dec8fe1774461a4cbe31074b78a656cf3b114cc3eaba9",
+  "inputs/lowpriv_candidate_request.txt": "8875aa90c2967fa71b6c2868bcbd258737db9ccadc932ca639b5d7df7bc82be6",
+  "inputs/lowpriv_candidate_response.txt": "8fb026b75f32f0a1132307537081a5151bae71855321fbda5717869ffdf5580d",
   "inputs/notoken_control_request.txt": "5f380ed2f88abedd2b8bff3d5ca477e6d02d2d92c2916f9a30f2bc567f43a2c2",
-  "inputs/notoken_control_response.txt": "cbaf2a175b24e43a5d0df67643210b81624b65be1a8819859c5dc3dbf428bc24",
+  "inputs/notoken_control_response.txt": "8d96ff5c333c49c2e85fb2b2505ce91efcbd9b9bde6fa24800e6b991f16ab34e",
   "inputs/scope_snapshot.yaml": "6700a4ca416b7608a8bcf7d84450e0161f170b9eb00f2dabd46b45a064bcd793"
 }

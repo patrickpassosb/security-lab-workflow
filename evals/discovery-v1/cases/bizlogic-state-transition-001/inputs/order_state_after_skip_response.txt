@@ -1,6 +1,6 @@
 HTTP/1.1 200 OK
 Content-Type: application/json
-Content-Length: 210
+Content-Length: 207
 X-Request-Id: req_order_state_after_skip_001
 Date: Mon, 27 Jul 2026 12:01:30 GMT
 

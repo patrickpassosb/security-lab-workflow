@@ -167,7 +167,10 @@ def _parse_one_budget_flag(argv: list[str], i: int, opts: dict[str, Any]) -> int
             print(f"--budget-usd expects a number, got {a!r}", file=sys.stderr)
             return -1
         return i + 1
-    return i  # not a budget flag; leave it for the outer loop
+    # Reached only when a bare budget flag has no value (the caller
+    # already confirmed it is a budget flag via _is_budget_flag).
+    print(f"{a} expects a value", file=sys.stderr)
+    return -1
 
 
 def _parse_common_flag(argv: list[str], i: int, opts: dict[str, Any]) -> int:
@@ -376,17 +379,24 @@ def _cmd_run(opts: dict[str, Any]) -> int:
         print("[harness] label isolation: agent sees only inputs/+skill+objective; "
               "private labels read only in score step", file=sys.stderr)
 
-    run = EH.run_suite(
-        suite_dir=suite_dir,
-        skill_path=skill_path,
-        adapter=adapter,
-        budget_limit=budget_limit,
-        split=opts["split"],
-        out_dir=out_dir,
-        run_id=run_id,
-        started_at=started_at,
-        quiet=opts["quiet"],
-    )
+    try:
+        run = EH.run_suite(
+            suite_dir=suite_dir,
+            skill_path=skill_path,
+            adapter=adapter,
+            budget_limit=budget_limit,
+            split=opts["split"],
+            out_dir=out_dir,
+            run_id=run_id,
+            started_at=started_at,
+            quiet=opts["quiet"],
+        )
+    except EH.LabelIsolationError as e:
+        print(f"ISOLATION VIOLATION: {e}", file=sys.stderr)
+        return 3
+    except FileNotFoundError as e:
+        print(f"agent runtime unavailable: {e}", file=sys.stderr)
+        return 4
 
     envelope = EH.run_envelope_to_jsonable(run)
     labutil.atomic_write(out, json.dumps(envelope, indent=2, sort_keys=True) + "\n")

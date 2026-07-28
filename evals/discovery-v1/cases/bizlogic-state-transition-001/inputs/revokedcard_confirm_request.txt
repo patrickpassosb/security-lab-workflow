@@ -2,11 +2,8 @@ POST /api/v1/orders/ORD_002/confirm HTTP/1.1
 Host: shop.synth-test.example
 Authorization: Bearer TOKEN_BUYER
 Content-Type: application/json
+Content-Length: 2
 User-Agent: synth-researcher/1.0
 Accept: application/json
 
 {}
-
-# NOTE: confirm is called while state=payment_selected (correct state),
-# but the selected payment method SYNTHCARD_REVOKED_9999 is revoked.
-# The intended invariant is that confirm re-checks payment validity.
