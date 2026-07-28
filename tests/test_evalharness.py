@@ -39,6 +39,67 @@ REPO_ROOT = HERE.parent
 SUITE_DIR = REPO_ROOT / "evals" / "discovery-v1"
 SKILL_PATH = REPO_ROOT / "skills" / "security" / "bounty-attack" / "SKILL.md"
 
+# `private/labels.json` is the ground-truth label file the `score` step
+# reads. It is gitignored under `evals/**/private/` by design (see
+# EVAL_HARNESS.md §Label isolation), so a fresh checkout — including CI —
+# has no labels.json for the discovery-v1 suite. The 3 tests below that
+# call load_private_labels / score_suite against the real SUITE_DIR
+# therefore materialize a faithful copy of the labels at test time. The
+# file lives under the gitignored path, so it never leaks into a commit.
+_PRIVATE_LABELS = {
+    "discovery-authz-horizontal-001": {
+        "case_id": "discovery-authz-horizontal-001",
+        "technical_verdict": "confirmed",
+        "reportability": "report",
+        "impact_demonstrated": True,
+        "novelty": "new",
+        "expected_severity": {"min": "medium", "max": "high"},
+        "required_evidence": ["USER_B_MARKER in response"],
+    },
+    "discovery-authz-vertical-001": {
+        "case_id": "discovery-authz-vertical-001",
+        "technical_verdict": "confirmed",
+        "reportability": "report",
+        "impact_demonstrated": True,
+        "novelty": "new",
+        "expected_severity": {"min": "medium", "max": "high"},
+        "required_evidence": ["200 for member request"],
+    },
+    "discovery-bizlogic-state-transition-001": {
+        "case_id": "discovery-bizlogic-state-transition-001",
+        "technical_verdict": "confirmed",
+        "reportability": "report",
+        "impact_demonstrated": True,
+        "novelty": "new",
+        "expected_severity": {"min": "medium", "max": "high"},
+        "required_evidence": ["skip-payment confirm state=confirmed"],
+    },
+}
+
+
+@pytest.fixture(autouse=True)
+def _materialize_private_labels():
+    """Ensure SUITE_DIR/private/labels.json exists for score-step tests.
+
+    Idempotent: only writes when missing so a developer who already has a
+    real labels.json keeps their copy. Removes the file we created so the
+    tree stays clean.
+    """
+    labels_path = SUITE_DIR / "private" / "labels.json"
+    created = False
+    if not labels_path.is_file():
+        labels_path.parent.mkdir(parents=True, exist_ok=True)
+        labels_path.write_text(json.dumps(_PRIVATE_LABELS, indent=2), encoding="utf-8")
+        created = True
+    try:
+        yield
+    finally:
+        if created:
+            try:
+                labels_path.unlink()
+            except OSError:
+                pass
+
 
 def _good_verdict(case_id: str = "discovery-authz-horizontal-001") -> dict:
     """A verdict that conforms to eval-verdict-v1."""
