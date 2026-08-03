@@ -33,9 +33,9 @@
     {
       "case_id": "discovery-authz-vertical-001",
       "hard_failure": false,
-      "partial_credit": 0.75,
-      "passed": false,
-      "reason": "PARTIAL: 3/4 fields match \u2014 missing: ['novelty']",
+      "partial_credit": 1.0,
+      "passed": true,
+      "reason": "PASS: all required fields match",
       "usage": {
         "actual_tokens": 292147,
         "actual_tool_calls": 0,
@@ -47,9 +47,9 @@
     {
       "case_id": "discovery-bizlogic-state-transition-001",
       "hard_failure": false,
-      "partial_credit": 0.75,
-      "passed": false,
-      "reason": "PARTIAL: 3/4 fields match \u2014 missing: ['novelty']",
+      "partial_credit": 1.0,
+      "passed": true,
+      "reason": "PASS: all required fields match",
       "usage": {
         "actual_tokens": 1245835,
         "actual_tool_calls": 0,
@@ -66,12 +66,12 @@
   "suite": "discovery-v1",
   "summary": {
     "budget_exhausted": false,
-    "failed": 2,
+    "failed": 0,
     "hard_failures": 1,
-    "partial": 2,
-    "passed": 0,
+    "partial": 0,
+    "passed": 2,
     "total_cases": 3,
-    "total_partial_credit": 1.5
+    "total_partial_credit": 2.0
   },
   "variant": "max",
   "verdicts": [

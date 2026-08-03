@@ -196,7 +196,7 @@ def _stub_verdict(case_meta: dict[str, Any], expected: dict[str, Any]) -> dict[s
         "technical_verdict": "inconclusive",
         "reportability": "gather_more_evidence",
         "impact_demonstrated": False,
-        "novelty": 0.5,
+        "novelty": "unknown",
     }
 
 
