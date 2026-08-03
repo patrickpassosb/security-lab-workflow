@@ -1,0 +1,6 @@
+GET /api/v1/admin/users HTTP/1.1
+Host: app.synth-test.example
+Authorization: Bearer TOKEN_ADMIN
+X-Workspace-Id: WS_C_88888888
+User-Agent: synth-researcher/1.0
+Accept: application/json

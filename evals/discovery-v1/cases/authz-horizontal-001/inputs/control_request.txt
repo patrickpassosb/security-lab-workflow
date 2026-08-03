@@ -1,0 +1,6 @@
+GET /api/v1/workspaces/WS_B_44444444/documents/DOC_NONEXIST_00000000 HTTP/1.1
+Host: app.synth-test.example
+Authorization: Bearer TOKEN_USER_A
+X-Workspace-Id: WS_B_44444444
+User-Agent: synth-researcher/1.0
+Accept: application/json

@@ -25,6 +25,13 @@ engagements/bounty-*.yaml
 # remains committable (split formalized in SI-002).
 evals/**/private/
 evals/**/expected/
+# Eval run artifacts (transient: verdicts, agent logs, run envelopes).
+# The cases themselves (case.yaml, inputs/, hashes.json) are committable.
+# Curated measured baselines (incumbent-*.json) are committed on purpose
+# and must remain addable, so only transient run/score outputs are ignored.
+evals/**/results/run-*
+evals/**/results/*-verdicts/
+evals/**/results/scored.json
 improvement/state/
 improvement/runs/
 improvement/candidates/

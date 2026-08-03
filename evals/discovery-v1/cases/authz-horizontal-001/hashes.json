@@ -1,0 +1,10 @@
+{
+  "inputs/baseline_request.txt": "86fbf07279a8abc0809e66cccbaaf71cb1691fd8bbf76a13b8aebe4f42b731c6",
+  "inputs/baseline_response.txt": "cff578d0428899076e43884d51b486ba139be8c4305a7db7596c8bbe55d0ea8e",
+  "inputs/candidate_request.txt": "df6e32c83fb8db804bd3dcc43e9aa7ad19edc44c557535e713bfde8f75fdc6af",
+  "inputs/candidate_response.txt": "d170fe1d9e2ee0dca2b1808b2672587f74eecf4c82840435bf1fb913f1229ee0",
+  "inputs/case_context.md": "f01b602931edaaed87f005a5c1c89746457b0c67542ad6c174811d2545316503",
+  "inputs/control_request.txt": "4329bfaeb85a271dab554ddfc12c50ae6629f68df62ecb0f82071822091f0323",
+  "inputs/control_response.txt": "862a9ded0f605cb98d5dda3b1ef7cdac8ac8287295664f1704a93c95fce66f2c",
+  "inputs/scope_snapshot.yaml": "6700a4ca416b7608a8bcf7d84450e0161f170b9eb00f2dabd46b45a064bcd793"
+}

@@ -1,0 +1,9 @@
+POST /api/v1/orders/ORD_001/select_address HTTP/1.1
+Host: shop.synth-test.example
+Authorization: Bearer TOKEN_BUYER
+Content-Type: application/json
+Content-Length: 37
+User-Agent: synth-researcher/1.0
+Accept: application/json
+
+{"address_id": "ADDR_BUYER_00000001"}

@@ -1,0 +1,14 @@
+{
+  "inputs/case_context.md": "83e625d5640cf23981e604c61230c6764fa6106ba9d0103b483a42bdaef0df62",
+  "inputs/order_state_after_skip_request.txt": "c2c91f21bbaadb5680c2cc05a53828a29e29106bb04d1b1768a5976ea83ab5b3",
+  "inputs/order_state_after_skip_response.txt": "098d7541c61a2e8c006533f388227cc1225ea04f821983134870f29fa95e0c45",
+  "inputs/revokedcard_confirm_request.txt": "ad388220dac393ab29cd2de3383226960d0886b0014d11b82067d31c4be7e306",
+  "inputs/revokedcard_confirm_response.txt": "2d94f65fa4133f1d7e8cb6dbf8f1dc89ea6c77237e1cd7578f6fcb022855ba44",
+  "inputs/scope_snapshot.yaml": "3530bd9aeed9a14ddb64e9f318b3fb040776ae181e0d0a118fc7e385f3e2a600",
+  "inputs/skip_payment_confirm_request.txt": "7115a93163f80f48710fcadc800470f05be6ecd6a8445f07c934a6923e38b650",
+  "inputs/skip_payment_confirm_response.txt": "b80ade56789993aecf069a507ad9ec07793ee9edd223349af7b288b36996609b",
+  "inputs/step1_address_request.txt": "5d6cb3b9a276b322e652e65e69f9ad7c073fca8324711f64a30c3b7eda4e5f68",
+  "inputs/step1_address_response.txt": "6d8f7c7a060279185ea20c24af56165f12181e6f75c0336fe352ba659363ae38",
+  "inputs/step2_revokedcard_select_request.txt": "200f906850dcfbf172b9f487db36a794c935efc1d60e856ed53c72a507966dbb",
+  "inputs/step2_revokedcard_select_response.txt": "276107dc60790902e94e86d2966f37a6671fbf364030bad3480e293a9b095b7c"
+}

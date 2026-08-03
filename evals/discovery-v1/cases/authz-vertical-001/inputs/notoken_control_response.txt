@@ -1,0 +1,10 @@
+HTTP/1.1 401 Unauthorized
+Content-Type: application/json
+Content-Length: 69
+X-Request-Id: req_notoken_control_001
+Date: Mon, 27 Jul 2026 11:02:00 GMT
+
+{
+  "error": "unauthorized",
+  "message": "authentication required"
+}

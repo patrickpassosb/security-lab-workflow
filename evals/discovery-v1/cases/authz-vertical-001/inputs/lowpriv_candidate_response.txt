@@ -1,0 +1,13 @@
+HTTP/1.1 200 OK
+Content-Type: application/json
+Content-Length: 302
+X-Request-Id: req_lowpriv_candidate_001
+Date: Mon, 27 Jul 2026 11:01:00 GMT
+
+{
+  "users": [
+    {"user_id": "USR_ADMIN_77777777", "role": "admin", "email": "admin@synth-test.example"},
+    {"user_id": "USR_MEMBER_99999999", "role": "member", "email": "member@synth-test.example"},
+    {"user_id": "USR_OTHER_12345678", "role": "member", "email": "other@synth-test.example"}
+  ]
+}

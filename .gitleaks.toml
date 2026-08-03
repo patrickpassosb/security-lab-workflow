@@ -45,6 +45,14 @@ paths = [
     '''docs/EXAMPLES\.md''',
     '''docs/MULTI_ENGAGEMENT\.md''',
     '''docs/DEPENDENCIES\.md''',
+    # Eval-suite hashes.json fixtures: maps of input filename -> SHA256 hash
+    # of committed synthetic input files. The 64-char hex values trip the
+    # generic-api-key rule (high entropy) when a key name contains "token"
+    # (e.g. inputs/notoken_control_request.txt). These are SHA256 digests of
+    # reviewed synthetic fixtures, never live secrets. Narrowed to the three
+    # committed discovery-v1 case directories so a future or accidentally
+    # committed secret in any other hashes.json is still caught.
+    '''^evals/discovery-v1/cases/(authz-horizontal-001|authz-vertical-001|bizlogic-state-transition-001)/hashes\.json$''',
 ]
 # Placeholder values in examples are fine
 regexes = [

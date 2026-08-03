@@ -1,0 +1,16 @@
+HTTP/1.1 200 OK
+Content-Type: application/json
+Content-Length: 268
+X-Request-Id: req_candidate_001
+Date: Mon, 27 Jul 2026 10:01:00 GMT
+
+{
+  "document": {
+    "doc_id": "DOC_B_66666666",
+    "workspace_id": "WS_B_44444444",
+    "owner_user_id": "USR_B_33333333",
+    "title": "User B private draft",
+    "visibility": "private",
+    "body": "This is User B's private document content. USER_B_MARKER"
+  }
+}

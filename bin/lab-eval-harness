@@ -1,0 +1,576 @@
+#!/usr/bin/env python3
+"""lab-eval-harness — external CLI evaluation harness (SI-022 Phase 3b, Option B).
+
+Per the captain decision (Phase 0 report §6.2, Option B): drive a real
+agent CLI (opencode by default) against the synthetic eval cases,
+collect verdicts in the ``eval-verdict-v1`` shape, and feed them back
+through ``lib/scoring.py`` for the private-label comparison. The
+``lab-eval`` TCB (``lib/labeval.py``) stays a stub — this harness runs
+outside it.
+
+Label isolation is the harness's responsibility (no bwrap sandbox on
+the harness side). The harness NEVER passes ``evals/**/private/``,
+``evals/**/expected/``, ``lib/labeval.py``, ``lib/labimprove.py``,
+``lib/scoring.py``, or ``lib/canary.py`` to the agent CLI. The agent
+sees only: the case's ``inputs/`` dir, the skill file, and the case
+objective. The harness reads ``private/labels.json`` ONLY in the
+``score`` step (after the agent has finished). See
+``docs/EVAL_HARNESS.md`` for the full contract.
+
+Usage:
+    lab-eval-harness run --suite <dir> --skill <path> --agent <name>
+                         --model <provider/model> [--variant <variant>]
+                         [--split <split>] [--budget <seconds>]
+                         [--max-tokens <n>] [--max-tool-calls <n>]
+                         [--budget-usd <usd>] [--out <path>] [--quiet]
+
+    lab-eval-harness score --suite <dir> --verdicts-dir <path>
+                          [--out <path>] [--quiet]
+                          [--run-envelope <path>]  # the run's JSON envelope
+
+    lab-eval-harness validate --suite <dir>   # reuses lab-eval --validate
+
+Subcommands:
+    run       Drive the agent CLI over each case in the suite, collect
+              verdicts, write a run envelope JSON to --out.
+    score     Read the verdicts dir + private/labels.json, run
+              lib/scoring.py:score_run, write scored results to --out.
+    validate  Delegate to `lab-eval --suite <dir> --validate`.
+
+Budget options (run):
+    --budget <seconds>       wall-clock seconds per case (default: 300)
+    --max-tokens <n>         max tokens per case (default: 50000)
+    --max-tool-calls <n>     max tool calls per case (default: 30)
+    --budget-usd <usd>       max USD per case (default: 1.0)
+
+Agent options (run):
+    --agent <name>           adapter name: opencode (default; only one
+                             implemented — codex/claude/pi later)
+    --model <provider/model> model id, e.g. ollama-cloud/glm-5.2
+    --variant <variant>      reasoning variant, e.g. max (default: max)
+
+Other options:
+    --split <name>           run only cases with this split field
+                             (train|val|holdout|all; default: all)
+    --out <path>             write JSON output to this file
+    --quiet                  suppress human-readable summary on stderr
+
+Label isolation contract:
+    The agent CLI receives ONLY:
+      - the case's inputs/ directory (read-only intent),
+      - the skill file (read-only),
+      - the case objective (from case.yaml),
+      - the verdict output path.
+    The harness NEVER passes:
+      - evals/**/private/ (labels.json),
+      - evals/**/expected/,
+      - lib/labeval.py, lib/labimprove.py, lib/scoring.py, lib/canary.py.
+    The harness reads private/labels.json ONLY in the score step.
+    See docs/EVAL_HARNESS.md.
+
+Exit codes:
+    0 = run/score completed (check the JSON for pass/fail counts)
+    1 = bad arguments / missing files
+    2 = suite structurally invalid (use `validate` to debug)
+    3 = isolation violation (a forbidden path would reach the agent)
+    4 = agent runtime unavailable (e.g. opencode not found)
+"""
+
+from __future__ import annotations
+
+import json
+import sys
+import uuid
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import Any
+
+# Make lib/ importable (same pattern as bin/lab-eval).
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib"))
+
+import evalharness as EH  # noqa: E402
+import labutil  # noqa: E402
+
+
+def _print_help() -> None:
+    print(__doc__)
+
+
+def _is_budget_flag(a: str) -> bool:
+    """True if ``a`` is a budget flag (space or = form)."""
+    return a in ("--budget", "--max-tokens", "--max-tool-calls", "--budget-usd") or \
+           a.startswith(("--budget=", "--max-tokens=", "--max-tool-calls=", "--budget-usd="))
+
+
+def _parse_one_budget_flag(argv: list[str], i: int, opts: dict[str, Any]) -> int:
+    """Parse one budget flag at argv[i]. Returns new i, or -1 on error.
+
+    Only consumes a single flag (space-pair or = form); does NOT scan
+    ahead. The caller loops, stopping at the first non-budget flag so
+    that ``--out`` etc. after the budget flags are still parsed by the
+    outer loop.
+    """
+    a = argv[i]
+    if a == "--budget" and i + 1 < len(argv):
+        try:
+            opts["budget_seconds"] = int(argv[i + 1])
+        except ValueError:
+            print(f"--budget expects an integer (seconds), got {argv[i + 1]!r}", file=sys.stderr)
+            return -1
+        return i + 2
+    if a.startswith("--budget="):
+        try:
+            opts["budget_seconds"] = int(a.split("=", 1)[1])
+        except ValueError:
+            print(f"--budget expects an integer (seconds), got {a!r}", file=sys.stderr)
+            return -1
+        return i + 1
+    if a == "--max-tokens" and i + 1 < len(argv):
+        try:
+            opts["max_tokens"] = int(argv[i + 1])
+        except ValueError:
+            print(f"--max-tokens expects an integer, got {argv[i + 1]!r}", file=sys.stderr)
+            return -1
+        return i + 2
+    if a.startswith("--max-tokens="):
+        try:
+            opts["max_tokens"] = int(a.split("=", 1)[1])
+        except ValueError:
+            print(f"--max-tokens expects an integer, got {a!r}", file=sys.stderr)
+            return -1
+        return i + 1
+    if a == "--max-tool-calls" and i + 1 < len(argv):
+        try:
+            opts["max_tool_calls"] = int(argv[i + 1])
+        except ValueError:
+            print(f"--max-tool-calls expects an integer, got {argv[i + 1]!r}", file=sys.stderr)
+            return -1
+        return i + 2
+    if a.startswith("--max-tool-calls="):
+        try:
+            opts["max_tool_calls"] = int(a.split("=", 1)[1])
+        except ValueError:
+            print(f"--max-tool-calls expects an integer, got {a!r}", file=sys.stderr)
+            return -1
+        return i + 1
+    if a == "--budget-usd" and i + 1 < len(argv):
+        try:
+            opts["budget_usd"] = float(argv[i + 1])
+        except ValueError:
+            print(f"--budget-usd expects a number, got {argv[i + 1]!r}", file=sys.stderr)
+            return -1
+        return i + 2
+    if a.startswith("--budget-usd="):
+        try:
+            opts["budget_usd"] = float(a.split("=", 1)[1])
+        except ValueError:
+            print(f"--budget-usd expects a number, got {a!r}", file=sys.stderr)
+            return -1
+        return i + 1
+    # Reached only when a bare budget flag has no value (the caller
+    # already confirmed it is a budget flag via _is_budget_flag).
+    print(f"{a} expects a value", file=sys.stderr)
+    return -1
+
+
+def _parse_common_flag(argv: list[str], i: int, opts: dict[str, Any]) -> int:
+    """Parse one common flag at argv[i]. Returns new i, or -1 on unknown."""
+    a = argv[i]
+    if a == "--suite" and i + 1 < len(argv):
+        opts["suite"] = argv[i + 1]
+        return i + 2
+    if a.startswith("--suite="):
+        opts["suite"] = a.split("=", 1)[1]
+        return i + 1
+    if a == "--out" and i + 1 < len(argv):
+        opts["out"] = argv[i + 1]
+        return i + 2
+    if a.startswith("--out="):
+        opts["out"] = a.split("=", 1)[1]
+        return i + 1
+    if a in ("-q", "--quiet"):
+        opts["quiet"] = True
+        return i + 1
+    if a in ("-h", "--help"):
+        _print_help()
+        sys.exit(0)
+    print(f"unknown flag: {a!r}", file=sys.stderr)
+    return -1
+
+
+def _parse_run_args(argv: list[str]) -> dict[str, Any]:
+    opts: dict[str, Any] = {
+        "suite": "",
+        "skill": "",
+        "agent": "opencode",
+        "model": "",
+        "variant": "max",
+        "split": "all",
+        "budget_seconds": 300,
+        "max_tokens": 50_000,
+        "max_tool_calls": 30,
+        "budget_usd": 1.0,
+        "out": "",
+        "quiet": False,
+    }
+    i = 0
+    while i < len(argv):
+        a = argv[i]
+        if a == "--skill" and i + 1 < len(argv):
+            opts["skill"] = argv[i + 1]
+            i += 2
+            continue
+        if a.startswith("--skill="):
+            opts["skill"] = a.split("=", 1)[1]
+            i += 1
+            continue
+        if a == "--agent" and i + 1 < len(argv):
+            opts["agent"] = argv[i + 1]
+            i += 2
+            continue
+        if a.startswith("--agent="):
+            opts["agent"] = a.split("=", 1)[1]
+            i += 1
+            continue
+        if a == "--model" and i + 1 < len(argv):
+            opts["model"] = argv[i + 1]
+            i += 2
+            continue
+        if a.startswith("--model="):
+            opts["model"] = a.split("=", 1)[1]
+            i += 1
+            continue
+        if a == "--variant" and i + 1 < len(argv):
+            opts["variant"] = argv[i + 1]
+            i += 2
+            continue
+        if a.startswith("--variant="):
+            opts["variant"] = a.split("=", 1)[1]
+            i += 1
+            continue
+        if a == "--split" and i + 1 < len(argv):
+            opts["split"] = argv[i + 1]
+            i += 2
+            continue
+        if a.startswith("--split="):
+            opts["split"] = a.split("=", 1)[1]
+            i += 1
+            continue
+        # Budget flags — parse one at a time so --out after budget
+        # flags is still reached by the outer loop.
+        if _is_budget_flag(a):
+            ni = _parse_one_budget_flag(argv, i, opts)
+            if ni < 0:
+                sys.exit(1)
+            i = ni
+            continue
+        # Common flags.
+        ni = _parse_common_flag(argv, i, opts)
+        if ni < 0:
+            sys.exit(1)
+        i = ni
+    return opts
+
+
+def _parse_score_args(argv: list[str]) -> dict[str, Any]:
+    opts: dict[str, Any] = {
+        "suite": "",
+        "verdicts_dir": "",
+        "run_envelope": "",
+        "out": "",
+        "quiet": False,
+        # budget_limit carried from the run envelope (if provided) so
+        # score_run uses the same immutable limits the run used.
+        "budget_limit": {},
+    }
+    i = 0
+    while i < len(argv):
+        a = argv[i]
+        if a == "--verdicts-dir" and i + 1 < len(argv):
+            opts["verdicts_dir"] = argv[i + 1]
+            i += 2
+            continue
+        if a.startswith("--verdicts-dir="):
+            opts["verdicts_dir"] = a.split("=", 1)[1]
+            i += 1
+            continue
+        if a == "--run-envelope" and i + 1 < len(argv):
+            opts["run_envelope"] = argv[i + 1]
+            i += 2
+            continue
+        if a.startswith("--run-envelope="):
+            opts["run_envelope"] = a.split("=", 1)[1]
+            i += 1
+            continue
+        ni = _parse_common_flag(argv, i, opts)
+        if ni < 0:
+            sys.exit(1)
+        i = ni
+    return opts
+
+
+def _validate_only(suite_dir: Path) -> int:
+    """Delegate to `lab-eval --suite <dir> --validate`.
+
+    Reuses the existing validator (no duplication). Exit 0 if valid, 2
+    if not.
+    """
+    import labeval as LE  # local import: TCB — only for validation
+    errors = LE.validate_suite(suite_dir)
+    if errors:
+        print(f"INVALID: suite {suite_dir} has {len(errors)} error(s):", file=sys.stderr)
+        for e in errors:
+            print(f"  - {e}", file=sys.stderr)
+        return 2
+    print(f"OK: suite {suite_dir} is structurally valid")
+    return 0
+
+
+def _build_adapter(opts: dict[str, Any]) -> EH.AgentAdapter:
+    """Build the agent adapter from --agent/--model/--variant."""
+    name = opts["agent"]
+    if name == "opencode":
+        if not opts["model"]:
+            print("--model is required for the opencode adapter "
+                  "(e.g. --model ollama-cloud/glm-5.2)", file=sys.stderr)
+            sys.exit(1)
+        return EH.OpencodeAdapter(model=opts["model"], variant=opts["variant"])
+    print(f"unknown adapter: {name!r} (only 'opencode' is implemented; "
+          f"codex/claude/pi are future adapters)", file=sys.stderr)
+    sys.exit(1)
+
+
+def _cmd_run(opts: dict[str, Any]) -> int:
+    suite_dir = Path(opts["suite"])
+    skill_path = Path(opts["skill"])
+    if not suite_dir.is_dir():
+        print(f"--suite dir not found: {suite_dir}", file=sys.stderr)
+        return 1
+    if not skill_path.is_file():
+        print(f"--skill file not found: {skill_path}", file=sys.stderr)
+        return 1
+
+    adapter = _build_adapter(opts)
+
+    # Validate the suite first (refuses to run on a structurally invalid suite).
+    import labeval as LE
+    errors = LE.validate_suite(suite_dir)
+    if errors:
+        print(f"INVALID: suite {suite_dir} has {len(errors)} error(s):", file=sys.stderr)
+        for e in errors:
+            print(f"  - {e}", file=sys.stderr)
+        return 2
+
+    budget_limit = {
+        "budget_usd": opts["budget_usd"],
+        "max_tokens": opts["max_tokens"],
+        "max_tool_calls": opts["max_tool_calls"],
+        "max_wall_seconds": opts["budget_seconds"],
+    }
+    run_id = str(uuid.uuid4())
+    started_at = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+    out = Path(opts["out"]) if opts["out"] else suite_dir / "results" / f"run-{run_id}.json"
+    out_dir = out.parent / f"run-{run_id}-verdicts"
+
+    if not opts["quiet"]:
+        print(f"[harness] run {run_id}: suite={suite_dir} agent={opts['agent']} "
+              f"model={opts['model']} variant={opts['variant']} split={opts['split']}",
+              file=sys.stderr)
+        print("[harness] label isolation: agent sees only inputs/+skill+objective; "
+              "private labels read only in score step", file=sys.stderr)
+
+    try:
+        run = EH.run_suite(
+            suite_dir=suite_dir,
+            skill_path=skill_path,
+            adapter=adapter,
+            budget_limit=budget_limit,
+            split=opts["split"],
+            out_dir=out_dir,
+            run_id=run_id,
+            started_at=started_at,
+            quiet=opts["quiet"],
+        )
+    except EH.LabelIsolationError as e:
+        print(f"ISOLATION VIOLATION: {e}", file=sys.stderr)
+        return 3
+    except FileNotFoundError as e:
+        print(f"agent runtime unavailable: {e}", file=sys.stderr)
+        return 4
+
+    envelope = EH.run_envelope_to_jsonable(run)
+    labutil.atomic_write(out, json.dumps(envelope, indent=2, sort_keys=True) + "\n")
+    if not opts["quiet"]:
+        n = len(run.results)
+        ok = sum(1 for r in run.results if r.verdict is not None)
+        bad = n - ok
+        print(f"[harness] run complete: {n} cases, {ok} valid verdicts, {bad} invalid/missing",
+              file=sys.stderr)
+        print(f"[harness] verdicts dir: {out_dir}", file=sys.stderr)
+        print(f"[harness] envelope: {out}", file=sys.stderr)
+    # Emit the envelope JSON to stdout for piping (unless --quiet keeps stdout clean).
+    if not opts["quiet"]:
+        print(json.dumps(envelope, sort_keys=True))
+    return 0
+
+
+def _cmd_score(opts: dict[str, Any]) -> int:
+    suite_dir = Path(opts["suite"])
+    verdicts_dir = Path(opts["verdicts_dir"])
+    if not suite_dir.is_dir():
+        print(f"--suite dir not found: {suite_dir}", file=sys.stderr)
+        return 1
+    if not verdicts_dir.is_dir():
+        print(f"--verdicts-dir not found: {verdicts_dir}", file=sys.stderr)
+        return 1
+
+    # Reconstruct the RunSummary from the run envelope (preferred) or
+    # synthesize a minimal one from the verdicts dir.
+    run_envelope_path = Path(opts["run_envelope"]) if opts["run_envelope"] else None
+    if run_envelope_path and run_envelope_path.is_file():
+        env = json.loads(run_envelope_path.read_text(encoding="utf-8"))  # noqa: S301
+        budget_limit = env.get("budget_limit", {})
+        results = [
+            EH.AgentResult(
+                case_id=r["case_id"],
+                completed=r.get("completed", False),
+                timed_out=r.get("timed_out", False),
+                killed=r.get("killed", False),
+                exit_code=r.get("exit_code", -1),
+                wall_seconds=r.get("wall_seconds", 0.0),
+                stdout="",
+                stderr="",
+                verdict=r.get("verdict"),
+                verdict_validation_error=r.get("verdict_validation_error", ""),
+                budget_used=r.get("budget_used", {}),
+            )
+            for r in env.get("results", [])
+        ]
+        run = EH.RunSummary(
+            run_id=env.get("run_id", "score-only"),
+            suite=env.get("suite", suite_dir.name),
+            agent=env.get("agent", "unknown"),
+            model=env.get("model", ""),
+            variant=env.get("variant", ""),
+            split=env.get("split", "all"),
+            started_at=env.get("started_at", ""),
+            ended_at=env.get("ended_at", ""),
+            budget_limit=budget_limit,
+            budget_used=env.get("budget_used", {}),
+            results=results,
+        )
+    else:
+        # Synthesize a minimal run from the verdicts dir (no envelope).
+        cases = EH.load_cases(suite_dir, split="all")
+        results: list[EH.AgentResult] = []
+        run_tokens = 0
+        run_usd = 0.0
+        run_wall = 0.0
+        for obj in cases:
+            vp = verdicts_dir / obj.case_id / "verdict.json"
+            verdict = None
+            verr = ""
+            if vp.is_file():
+                try:
+                    verdict = json.loads(vp.read_text(encoding="utf-8"))  # noqa: S301
+                except json.JSONDecodeError as e:
+                    verr = f"verdict.json not valid JSON: {e}"
+            if verdict is not None:
+                ok, msg = EH.validate_verdict(verdict)
+                if not ok:
+                    verr = msg
+                    verdict = None
+            results.append(
+                EH.AgentResult(
+                    case_id=obj.case_id,
+                    completed=verdict is not None,
+                    timed_out=False,
+                    killed=False,
+                    exit_code=0 if verdict is not None else -1,
+                    wall_seconds=0.0,
+                    stdout="",
+                    stderr="",
+                    verdict=verdict,
+                    verdict_validation_error=verr,
+                    budget_used={},
+                )
+            )
+        budget_limit = {}
+        run = EH.RunSummary(
+            run_id="score-only",
+            suite=suite_dir.name,
+            agent="unknown",
+            model="",
+            variant="",
+            split="all",
+            started_at="",
+            ended_at="",
+            budget_limit=budget_limit,
+            budget_used={
+                "actual_tokens": run_tokens,
+                "actual_usd": run_usd,
+                "actual_wall_seconds": run_wall,
+                "actual_tool_calls": 0,
+                "safety_violation": False,
+            },
+            results=results,
+        )
+
+    out = Path(opts["out"]) if opts["out"] else suite_dir / "results" / "scored.json"
+    scored = EH.score_suite(
+        suite_dir=suite_dir,
+        verdicts_dir=verdicts_dir,
+        run=run,
+        budget_limit=budget_limit,
+        out_path=out,
+        quiet=opts["quiet"],
+    )
+    if not opts["quiet"]:
+        print(json.dumps(scored.get("summary", {}), sort_keys=True))
+    return 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = list(argv if argv is not None else sys.argv[1:])
+    if not args or args[0] in ("-h", "--help"):
+        _print_help()
+        return 0
+    sub = args[0]
+    rest = args[1:]
+    if sub == "run":
+        opts = _parse_run_args(rest)
+        if not opts["suite"]:
+            print("--suite is required for run", file=sys.stderr)
+            return 1
+        if not opts["skill"]:
+            print("--skill is required for run", file=sys.stderr)
+            return 1
+        return _cmd_run(opts)
+    if sub == "score":
+        opts = _parse_score_args(rest)
+        if not opts["suite"]:
+            print("--suite is required for score", file=sys.stderr)
+            return 1
+        if not opts["verdicts_dir"]:
+            print("--verdicts-dir is required for score", file=sys.stderr)
+            return 1
+        return _cmd_score(opts)
+    if sub == "validate":
+        # validate only needs --suite
+        opts: dict[str, Any] = {"suite": ""}
+        i = 0
+        while i < len(rest):
+            ni = _parse_common_flag(rest, i, opts)
+            if ni < 0:
+                return 1
+            i = ni
+        if not opts["suite"]:
+            print("--suite is required for validate", file=sys.stderr)
+            return 1
+        return _validate_only(Path(opts["suite"]))
+    print(f"unknown subcommand: {sub!r} (expected run|score|validate)", file=sys.stderr)
+    return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())
