@@ -94,6 +94,7 @@ _CONTENT_QUALITY_FIELDS: tuple[str, ...] = (
 # — a value outside these sets is a mismatch, not a partial match).
 _VERDICTS = frozenset({"confirmed", "inconclusive", "not_vulnerable"})
 _REPORTABILITIES = frozenset({"report", "do_not_report", "gather_more_evidence"})
+_NOVELTIES = frozenset({"known_informative", "known_duplicate", "unknown", "new"})
 
 # Critical mismatches: if reportability says "report" but the expected
 # label says "do_not_report", the case is a FAIL regardless of other
@@ -239,15 +240,19 @@ def check_hard_failure(
 def _field_matches(field_name: str, got: Any, expected: Any) -> bool:
     """Compare a single required field.
 
-    - ``technical_verdict`` / ``reportability`` / ``novelty``: exact
-      string match (after coercion to str). Each is a schema-defined
-      enum string (``schemas/eval-verdict-v1.schema.json``); values
-      outside the valid enum are treated as mismatches. ``novelty`` is
-      *never* compared as a float — the schema defines it as an enum
-      string (``known_informative | known_duplicate | unknown | new``),
-      so the old float-cast branch caused correct ``"new"`` vs ``"new"``
-      verdicts to score as mismatches (``float("new")`` raises
-      ``ValueError``). Numeric tolerance is preserved only for
+    - ``technical_verdict`` / ``reportability``: exact string match
+      (after coercion to str). Each is a schema-defined enum string
+      (``schemas/eval-verdict-v1.schema.json``); values outside the
+      valid enum are treated as mismatches.
+    - ``novelty``: exact string match, but only for schema-valid enum
+      values. Both values must be strings in the four-value enum
+      (``known_informative | known_duplicate | unknown | new``) — a
+      non-string or out-of-enum value is a mismatch, never coerced
+      (``str(0.8) == "0.8"`` must not match). ``novelty`` is *never*
+      compared as a float — the schema defines it as an enum string,
+      so the old float-cast branch caused correct ``"new"`` vs
+      ``"new"`` verdicts to score as mismatches (``float("new")``
+      raises ``ValueError``). Numeric tolerance is preserved only for
       genuinely numeric scoring fields; the verdict-v1 schema has none.
       ``expected_severity`` (an object with ``min``/``max`` string
       enums) and ``required_evidence`` (an array of strings) are not
@@ -255,10 +260,14 @@ def _field_matches(field_name: str, got: Any, expected: Any) -> bool:
     - ``impact_demonstrated``: exact bool match.
     - Any other field: exact equality.
     """
-    if field_name in ("technical_verdict", "reportability", "novelty"):
+    if field_name in ("technical_verdict", "reportability"):
         g = str(got) if got is not None else ""
         e = str(expected) if expected is not None else ""
         return g == e
+    if field_name == "novelty":
+        if isinstance(got, str) and isinstance(expected, str):
+            return got in _NOVELTIES and got == expected
+        return False
     if field_name == "impact_demonstrated":
         # Coerce to bool strictly: 0/1, "true"/"false" strings are NOT
         # accepted — the verdict must carry an actual bool.

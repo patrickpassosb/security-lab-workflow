@@ -1,8 +1,8 @@
 # External CLI Evaluation Harness (EVAL_HARNESS)
 
 > **Status:** v0.1. Added by the `sl-eval-harness-v1` task (Phase 0
-> report §6.2, captain decision Option B). Purely additive — no change
-> to `lib/labeval.py`, `lib/labimprove.py`, `lib/canary.py`,
+> report §6.2, captain decision Option B). The harness itself makes no
+> change to `lib/labeval.py`, `lib/labimprove.py`, `lib/canary.py`,
 > `bin/lab-eval`, `bin/lab-improve`, `schemas/`, scope logic, or denied
 > lists.
 

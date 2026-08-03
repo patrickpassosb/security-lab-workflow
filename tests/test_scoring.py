@@ -311,14 +311,11 @@ class TestNoveltyEnumRegression:
 
     def test_novelty_never_float_cast_match(self):
         # A float "got" against a float "expected" must not be treated
-        # as a numeric tolerance match. The schema lists novelty as a
-        # string enum, so "0.8" != "0.8" the float is not a valid
-        # novelty value; coercion to str yields "0.8" == "0.8" which
-        # happens to match, but this is a backward-compat artifact,
-        # not the schema contract. The contract is enum strings.
+        # as a numeric tolerance match — and since the fix, equal
+        # invalid floats are not a string-coercion match either (both
+        # sides must be schema-valid enum strings).
         # Pin: a float-vs-float pair that the OLD float-tolerance would
-        # have accepted (0.85 within ±0.1 of 0.8) is now a STRING
-        # comparison: "0.85" != "0.8" → mismatch. This is intentional.
+        # have accepted (0.85 within ±0.1 of 0.8) is a mismatch.
         assert S._field_matches("novelty", 0.85, 0.8) is False
 
     def test_novelty_string_vs_float_is_mismatch(self):
@@ -332,6 +329,28 @@ class TestNoveltyEnumRegression:
         # Missing novelty (None) must not match a real enum value.
         assert S._field_matches("novelty", None, "new") is False
         assert S._field_matches("novelty", "new", None) is False
+
+    def test_novelty_equal_invalid_numeric_never_matches(self):
+        # Two EQUAL invalid numeric values must still be a mismatch: the
+        # old str-coercion branch turned 0.8 vs 0.8 into "0.8" == "0.8"
+        # and reported a match, even though 0.8 is not a schema enum
+        # value. Novelty must require both sides to be schema-valid
+        # strings — no coercion, no tolerance.
+        assert S._field_matches("novelty", 0.8, 0.8) is False
+        assert S._field_matches("novelty", 1.0, 1.0) is False
+        assert S._field_matches("novelty", 0, 0) is False
+
+    def test_novelty_equal_invalid_string_never_matches(self):
+        # Two EQUAL invalid string values (outside the four-value enum)
+        # must also be a mismatch — "0.8" is not a schema novelty value
+        # even though both sides coerce to the same string.
+        assert S._field_matches("novelty", "0.8", "0.8") is False
+        assert S._field_matches("novelty", "nope", "nope") is False
+        assert S._field_matches("novelty", "", "") is False
+
+    def test_novelty_equal_invalid_bool_never_matches(self):
+        # Equal bools are not schema novelty values either.
+        assert S._field_matches("novelty", True, True) is False
 
     def test_novelty_enum_match_yields_full_pass(
         self, expected_label, budget_used_ok, budget_limit
@@ -372,7 +391,7 @@ class TestScoreCaseFailCritical:
             "technical_verdict": "confirmed",
             "reportability": "do_not_report",
             "impact_demonstrated": True,
-            "novelty": 0.8,
+            "novelty": "new",
         }
         score = S.score_case(
             verdict_critical_mismatch, expected, budget_used_ok, budget_limit
@@ -392,14 +411,14 @@ class TestScoreCaseFailCritical:
             "technical_verdict": "confirmed",
             "reportability": "report",  # critical: expected do_not_report
             "impact_demonstrated": True,
-            "novelty": 0.8,
+            "novelty": "new",
         }
         expected = {
             "case_id": "case-001",
             "technical_verdict": "confirmed",
             "reportability": "do_not_report",
             "impact_demonstrated": True,
-            "novelty": 0.8,
+            "novelty": "new",
         }
         score = S.score_case(v, expected, budget_used_ok, budget_limit)
         assert score.passed is False
@@ -460,7 +479,7 @@ class TestScoreCaseHardFailure:
             "technical_verdict": "confirmed",
             "reportability": "do_not_report",
             "impact_demonstrated": True,
-            "novelty": 0.8,
+            "novelty": "new",
         }
         budget_used = {"safety_violation": True}
         score = S.score_case(
@@ -482,7 +501,7 @@ class TestScoreRun:
                 "technical_verdict": "confirmed",
                 "reportability": "report",
                 "impact_demonstrated": True,
-                "novelty": 0.8,
+                "novelty": "new",
             }
             for i in range(n)
         ]
@@ -494,7 +513,7 @@ class TestScoreRun:
                 "technical_verdict": "confirmed",
                 "reportability": "report",
                 "impact_demonstrated": True,
-                "novelty": 0.8,
+                "novelty": "new",
             }
             for i in range(n)
         }
@@ -522,21 +541,21 @@ class TestScoreRun:
             "technical_verdict": "confirmed",
             "reportability": "report",
             "impact_demonstrated": True,
-            "novelty": 0.8,
+            "novelty": "new",
         }
         v1 = {
             "case_id": "case-001",
             "technical_verdict": "inconclusive",  # mismatch → partial
             "reportability": "report",
             "impact_demonstrated": True,
-            "novelty": 0.8,
+            "novelty": "new",
         }
         v2 = {
             "case_id": "case-002",
             "technical_verdict": "confirmed",
             "reportability": "report",  # critical: expected do_not_report
             "impact_demonstrated": True,
-            "novelty": 0.8,
+            "novelty": "new",
         }
         expected = {
             "case-000": {
@@ -544,21 +563,21 @@ class TestScoreRun:
                 "technical_verdict": "confirmed",
                 "reportability": "report",
                 "impact_demonstrated": True,
-                "novelty": 0.8,
+                "novelty": "new",
             },
             "case-001": {
                 "case_id": "case-001",
                 "technical_verdict": "confirmed",
                 "reportability": "report",
                 "impact_demonstrated": True,
-                "novelty": 0.8,
+                "novelty": "new",
             },
             "case-002": {
                 "case_id": "case-002",
                 "technical_verdict": "confirmed",
                 "reportability": "do_not_report",
                 "impact_demonstrated": True,
-                "novelty": 0.8,
+                "novelty": "new",
             },
         }
         run = S.score_run(
@@ -653,7 +672,7 @@ class TestScoreRun:
             "technical_verdict": "confirmed",
             "reportability": "report",
             "impact_demonstrated": True,
-            "novelty": 0.8,
+            "novelty": "new",
         }
         run = S.score_run(
             [v], {}, budget_used_ok, budget_limit,
@@ -689,7 +708,7 @@ class TestBudgetImmutability:
                 "technical_verdict": "confirmed",
                 "reportability": "report",
                 "impact_demonstrated": True,
-                "novelty": 0.8,
+                "novelty": "new",
             }
         ]
         expected = {
@@ -698,7 +717,7 @@ class TestBudgetImmutability:
                 "technical_verdict": "confirmed",
                 "reportability": "report",
                 "impact_demonstrated": True,
-                "novelty": 0.8,
+                "novelty": "new",
             }
         }
         S.score_run(
@@ -741,7 +760,7 @@ class TestBudgetImmutability:
             "technical_verdict": "confirmed",
             "reportability": "report",
             "impact_demonstrated": True,
-            "novelty": 0.8,
+            "novelty": "new",
         }
         expected = {
             "c": {
@@ -749,7 +768,7 @@ class TestBudgetImmutability:
                 "technical_verdict": "confirmed",
                 "reportability": "report",
                 "impact_demonstrated": True,
-                "novelty": 0.8,
+                "novelty": "new",
             }
         }
         original_limit = copy.deepcopy(budget_limit)

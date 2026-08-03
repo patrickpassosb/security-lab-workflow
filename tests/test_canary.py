@@ -123,14 +123,16 @@ def _make_valid_suite(
         # Default labels: match the stub verdict so every case PASSES.
         # The stub verdict is technical_verdict=inconclusive,
         # reportability=gather_more_evidence, impact_demonstrated=False,
-        # novelty=0.5.
+        # novelty="unknown" (schema enum string — see lib/scoring.py
+        # _field_matches: novelty must be a schema-valid enum string,
+        # never a numeric tolerance value).
         labels = {
             cid: {
                 "case_id": cid,
                 "technical_verdict": "inconclusive",
                 "reportability": "gather_more_evidence",
                 "impact_demonstrated": False,
-                "novelty": 0.5,
+                "novelty": "unknown",
             }
             for cid in case_ids
         }
@@ -402,7 +404,7 @@ class TestRunOodValidation:
                 "technical_verdict": "confirmed",  # stub says inconclusive
                 "reportability": "report",  # stub says gather_more_evidence
                 "impact_demonstrated": True,  # stub says False
-                "novelty": 0.95,  # stub says 0.5 (outside ±0.1)
+                "novelty": "new",  # stub says "unknown" (enum mismatch)
             }
             for i in range(3)
         }
