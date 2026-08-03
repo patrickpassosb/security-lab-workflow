@@ -2,9 +2,9 @@
 
 > **Status:** v0.1. Added by the `sl-eval-harness-v1` task (Phase 0
 > report §6.2, captain decision Option B). Purely additive — no change
-> to `lib/labeval.py`, `lib/scoring.py`, `lib/labimprove.py`,
-> `lib/canary.py`, `bin/lab-eval`, `bin/lab-improve`, `schemas/`, scope
-> logic, or denied lists.
+> to `lib/labeval.py`, `lib/labimprove.py`, `lib/canary.py`,
+> `bin/lab-eval`, `bin/lab-improve`, `schemas/`, scope logic, or denied
+> lists.
 
 ## What it is
 
@@ -46,10 +46,10 @@ can be a different model than the candidate).
   label isolation enforcement, budget enforcement (wall-time SIGKILL),
   suite loading, run orchestration, and scoring (imports
   `lib/scoring.py` at score time only).
-- **`tests/test_evalharness.py`** — unit tests (47 tests): verdict
+- **`tests/test_evalharness.py`** — unit tests (51 tests): verdict
   parsing, schema validation, budget enforcement, label isolation,
-  adapter interface, end-to-end run+score with a stub agent (no live
-  network).
+  adapter interface, prompt contract, end-to-end run+score with a stub
+  agent (no live network).
 
 ## Usage
 
@@ -169,8 +169,8 @@ a different model than the candidate).
 
 ## What this harness does NOT do
 
-- It does NOT modify `lib/labeval.py`, `lib/scoring.py`,
-  `lib/labimprove.py`, `lib/canary.py`, `bin/lab-eval`,
+- It does NOT modify `lib/labeval.py`, `lib/labimprove.py`,
+  `lib/canary.py`, `bin/lab-eval`,
   `bin/lab-improve`, `schemas/`, scope logic, or denied lists.
 - It does NOT contact HackerOne or any external service (the agent CLI
   is the only network egress, under the captain's safe harbor).
@@ -186,6 +186,8 @@ a different model than the candidate).
 - `bin/lab-eval-harness --help` — the CLI help (documents the
   isolation contract inline).
 - `schemas/eval-verdict-v1.schema.json` — the verdict shape.
-- `lib/scoring.py` — the scorer (reused via import, unchanged).
+- `lib/scoring.py` — the scorer (reused via import; its `novelty`
+  comparison matches the schema-defined enum string, not a numeric
+  tolerance).
 - Phase 0 report (`data/sl-baseline-v0/report.md` §6.2) — the captain
   decision (Option B) this harness implements.
