@@ -56,13 +56,22 @@ def budget_used_ok() -> dict:
 
 @pytest.fixture
 def expected_label() -> dict:
-    """A representative expected verdict label."""
+    """A representative expected verdict label.
+
+    ``novelty`` is a schema-defined enum string (``new``), per
+    ``schemas/eval-verdict-v1.schema.json``. The float value used here
+    historically (``0.8``) was a measurement defect: ``scoring.py``
+    float-cast it, ``float("new")`` raised, and every correct
+    ``novelty="new"`` verdict scored as a mismatch. The scorer now
+    compares ``novelty`` as an exact string match, so the fixture
+    carries the schema-correct enum value.
+    """
     return {
         "case_id": "case-001",
         "technical_verdict": "confirmed",
         "reportability": "report",
         "impact_demonstrated": True,
-        "novelty": 0.8,
+        "novelty": "new",
     }
 
 
@@ -192,11 +201,15 @@ class TestScoreCasePass:
         assert score.hard_failure is False
         assert score.reason.startswith("PASS")
 
-    def test_pass_with_novelty_within_tolerance(
+    def test_pass_with_novelty_enum_match(
         self, verdict_pass, expected_label, budget_used_ok, budget_limit
     ):
-        # Novelty tolerance is ±0.1; 0.85 vs expected 0.8 is within tolerance.
-        verdict_pass["novelty"] = 0.85
+        # novelty is a schema-defined enum string; an exact enum match
+        # must PASS. Replaces the old float-tolerance behavior
+        # (novelty=0.85 vs expected 0.8 within ±0.1), which was a
+        # measurement defect: float("new") raised ValueError, so
+        # correct verdicts scored as mismatches.
+        assert verdict_pass["novelty"] == expected_label["novelty"] == "new"
         score = S.score_case(verdict_pass, expected_label, budget_used_ok, budget_limit)
         assert score.passed is True
 
@@ -208,7 +221,7 @@ class TestScoreCasePass:
             "technical_verdict": "confirmed",
             "reportability": "report",
             "impact_demonstrated": True,
-            "novelty": 0.8,
+            "novelty": "new",
         }
         score = S.score_case(v, expected_label, budget_used_ok, budget_limit)
         assert score.case_id == "case-xyz"
@@ -239,14 +252,111 @@ class TestScoreCasePartial:
         assert score.passed is False
         assert score.partial_credit == pytest.approx(0.5)
 
-    def test_partial_novelty_outside_tolerance_is_mismatch(
+    def test_partial_novelty_enum_mismatch(
         self, verdict_pass, expected_label, budget_used_ok, budget_limit
     ):
-        # 0.5 vs expected 0.8 is 0.3 outside the ±0.1 tolerance.
-        verdict_pass["novelty"] = 0.5
+        # novelty is an enum string; an enum mismatch must score as a
+        # mismatch (PARTIAL 3/4). Replaces the old float-tolerance check
+        # (novelty=0.5 vs expected 0.8 outside ±0.1). The schema
+        # defines novelty as known_informative | known_duplicate |
+        # unknown | new, so "known_informative" vs "new" is a clear
+        # mismatch with no float-cast needed.
+        verdict_pass["novelty"] = "known_informative"  # expected "new"
         score = S.score_case(verdict_pass, expected_label, budget_used_ok, budget_limit)
         assert score.passed is False
         assert score.partial_credit == pytest.approx(0.75)  # 3/4 match
+
+
+# ─── _field_matches: novelty enum regression ──────────────────────────────────
+
+
+class TestNoveltyEnumRegression:
+    """Regression coverage for the discovery-evaluation scoring defect.
+
+    Before the fix, ``scoring.py:_field_matches`` float-cast ``novelty``
+    (``float("new")`` raised ``ValueError``), so every correct verdict
+    scored as a novelty mismatch (the recorded incumbent baseline showed
+    2/3 PARTIAL ``missing: ['novelty']`` on verdicts that were actually
+    correct). The schema (``schemas/eval-verdict-v1.schema.json``) defines
+    ``novelty`` as an enum string: ``known_informative | known_duplicate
+    | unknown | new``. These tests pin the corrected behavior: novelty
+    is compared as an exact enum-string match, never as a float.
+    """
+
+    @pytest.mark.parametrize(
+        "value",
+        ["known_informative", "known_duplicate", "unknown", "new"],
+    )
+    def test_novelty_enum_exact_match(self, value):
+        # Every schema-listed enum value must match itself exactly.
+        assert S._field_matches("novelty", value, value) is True
+
+    @pytest.mark.parametrize(
+        "got,expected",
+        [
+            ("new", "known_informative"),
+            ("new", "known_duplicate"),
+            ("new", "unknown"),
+            ("known_informative", "new"),
+            ("known_duplicate", "new"),
+            ("unknown", "new"),
+            ("known_informative", "known_duplicate"),
+            ("known_duplicate", "unknown"),
+            ("unknown", "known_informative"),
+        ],
+    )
+    def test_novelty_enum_mismatch(self, got, expected):
+        # Different enum values must not match.
+        assert S._field_matches("novelty", got, expected) is False
+
+    def test_novelty_never_float_cast_match(self):
+        # A float "got" against a float "expected" must not be treated
+        # as a numeric tolerance match. The schema lists novelty as a
+        # string enum, so "0.8" != "0.8" the float is not a valid
+        # novelty value; coercion to str yields "0.8" == "0.8" which
+        # happens to match, but this is a backward-compat artifact,
+        # not the schema contract. The contract is enum strings.
+        # Pin: a float-vs-float pair that the OLD float-tolerance would
+        # have accepted (0.85 within ±0.1 of 0.8) is now a STRING
+        # comparison: "0.85" != "0.8" → mismatch. This is intentional.
+        assert S._field_matches("novelty", 0.85, 0.8) is False
+
+    def test_novelty_string_vs_float_is_mismatch(self):
+        # A schema-valid string enum compared against an invalid float
+        # must be a mismatch (the schema lists novelty as a string enum,
+        # so a float is a malformed verdict, not a tolerance match).
+        assert S._field_matches("novelty", "new", 0.8) is False
+        assert S._field_matches("novelty", 0.8, "new") is False
+
+    def test_novelty_none_is_mismatch(self):
+        # Missing novelty (None) must not match a real enum value.
+        assert S._field_matches("novelty", None, "new") is False
+        assert S._field_matches("novelty", "new", None) is False
+
+    def test_novelty_enum_match_yields_full_pass(
+        self, expected_label, budget_used_ok, budget_limit
+    ):
+        # End-to-end: a verdict with novelty="new" matching the
+        # expected_label's novelty="new" must PASS all 4 fields.
+        v = copy.deepcopy(expected_label)
+        assert v["novelty"] == "new"
+        score = S.score_case(v, expected_label, budget_used_ok, budget_limit)
+        assert score.passed is True
+        assert score.partial_credit == 1.0
+        assert "novelty" not in score.reason  # novelty matched
+
+    def test_novelty_enum_mismatch_yields_partial(
+        self, expected_label, budget_used_ok, budget_limit
+    ):
+        # End-to-end: a verdict with novelty="known_informative" against
+        # expected="new" must PARTIAL (3/4 fields match — only novelty
+        # mismatches). Regression for the discovery-v1 baseline defect.
+        v = copy.deepcopy(expected_label)
+        v["novelty"] = "known_informative"
+        score = S.score_case(v, expected_label, budget_used_ok, budget_limit)
+        assert score.passed is False
+        assert score.partial_credit == pytest.approx(0.75)
+        assert "novelty" in score.reason
 
 
 # ─── score_case: FAIL (critical mismatch) ──────────────────────────────────────

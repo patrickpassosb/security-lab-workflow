@@ -5,7 +5,7 @@ expected labels. Scoring has three states plus a hard-failure override:
 
   - **PASS**: all required verdict fields match the expected label
     (technical_verdict, reportability, impact_demonstrated, and novelty
-    within the expected range).
+    as exact enum-string equality per ``eval-verdict-v1``).
   - **PARTIAL**: some required fields match, some don't. ``partial_credit``
     is the fraction of matching fields (0.0 to 1.0, exclusive of both ends
     for a true partial; 1.0 = PASS, 0.0 = FAIL).
@@ -55,9 +55,11 @@ from typing import Any
 # ─── Constants ─────────────────────────────────────────────────────────────────
 
 # Required verdict fields compared by score_case. Each field contributes
-# equally to partial_credit. ``novelty`` is compared as a range tolerance
-# (the candidate's novelty may be within ±_NOVELTY_TOLERANCE of expected)
-# rather than an exact match, because novelty is a continuous signal.
+# equally to partial_credit. ``novelty`` is compared as an exact string
+# match (per ``schemas/eval-verdict-v1.schema.json``, it is an enum
+# string: ``known_informative | known_duplicate | unknown | new``), not
+# as a float with tolerance — the schema has no genuinely numeric
+# scoring fields, so no numeric-tolerance branch is needed here.
 #
 # SI-031 (audit section 8.3): the content-quality fields are optional in
 # the verdict dict. When present, they contribute to partial_credit
@@ -73,7 +75,6 @@ _REQUIRED_FIELDS: tuple[str, ...] = (
     "impact_demonstrated",
     "novelty",
 )
-_NOVELTY_TOLERANCE = 0.1  # ±0.1 on a 0.0–1.0 novelty score
 
 # SI-031 content-quality fields (audit section 8.3). These are OPTIONAL
 # in the verdict dict — a verdict without them scores against the core
@@ -238,15 +239,23 @@ def check_hard_failure(
 def _field_matches(field_name: str, got: Any, expected: Any) -> bool:
     """Compare a single required field.
 
-    - ``technical_verdict`` / ``reportability``: exact string match
-      (after coercion to str). Values outside the valid sets are
-      treated as mismatches.
+    - ``technical_verdict`` / ``reportability`` / ``novelty``: exact
+      string match (after coercion to str). Each is a schema-defined
+      enum string (``schemas/eval-verdict-v1.schema.json``); values
+      outside the valid enum are treated as mismatches. ``novelty`` is
+      *never* compared as a float — the schema defines it as an enum
+      string (``known_informative | known_duplicate | unknown | new``),
+      so the old float-cast branch caused correct ``"new"`` vs ``"new"``
+      verdicts to score as mismatches (``float("new")`` raises
+      ``ValueError``). Numeric tolerance is preserved only for
+      genuinely numeric scoring fields; the verdict-v1 schema has none.
+      ``expected_severity`` (an object with ``min``/``max`` string
+      enums) and ``required_evidence`` (an array of strings) are not
+      in ``_REQUIRED_FIELDS`` and are compared elsewhere.
     - ``impact_demonstrated``: exact bool match.
-    - ``novelty``: float within ±``_NOVELTY_TOLERANCE`` of expected.
-      Non-numeric values are mismatches.
     - Any other field: exact equality.
     """
-    if field_name in ("technical_verdict", "reportability"):
+    if field_name in ("technical_verdict", "reportability", "novelty"):
         g = str(got) if got is not None else ""
         e = str(expected) if expected is not None else ""
         return g == e
@@ -256,11 +265,6 @@ def _field_matches(field_name: str, got: Any, expected: Any) -> bool:
         if isinstance(got, bool) and isinstance(expected, bool):
             return got == expected
         return False
-    if field_name == "novelty":
-        try:
-            return abs(float(got) - float(expected)) <= _NOVELTY_TOLERANCE
-        except (TypeError, ValueError):
-            return False
     return got == expected
 
 

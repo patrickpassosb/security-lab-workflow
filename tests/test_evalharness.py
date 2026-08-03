@@ -546,6 +546,64 @@ class TestAdapterInterface:
         assert "max" in inv.argv
 
 
+# ─── Prompt output contract (no extra fields allowed) ──────────────────────────
+
+
+class TestPromptContract:
+    """``_build_opencode_prompt`` must instruct the agent to write ONLY
+    schema-listed fields, so an extra ``notes`` field cannot hard-fail an
+    otherwise correct verdict. Regression for the discovery-v1 baseline
+    horizontal case (verdict rejected for ``notes`` field).
+    """
+
+    def _build_prompt(self, tmp_path: Path) -> str:
+        obj = EH.CaseObjective(
+            case_id="discovery-authz-horizontal-001",
+            suite="discovery-v1",
+            split="train",
+            description="judge the horizontal-authorization evidence",
+            inputs_dir=tmp_path / "inputs",
+            case_yaml_path=tmp_path / "case.yaml",
+        )
+        return EH._build_opencode_prompt(obj, SKILL_PATH, tmp_path / "v.json")
+
+    def test_prompt_states_additional_properties_false(self, tmp_path: Path):
+        prompt = self._build_prompt(tmp_path)
+        # The prompt must reference additionalProperties=false so the
+        # agent knows extra fields hard-fail before scoring.
+        assert "additionalProperties=false" in prompt
+        assert "ONLY" in prompt and "fields listed" in prompt
+
+    def test_prompt_forbids_extra_fields(self, tmp_path: Path):
+        prompt = self._build_prompt(tmp_path)
+        # The prompt must name common extra fields the agent might add
+        # (notes, reasoning, summary, etc.) and forbid them.
+        assert "notes" in prompt
+        assert "Do NOT add" in prompt or "NOT add any other field" in prompt
+
+    def test_prompt_lists_novelty_as_enum_string(self, tmp_path: Path):
+        prompt = self._build_prompt(tmp_path)
+        # The prompt must list novelty as an enum string (the source of
+        # the old float-cast bug was treating it as a numeric signal).
+        assert "novelty: \"known_informative\"" in prompt
+        assert "\"unknown\" | \"new\"" in prompt
+
+    def test_prompt_lists_required_and_optional_fields(self, tmp_path: Path):
+        prompt = self._build_prompt(tmp_path)
+        # Required + optional fields must all be enumerated.
+        for required in (
+            "schema:", "case_id:", "suite:", "technical_verdict:",
+            "reportability:", "impact_demonstrated:", "novelty:",
+            "expected_severity:", "required_evidence:",
+        ):
+            assert required in prompt, f"prompt missing required field: {required!r}"
+        for optional in (
+            "threat_model_present", "poc_type", "evidence_index_complete",
+            "limitations_present", "disconfirming_controls_present",
+        ):
+            assert optional in prompt, f"prompt missing optional field: {optional!r}"
+
+
 # ─── End-to-end run + score pipeline (no network) ──────────────────────────────
 
 

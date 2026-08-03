@@ -730,6 +730,12 @@ def _build_opencode_prompt(
         "  evidence_index_complete (bool),\n"
         "  limitations_present (bool),\n"
         "  disconfirming_controls_present (bool).\n\n"
+        "CRITICAL CONTRACT: The verdict schema sets "
+        "additionalProperties=false. Write ONLY the fields listed above "
+        "(required + optional). Do NOT add any other field (no 'notes', "
+        "'reasoning', 'summary', 'confidence', 'rationale', etc.). The "
+        "schema is the contract — any extra field hard-fails the case "
+        "before scoring.\n\n"
         "Write ONLY the verdict JSON object to the verdict path. Do not "
         "write anything else to that path. You may reason in stdout."
     )
