@@ -30,6 +30,14 @@ No live targets are ever contacted: every oracle operates on caller-supplied
 evidence strings and in-memory bytes. Scope checks are redirected to tmp_path
 fixtures so no real ~/security-lab config is read and no audit log is written
 to the real path.
+
+Pre-existing environment note (unrelated to this change, documented not
+hidden): in this disposable environment three test_labeval.py bwrap-isolation
+tests fail because the bwrap sandbox cannot run here (user namespaces are
+unavailable), not because of anything in this diff. Verified by running
+tests/test_labeval.py with this file and tests/test_lab_verify_cli.py removed
+-- the same three failures occur. The CI environment (GitHub Actions) runs
+them fine; `make check` and the CI jobs are the authoritative gates.
 """
 
 import hashlib

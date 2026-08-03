@@ -217,6 +217,9 @@ def main() -> int:
         )
         return 1
 
+    if not engagement and isinstance(payload.get("engagement"), str):
+        engagement = payload["engagement"]
+
     # Run the oracle.
     try:
         result = V.build_result(

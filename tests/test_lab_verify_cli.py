@@ -205,3 +205,31 @@ class TestLabVerify:
             e.get("action") == "lab-verify" and e.get("outcome") == "verified"
             for e in entries
         )
+
+    def test_audit_entry_records_payload_engagement(
+        self, capsys, tmp_path, cli_env, monkeypatch
+    ):
+        secret = "flag{GUID}"
+        payload = {
+            "finding_id": "cli-audit-payload-eng",
+            "canary_location": "x",
+            "expected_sha256": _sha(secret),
+            "retrieved_value": secret,
+            "engagement": "my-eng",
+        }
+        p = _write_payload(tmp_path, payload)
+        _run(monkeypatch, "sha256_canary", "--payload", str(p))
+        log_path = cli_env / "findings" / ".agent-audit.jsonl"
+        assert log_path.is_file()
+        raw_lines = [
+            line
+            for line in log_path.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+        entries = [json.loads(line) for line in raw_lines]
+        assert any(
+            e.get("action") == "lab-verify"
+            and e.get("engagement") == "my-eng"
+            and e.get("outcome") == "verified"
+            for e in entries
+        )

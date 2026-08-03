@@ -759,6 +759,8 @@ def verify_business_logic(
         errs.append("expected_state_field must be a non-empty string")
     if not isinstance(expected_state_value, str):
         errs.append("expected_state_value must be a string")
+    if not expected_state_value:
+        errs.append("expected_state_value must be a non-empty string")
     if not isinstance(precondition_violated, bool):
         errs.append("precondition_violated must be a bool")
     evidence = evidence or []
@@ -1176,6 +1178,11 @@ def verify_oob_callback(
     errs = _validate_oracle_input_common(finding_id, target, engagement)
     if not isinstance(callback_record, dict):
         errs.append("callback_record must be a dict")
+    if not errs:
+        try:
+            json.dumps(callback_record, sort_keys=True)
+        except (TypeError, ValueError):
+            errs.append("callback_record must be JSON-serializable")
     if not _is_nonempty_str(expected_callback_identifier):
         errs.append("expected_callback_identifier must be a non-empty string")
     evidence = evidence or []
@@ -1406,11 +1413,16 @@ def validate_result(result: VerificationResult) -> list[str]:
                 )
     if d.get("target"):
         # target, when present, must parse as a URL or bare host (no file://).
+        # urlparse('example.com:8080') treats 'example.com' as the scheme, so
+        # only treat a parsed scheme as real when it is followed by '://'
+        # (matching labutil.extract_host, which supports bare host:port).
         parsed_scheme = ""
-        try:
-            parsed_scheme = (urlparse(d["target"]).scheme or "").lower()
-        except ValueError:
-            errs.append("target is not a parseable URL/host")
+        raw = d["target"]
+        if "://" in raw:
+            try:
+                parsed_scheme = (urlparse(raw).scheme or "").lower()
+            except ValueError:
+                errs.append("target is not a parseable URL/host")
         if parsed_scheme and parsed_scheme not in ("http", "https"):
             errs.append(
                 f"target scheme {parsed_scheme!r} not allowed "
@@ -1460,6 +1472,20 @@ def write_result(result: VerificationResult, path: Path) -> None:
 # ─── Build-from-JSON (CLI helper) ────────────────────────────────────────────
 
 
+def _require_bool(payload: dict[str, Any], key: str) -> bool:
+    """Strict bool read from a payload key; any non-bool value is rejected.
+
+    bool()-coercing a payload would silently accept truthy non-bools (e.g.
+    the JSON string "false") and defeat the attestation gates that depend on
+    these flags. The direct API path already requires real bools; the CLI
+    payload path must match that contract.
+    """
+    v = payload.get(key, False)
+    if not isinstance(v, bool):
+        raise VerificationInputError(f"{key} must be a bool, got {type(v).__name__}")
+    return v
+
+
 def build_result(
     oracle: str,
     payload: dict[str, Any],
@@ -1493,6 +1519,11 @@ def build_result(
     finding_id = payload.get("finding_id", "")
     tgt = target or payload.get("target", "")
     eng = engagement or payload.get("engagement", "")
+    if eng and not labutil.validate_name(eng):
+        raise VerificationInputError(
+            f"invalid engagement name {eng!r} -- use only letters, numbers, "
+            f"dots, hyphens, underscores (no '..', '/', '\\')"
+        )
     evidence = _coerce_evidence(payload.get("evidence"))
 
     if oracle == ORACLE_AUTHORIZATION:
@@ -1501,7 +1532,7 @@ def build_result(
             cross_actor_response=payload.get("cross_actor_response", ""),
             control_response=payload.get("control_response", ""),
             victim_marker=payload.get("victim_marker", ""),
-            ownership_verified=bool(payload.get("ownership_verified", False)),
+            ownership_verified=_require_bool(payload, "ownership_verified"),
             ownership_detail=payload.get("ownership_detail", ""),
             ownership_identity=payload.get("ownership_identity", ""),
             target=tgt,
@@ -1515,7 +1546,7 @@ def build_result(
             post_action_state_read=payload.get("post_action_state_read", ""),
             expected_state_field=payload.get("expected_state_field", ""),
             expected_state_value=payload.get("expected_state_value", ""),
-            precondition_violated=bool(payload.get("precondition_violated", False)),
+            precondition_violated=_require_bool(payload, "precondition_violated"),
             target=tgt,
             engagement=eng,
             evidence=evidence,
