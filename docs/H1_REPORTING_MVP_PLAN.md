@@ -18,6 +18,7 @@ The intended workflow is:
 ```text
 report_h1.md
   -> lab-h1-report check
+  -> lab-h1-report assess
   -> lab-h1-report prepare
   -> human submits through HackerOne
   -> lab-h1-report record-submission
@@ -668,12 +669,12 @@ Test:
 Update the bounty skill and lab documentation with:
 
 ```text
-check -> prepare -> human submits -> record-submission -> status
+check -> review -> assess -> prepare -> human submits -> record-submission -> status
 ```
 
 Explicitly state:
 
-- Agents may draft, validate, and prepare.
+- Agents may draft, validate, and assess.
 - Agents must not submit a report.
 - The human provides the accepted HackerOne report ID/URL.
 - `record-submission` only records a completed human action.

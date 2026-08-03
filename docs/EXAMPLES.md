@@ -179,16 +179,21 @@ cd ~/security-lab/bounties/example/findings/ssrf-in-fetch/
 lab-h1-report check
 # PASS
 
-# 4. Stage the submission package (immutable, hashed attachments)
+# 4. Submission-decision gate (read-only, no network) — mandatory before
+#    prepare. PASS proceeds; HOLD gathers more evidence; BLOCK does not submit.
+lab-h1-report assess
+# PASS
+
+# 5. Stage the submission package (immutable, hashed attachments)
 lab-h1-report prepare
 # SUMMARY: prepared=1 attachments=2 scope_snapshots=1 package=prepared-20260713T210000Z
 # PACKAGE: submission/prepared-20260713T210000Z/
 
-# 5. HUMAN submits via the HackerOne UI: copy report.md, upload the staged
+# 6. HUMAN submits via the HackerOne UI: copy report.md, upload the staged
 #    attachments from submission/prepared-20260713T210000Z/attachments/.
 #    Human returns: report ID 1234567, URL https://hackerone.com/reports/1234567
 
-# 6. Record the submission (one-time immutable receipt; no network)
+# 7. Record the submission (one-time immutable receipt; no network)
 lab-h1-report record-submission \
   --package prepared-20260713T210000Z \
   --h1-id 1234567 \
@@ -197,7 +202,7 @@ lab-h1-report record-submission \
 # RECORDED: submission/prepared-20260713T210000Z/record.json
 # REPORT_ID: 1234567
 
-# 7. Verify integrity + drift + recorded submission
+# 8. Verify integrity + drift + recorded submission
 lab-h1-report status
 # report: .../report_h1.md
 # title: SSRF in PDF fetch endpoint
