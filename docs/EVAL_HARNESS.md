@@ -2,7 +2,7 @@
 
 > **Status:** v0.1. Added by the `sl-eval-harness-v1` task (Phase 0
 > report §6.2, captain decision Option B). The harness itself makes no
-> change to `lib/labeval.py`, `lib/labimprove.py`, `lib/canary.py`,
+> change to `lib/labeval.py`, `lib/labimprove.py`,
 > `bin/lab-eval`, `bin/lab-improve`, `schemas/`, scope logic, or denied
 > lists.
 
@@ -170,7 +170,7 @@ a different model than the candidate).
 ## What this harness does NOT do
 
 - It does NOT modify `lib/labeval.py`, `lib/labimprove.py`,
-  `lib/canary.py`, `bin/lab-eval`,
+  `bin/lab-eval`,
   `bin/lab-improve`, `schemas/`, scope logic, or denied lists.
 - It does NOT contact HackerOne or any external service (the agent CLI
   is the only network egress, under the captain's safe harbor).
@@ -189,5 +189,8 @@ a different model than the candidate).
 - `lib/scoring.py` — the scorer (reused via import; its `novelty`
   comparison matches the schema-defined enum string, not a numeric
   tolerance).
+- `lib/canary.py` — the canary stub verdict (reuses the same
+  `scoring.score_case` contract; its `novelty` placeholder is a
+  schema-valid enum string, not a numeric tolerance).
 - Phase 0 report (`data/sl-baseline-v0/report.md` §6.2) — the captain
   decision (Option B) this harness implements.
