@@ -149,10 +149,12 @@ frontmatter (schema `security-lab/hackerone-report/v1`) plus a Markdown body wit
 Remediation, `### Disconfirming controls`), `## Impact`, and `## Limitations`
 sections. Do NOT duplicate report content in `bounty_log.md`.
 
-The reporting workflow is **local-only and human-gated**:
+The reporting workflow is **local-only and human-gated**. The
+`assess` (SI-015) submission-decision gate is **mandatory** — do not
+skip from `review` straight to `prepare`:
 
 ```
-check -> review -> prepare -> human submits -> record-submission -> status
+check -> review -> assess -> prepare -> human submits -> record-submission -> status
 ```
 
 1. **Draft `report_h1.md`.** Fill the YAML frontmatter: `asset_id`, `asset_name`
@@ -180,24 +182,53 @@ check -> review -> prepare -> human submits -> record-submission -> status
    honest_limitations). `overall=pass` exits 0; `warn` exits 0 (non-blocking);
    `fail` exits 2 (blocking). Deterministic structure checks alone are
    insufficient — this is the content gate.
-4. **`lab-h1-report prepare [workspace]`** — stage an immutable submission
+4. **`lab-h1-report assess [workspace]`** — the mandatory submission-decision
+   gate (SI-015). Read-only. Evaluates whether *submitting* is a good decision,
+   not just whether the report is well-formed. It resolves the finding's platform
+   state (via `derive_finding_status`), the engagement's precedent registry, and
+   the submission thresholds in `improvement/config/submission.yaml`, then
+   returns one verdict:
+
+   - **`PASS` (exit 0)** — evidence and novelty are sufficient; proceed to
+     `prepare`. This is the *only* outcome that permits packaging.
+   - **`HOLD` (exit 2)** — do not prepare. More evidence or a human decision is
+     required. Common causes: `impact_demonstrated == false` (empty/theoretical
+     PoC — the empty-data IDOR failure mode), confidence below the trial
+     threshold, or an advisory single-program / `candidate_informative`
+     precedent (one program's triager preference must not block every program).
+     Capture the missing evidence (a victim marker, a server-side state change)
+     or ask the human, then re-run `assess`.
+   - **`BLOCK` (exit 1)** — stop. Do not prepare or report. Common causes: the
+     finding is a known duplicate, was previously closed as Informative, matches
+     a cross-program (2+ programs) Informative precedent, or the technical
+     verdict is not `confirmed`. Log the dead end via `lab-hunt-lesson` instead
+     of submitting — this is exactly the gate that would have caught the pilot's
+     known-Informative duplicate submission.
+
+   `assess` never modifies files and never contacts HackerOne. It is a
+   recommendation; the human still makes the final call. Treat `PASS` as
+   "proceed to prepare", `HOLD` as "go back to hunting for evidence", and
+   `BLOCK` as "do not submit — record the lesson".
+5. **`lab-h1-report prepare [workspace]`** — stage an immutable submission
    package under `submission/prepared-<UTC>/` containing `report_h1.md`,
    `report.md` (frontmatter-stripped body for HackerOne), `attachments/`, and
    `manifest.json` (SHA-256 + size for every file + the review verdict). Runs
    `check` AND `review` internally and aborts unless both pass (review must
    return overall=pass; both WARN and FAIL abort packaging). Refuses to
-   overwrite an existing package.
-5. **HUMAN submits via the HackerOne UI.** The human copies `report.md`, uploads
+   overwrite an existing package. **Run `assess` first — `prepare` does not
+   run it.** Preparing a package that `assess` would have BLOCKed or HOLDed is
+   the failure mode this gate exists to prevent.
+6. **HUMAN submits via the HackerOne UI.** The human copies `report.md`, uploads
    the staged attachments, and submits. **Agents MUST NOT submit a report.**
    There is no `submit` command and there never will be. The human returns the
    accepted HackerOne report ID and URL.
-6. **`lab-h1-report record-submission [workspace] --package <path|id> --h1-id <num> --url <url> --submitted-at <ts> [--submitted-by <id>]`**
+7. **`lab-h1-report record-submission [workspace] --package <path|id> --h1-id <num> --url <url> --submitted-at <ts> [--submitted-by <id>]`**
    — record a one-time immutable local receipt in `<package>/record.json`.
    Validates the package manifest, the numeric report ID, the HackerOne URL
    (`hackerone.com/reports/<same ID>`), and a timezone-aware timestamp. Uses
    `O_EXCL` so a record is created exactly once and never overwritten. It never
    contacts HackerOne — it only records what the human already did.
-7. **`lab-h1-report status [workspace]`** — read-only. Prints report metadata,
+8. **`lab-h1-report status [workspace]`** — read-only. Prints report metadata,
    the latest prepared package, manifest integrity (re-hashes files on disk),
    source drift (whether `report_h1.md` changed since `prepare`), and the
    recorded HackerOne report ID/URL.
@@ -224,6 +255,8 @@ metadata lives only in `record.json` inside the prepared package. See
 - [ ] Attachments are explicit, relative, non-symlink, and pass secret scanning
 - [ ] No `TODO`/`TBD`/`{{FIELD}}` placeholders left in the body
 - [ ] `lab-h1-report review` prints `REVIEW: pass` (or `warn` for non-blocking warnings)
+- [ ] `lab-h1-report assess` prints `PASS` before you run `prepare` (HOLD = gather
+      more evidence; BLOCK = do not submit, record the lesson)
 
 ## After your hunt
 

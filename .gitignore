@@ -115,3 +115,6 @@ brain.pglite/
 # ─── Evidence dumps (defensive: even inside tracked dirs) ───
 core.*
 *.core
+
+# ─── Local uv artifacts (uv not used by this project) ───
+uv.lock

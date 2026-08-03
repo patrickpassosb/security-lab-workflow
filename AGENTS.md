@@ -94,10 +94,11 @@ See the `ctf-workflow` and `report-ctf` skills for the full protocol.
 ## HackerOne reporting workflow (bounty)
 
 Bounty findings use a local-only, human-gated reporting flow. The tool never
-contacts HackerOne. The workflow is:
+contacts HackerOne. The `assess` (SI-015) submission-decision gate is
+**mandatory** between `review` and `prepare`. The workflow is:
 
 ```
-check -> review -> prepare -> human submits -> record-submission -> status
+check -> review -> assess -> prepare -> human submits -> record-submission -> status
 ```
 
 - Agents draft the report in `report_h1.md` (YAML frontmatter schema
@@ -112,11 +113,25 @@ check -> review -> prepare -> human submits -> record-submission -> status
   content-quality review (SI-031). Returns a structured per-dimension verdict;
   `overall=fail` blocks packaging. Deterministic structure checks alone are
   insufficient.
+- `lab-h1-report assess [workspace]` is the mandatory submission-decision gate
+  (SI-015). Read-only, no network. It checks the finding's platform state, the
+  engagement's precedent registry, and the submission thresholds, then returns
+  `PASS` (exit 0 — proceed to `prepare`; the only outcome that permits
+  packaging), `HOLD` (exit 2 — `impact_demonstrated == false`, low confidence,
+  or an advisory single-program / `candidate_informative` precedent; gather more
+  evidence or ask the human, then re-run), or `BLOCK` (exit 1 — known duplicate,
+  Informative precedent confirmed by 2+ programs, or technical verdict not
+  `confirmed`; do not prepare or submit — record the lesson via
+  `lab-hunt-lesson`). Known Informative/Duplicate precedent and
+  `impact_demonstrated=false` are non-submittable outcomes. `assess` is a
+  recommendation; the human still makes the final call. **`prepare` does not
+  run `assess` — run it first.** See `skills/security/bounty-attack/SKILL.md`
+  and `lab-h1-report --help`.
 - `lab-h1-report prepare [workspace]` stages an immutable submission package
   with attachment hashes + the review verdict. Runs `check` AND `review`
   internally; refuses to package unless both pass (review must return
   overall=pass; both WARN and FAIL abort packaging). Packages are never
-  overwritten.
+  overwritten. **Run `assess` first — `prepare` does not run it.**
 - **Agents MUST NOT submit a report.** There is no `submit` command. Final
   submission is a human action in the HackerOne UI. The human returns the
   accepted HackerOne report ID and URL.
