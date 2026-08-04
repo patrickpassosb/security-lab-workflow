@@ -683,6 +683,23 @@ class TestStatusDerivation:
             assert H.derive_hypothesis_status(
                 ws, hyp["hypothesis_id"]) == "confirmed"
 
+    def test_status_code_mid_sentence_is_not_a_bar(self, ws: Path) -> None:
+        """A count noun after a number mid-sentence (status codes, version
+        numbers) never raises the bar: only a leading count phrase counts."""
+        for text in (
+            "Replay produces HTTP 200 requests with the marker",
+            "HTTP 400 responses confirm the error",
+            "produces HTTP 200 responses confirming the marker is present",
+            "TLS 1.2 handshake observed",
+        ):
+            hyp = add_hyp(ws, minimum_confirmation=text,
+                          invariant=f"inv {text[:20]}", surface=f"/s{len(text)}",
+                          mutation=f"m{len(text)}")
+            add_exp(ws, hyp["hypothesis_id"], result="corroborating",
+                    action="probe")
+            assert H.derive_hypothesis_status(
+                ws, hyp["hypothesis_id"]) == "confirmed", text
+
     def test_write_time_gate_requires_controls_checked(self, ws: Path) -> None:
         """A corroborating experiment for a hypothesis with named disconfirming
         controls is rejected at write time when controls were not checked."""
