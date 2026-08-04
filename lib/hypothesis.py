@@ -506,10 +506,13 @@ def _validate_hypothesis(record: dict[str, Any]) -> None:
 # --- Experiment validation ----------------------------------------------------
 
 
-def _validate_experiment(record: dict[str, Any], *, hypothesis_exists: bool, hyp_id: str) -> None:
+def _validate_experiment(record: dict[str, Any], *, hypothesis_exists: bool, hyp_id: str,
+                         hyp: dict[str, Any] | None = None) -> None:
     """Shape-validate an experiment record. `hypothesis_exists` is the
     referential-integrity gate (.refine() pin) - the caller computes it by
-    reading the hypothesis ledger first."""
+    reading the hypothesis ledger first. `hyp` is the referenced hypothesis
+    record (when available) used to enforce the disconfirmation gate on
+    corroborating results."""
     required = [
         "schema", "experiment_id", "hypothesis_id", "workspace_id", "engagement",
         "action", "observation", "expected_safe_observed",
@@ -572,6 +575,15 @@ def _validate_experiment(record: dict[str, Any], *, hypothesis_exists: bool, hyp
         raise HypothesisValidationError(
             "disconfirming_controls_checked must be a string (use '' for none)"
         )
+    if record["result"] == RESULT_CORROBORATING and hyp is not None:
+        hyp_controls = str(hyp.get("disconfirming_controls") or "").strip()
+        if hyp_controls and not str(record.get("disconfirming_controls_checked") or "").strip():
+            raise HypothesisValidationError(
+                "result='corroborating' requires a non-empty "
+                "disconfirming_controls_checked because the hypothesis names "
+                "disconfirming controls; the agent cannot claim a hit without "
+                "addressing the false-positive controls"
+            )
     _validate_scope(record["scope"])
 
 
@@ -713,6 +725,8 @@ def add_experiment(
                      if HYPOTHESIS_ID_RE.match(str(h.get("hypothesis_id") or ""))]
         if hypothesis_id not in valid_ids:
             raise HypothesisNotFoundError(hypothesis_id, valid_ids)
+        hyp = next((h for h in hyp_read.records
+                    if str(h.get("hypothesis_id")) == hypothesis_id), None)
 
         # Validate scope before constructing the record: dict(scope) below
         # would raise a bare ValueError for a non-dict, but callers expect the
@@ -736,7 +750,7 @@ def add_experiment(
             "evidence_refs": list(evidence_refs or []),
             "disconfirming_controls_checked": disconfirming_controls_checked or "",
         }
-        _validate_experiment(record, hypothesis_exists=True, hyp_id=hypothesis_id)
+        _validate_experiment(record, hypothesis_exists=True, hyp_id=hypothesis_id, hyp=hyp)
         exp_ledger = _ledger_path(workspace_dir, EXPERIMENTS_FILENAME)
         existing_exp = _read_ledger(exp_ledger)
         key = experiment_dedup_key(record)
@@ -794,7 +808,11 @@ def derive_hypothesis_status(
 
       - no experiments: "unverified"
       - only inconclusive experiments: "testing"
-      - >=1 corroborating AND 0 disconfirming: "confirmed"
+      - >=1 corroborating meeting the hypothesis's minimum_confirmation bar
+        (corroborations whose disconfirming controls were ruled out when the
+        hypothesis names disconfirming_controls) AND 0 disconfirming:
+        "confirmed" - a corroboration below the bar keeps the hypothesis
+        "testing"
       - >=1 disconfirming AND 0 corroborating: "disconfirmed"
       - >=1 corroborating AND >=1 disconfirming: "contradictory" (SURFACED, not
         suppressed - mirrors renderers.detect_contradictions applied to the
@@ -1019,6 +1037,53 @@ def rank(
     return ranked
 
 
+_MIN_CONF_COUNT_RE = re.compile(
+    r"(\d+)\s*(?:corroborat\w*|confirm\w*|experiment\w*|replic\w*|"
+    r"independent\w*|times?|repeats?|hits?|sessions?|runs?)",
+    re.IGNORECASE,
+)
+_MIN_CONF_TIME_UNIT_RE = re.compile(
+    r"(?i)s\b|sec\b|second\w*|ms\b|min\b|minute\w*|h\b|hour\w*|day\w*|week\w*"
+)
+_MIN_CONF_STANDALONE_RE = re.compile(r"(?<![\w.])-?\d+(?![\w.])")
+
+
+def _min_confirmation_bar(minimum_confirmation: str | None) -> int:
+    """Parse the confirmation bar from the hypothesis's free-text
+    `minimum_confirmation` field. A count names the bar ("2 corroborating
+    experiments" -> 2, "1" -> 1, "2 OOB callbacks" -> 2). A named signal
+    without a count ("OOB callback observed within 30s of payload" - a time
+    window, not a count) is a single confirmation (bar = 1)."""
+    text = str(minimum_confirmation or "")
+    m = _MIN_CONF_COUNT_RE.search(text)
+    if m:
+        return int(m.group(1))
+    for m in _MIN_CONF_STANDALONE_RE.finditer(text):
+        following = text[m.end():m.end() + 8]
+        if not _MIN_CONF_TIME_UNIT_RE.search(following):
+            return int(m.group(0))
+    return 1
+
+
+def _corroborations_meet_bar(hyp: dict[str, Any], exps: list[dict[str, Any]]) -> bool:
+    """Whether the corroborating experiments clear the hypothesis's
+    confirmation bar. A corroborating experiment counts toward the bar only
+    when the hypothesis's disconfirming controls were addressed: if the
+    hypothesis names disconfirming_controls, a corroborating experiment with
+    an empty disconfirming_controls_checked does NOT count (the false-positive
+    controls were not ruled out - the 'agent said so' weakness)."""
+    bar = _min_confirmation_bar(hyp.get("minimum_confirmation"))
+    needs_controls = bool(str(hyp.get("disconfirming_controls") or "").strip())
+    count = 0
+    for e in exps:
+        if e.get("result") != RESULT_CORROBORATING:
+            continue
+        if needs_controls and not str(e.get("disconfirming_controls_checked") or "").strip():
+            continue
+        count += 1
+    return count >= bar
+
+
 def _derive_status_from(hyp: dict[str, Any], exps: list[dict[str, Any]]) -> str:
     """Pure status derivation used by `rank` (avoids re-reading the ledger)."""
     if hyp.get("status") == STATUS_SUPERSEDED:
@@ -1029,8 +1094,10 @@ def _derive_status_from(hyp: dict[str, Any], exps: list[dict[str, Any]]) -> str:
     has_d = any(e.get("result") == RESULT_DISCONFIRMING for e in exps)
     if has_c and has_d:
         return DERIVED_CONTRADICTORY
-    if has_c:
+    if has_c and _corroborations_meet_bar(hyp, exps):
         return DERIVED_CONFIRMED
+    if has_c:
+        return DERIVED_TESTING
     if has_d:
         return DERIVED_DISCONFIRMED
     return DERIVED_TESTING

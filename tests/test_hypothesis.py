@@ -34,6 +34,7 @@ import json
 import os
 import subprocess
 import sys
+import uuid
 from pathlib import Path
 
 import pytest
@@ -124,6 +125,7 @@ def add_exp(
     scope: dict | None = None,
     engagement: str = "demo",
     workspace_id: str | None = None,
+    disconfirming_controls_checked: str = "",
 ) -> dict:
     """Add an experiment via the public API."""
     return H.add_experiment(
@@ -138,6 +140,7 @@ def add_exp(
         result=result,
         scope=scope if scope is not None else _safe_scope(),
         provenance={"actor": actor, "agent": "opencode", "tool": tool},
+        disconfirming_controls_checked=disconfirming_controls_checked,
     )
 
 
@@ -201,7 +204,7 @@ class TestAppendOnlyRecords:
     def test_hypothesis_line_status_never_mutated(self, ws: Path) -> None:
         """Append-only: the hypothesis line stays unverified forever; the
         derived status is the projection of the experiment ledger."""
-        hyp = add_hyp(ws)
+        hyp = add_hyp(ws, minimum_confirmation="1")
         add_exp(ws, hyp["hypothesis_id"])
         assert H.derive_hypothesis_status(ws, hyp["hypothesis_id"]) == "confirmed"
         stored = H.get_hypothesis(ws, hyp["hypothesis_id"])
@@ -359,7 +362,7 @@ class TestDeduplication:
     def test_experiment_differing_actor_is_new_experiment(self, ws: Path) -> None:
         """A replay-harness corroboration is never silently swallowed by a
         weaker actor's prior record (actor is part of the dedup key)."""
-        hyp = add_hyp(ws)
+        hyp = add_hyp(ws, minimum_confirmation="1")
         a = add_exp(ws, hyp["hypothesis_id"], action="probe", tool="curl",
                     actor="agent", result="inconclusive")
         b = add_exp(ws, hyp["hypothesis_id"], action="probe", tool="curl",
@@ -505,6 +508,40 @@ class TestRanking:
 
 
 class TestStatusDerivation:
+    @staticmethod
+    def _append_raw_exp(
+        ws: Path,
+        hyp_id: str,
+        *,
+        action: str = "curl -i /api/users",
+        result: str = "corroborating",
+        disconfirming_controls_checked: str = "",
+    ) -> None:
+        """Append an experiment record directly to the ledger, bypassing the
+        write-time validation gate (simulates a legacy/pre-gate record)."""
+        path = ws / ".lab" / "experiments.jsonl"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        rec = {
+            "schema": "security-lab/experiment/v1",
+            "experiment_id": f"exp-{uuid.uuid4()}",
+            "hypothesis_id": hyp_id,
+            "workspace_id": None,
+            "engagement": "demo",
+            "action": action,
+            "observation": "obs",
+            "expected_safe_observed": True,
+            "violation_signal_observed": False,
+            "result": result,
+            "scope": {"scope_checked": True, "target": "http://app",
+                      "engagement_scope_ref": "none"},
+            "provenance": {"actor": "agent", "agent": "opencode"},
+            "ts": "2026-08-03T00:00:00Z",
+            "evidence_refs": [],
+            "disconfirming_controls_checked": disconfirming_controls_checked,
+        }
+        with path.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(rec) + "\n")
+
     def test_no_experiments_is_unverified(self, ws: Path) -> None:
         hyp = add_hyp(ws)
         assert H.derive_hypothesis_status(ws, hyp["hypothesis_id"]) == "unverified"
@@ -515,9 +552,104 @@ class TestStatusDerivation:
         assert H.derive_hypothesis_status(ws, hyp["hypothesis_id"]) == "testing"
 
     def test_corroborating_confirms(self, ws: Path) -> None:
-        hyp = add_hyp(ws)
+        hyp = add_hyp(ws, minimum_confirmation="1")
         add_exp(ws, hyp["hypothesis_id"], result="corroborating")
         assert H.derive_hypothesis_status(ws, hyp["hypothesis_id"]) == "confirmed"
+
+    def test_single_corroborating_below_bar_stays_testing(self, ws: Path) -> None:
+        """The confirmation bar is enforced: one corroboration does not
+        confirm a hypothesis whose minimum_confirmation names 2."""
+        hyp = add_hyp(ws, minimum_confirmation="2 corroborating experiments")
+        add_exp(ws, hyp["hypothesis_id"], result="corroborating")
+        assert H.derive_hypothesis_status(ws, hyp["hypothesis_id"]) == "testing"
+
+    def test_corroborating_meeting_bar_confirms(self, ws: Path) -> None:
+        hyp = add_hyp(ws, minimum_confirmation="2 corroborating experiments")
+        add_exp(ws, hyp["hypothesis_id"], result="corroborating", action="probe-1")
+        add_exp(ws, hyp["hypothesis_id"], result="corroborating", action="probe-2")
+        assert H.derive_hypothesis_status(ws, hyp["hypothesis_id"]) == "confirmed"
+
+    def test_corroborating_without_controls_ruled_out_stays_testing(self, ws: Path) -> None:
+        """The disconfirmation gate is enforced at derivation time too: a
+        corroborating experiment (e.g. a legacy record written before the
+        write-time gate) that did not rule out the hypothesis's named
+        disconfirming controls does not count toward confirmation."""
+        hyp = add_hyp(
+            ws,
+            minimum_confirmation="1",
+            disconfirming_controls="Response is not cached; users are distinct",
+        )
+        self._append_raw_exp(ws, hyp["hypothesis_id"], result="corroborating",
+                             disconfirming_controls_checked="")
+        assert H.derive_hypothesis_status(ws, hyp["hypothesis_id"]) == "testing"
+
+    def test_corroborating_with_controls_ruled_out_confirms(self, ws: Path) -> None:
+        hyp = add_hyp(
+            ws,
+            minimum_confirmation="1",
+            disconfirming_controls="Response is not cached; users are distinct",
+        )
+        add_exp(ws, hyp["hypothesis_id"], result="corroborating",
+                disconfirming_controls_checked="no-store confirmed; user-A != user-B")
+        assert H.derive_hypothesis_status(ws, hyp["hypothesis_id"]) == "confirmed"
+
+    def test_unmet_bar_but_controls_missing_stays_testing(self, ws: Path) -> None:
+        hyp = add_hyp(
+            ws,
+            minimum_confirmation="2 corroborating experiments",
+            disconfirming_controls="Response is not cached",
+        )
+        self._append_raw_exp(ws, hyp["hypothesis_id"], result="corroborating",
+                             action="probe-1",
+                             disconfirming_controls_checked="no-store confirmed")
+        self._append_raw_exp(ws, hyp["hypothesis_id"], result="corroborating",
+                             action="probe-2",
+                             disconfirming_controls_checked="")
+        assert H.derive_hypothesis_status(ws, hyp["hypothesis_id"]) == "testing"
+
+    def test_unmet_bar_with_controls_ruled_out_stays_testing(self, ws: Path) -> None:
+        """Two corroborations with controls ruled out still do not confirm a
+        hypothesis whose bar names 3."""
+        hyp = add_hyp(ws, minimum_confirmation="3 corroborating experiments")
+        add_exp(ws, hyp["hypothesis_id"], result="corroborating", action="probe-1")
+        add_exp(ws, hyp["hypothesis_id"], result="corroborating", action="probe-2")
+        assert H.derive_hypothesis_status(ws, hyp["hypothesis_id"]) == "testing"
+
+    def test_named_signal_without_count_is_single_confirmation(self, ws: Path) -> None:
+        """A named evidence bar without a count ('callback within 30s') is a
+        single confirmation - the '30s' is a time window, not a count."""
+        hyp = add_hyp(ws, minimum_confirmation="OOB callback observed within 30s")
+        add_exp(ws, hyp["hypothesis_id"], result="corroborating")
+        assert H.derive_hypothesis_status(ws, hyp["hypothesis_id"]) == "confirmed"
+
+    def test_named_signal_with_count_is_counted(self, ws: Path) -> None:
+        hyp = add_hyp(ws, minimum_confirmation="2 OOB callbacks observed")
+        add_exp(ws, hyp["hypothesis_id"], result="corroborating", action="probe-1")
+        add_exp(ws, hyp["hypothesis_id"], result="corroborating", action="probe-2")
+        assert H.derive_hypothesis_status(ws, hyp["hypothesis_id"]) == "confirmed"
+
+    def test_write_time_gate_requires_controls_checked(self, ws: Path) -> None:
+        """A corroborating experiment for a hypothesis with named disconfirming
+        controls is rejected at write time when controls were not checked."""
+        hyp = add_hyp(
+            ws,
+            minimum_confirmation="1",
+            disconfirming_controls="Response is not cached; users are distinct",
+        )
+        with pytest.raises(H.HypothesisValidationError):
+            add_exp(ws, hyp["hypothesis_id"], result="corroborating",
+                    disconfirming_controls_checked="")
+        assert len(H.experiments_for(ws, hyp["hypothesis_id"])) == 0
+
+    def test_write_time_gate_accepts_controls_checked(self, ws: Path) -> None:
+        hyp = add_hyp(
+            ws,
+            minimum_confirmation="1",
+            disconfirming_controls="Response is not cached; users are distinct",
+        )
+        exp = add_exp(ws, hyp["hypothesis_id"], result="corroborating",
+                      disconfirming_controls_checked="no-store confirmed")
+        assert exp["disconfirming_controls_checked"] == "no-store confirmed"
 
     def test_disconfirming_disconfirms(self, ws: Path) -> None:
         hyp = add_hyp(ws)
@@ -869,13 +1001,14 @@ class TestCli:
         hyp_path.write_text(hyp_path.read_text(encoding="utf-8") + "not-json\n",
                             encoding="utf-8")
         rc, out, err = _run_cli(["validate", "--workspace", str(ws)], cwd=ws)
-        assert rc == 2  # non-strict still fails on malformed lines
+        assert rc == 0  # non-strict passes with a warning; malformed lines alone
         assert "malformed JSONL: hypotheses=1" in out
+        assert "warning: malformed lines present" in out
         rc, out, err = _run_cli(["validate", "--workspace", str(ws), "--strict"], cwd=ws)
-        assert rc == 2
+        assert rc == 2  # --strict fails on any malformed line
         assert "MALFORMED (hypothesis): line=2" in out
         rc, out, err = _run_cli(["validate", "--workspace", str(ws)], cwd=ws)
-        assert rc == 2
+        assert rc == 0
 
     def test_cli_validate_strict_accepts_clean_ledger(self, ws: Path) -> None:
         rc, _, err = _run_cli([

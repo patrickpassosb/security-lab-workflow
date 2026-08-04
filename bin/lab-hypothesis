@@ -515,9 +515,11 @@ def cmd_show(args: list[str]) -> int:
 
 def cmd_validate(args: list[str]) -> int:
     """Integrity check: referential integrity + scope safety + malformed-line
-    report. Read-only. Exit 0 when clean; 2 when any issue is found.
-    With --strict, any malformed/shape-invalid line (not just the presence of
-    one) also fails the check and is listed."""
+    report. Read-only. Exit 0 when clean; 2 when orphans or unsafe-scope
+    records are found. Malformed JSONL lines alone exit 0 with a warning
+    (they do not break the ledger read - the parser skips them) unless
+    --strict is given: with --strict, any malformed/shape-invalid line fails
+    the check (exit 2) and is listed."""
     value_flags = ("--workspace",)
     single, _multi, rc = _parse_flags(args, value_flags)
     if rc != 0:
@@ -545,11 +547,12 @@ def cmd_validate(args: list[str]) -> int:
     clean = (
         not report.orphan_experiments
         and not report.unsafe_scope_records
-        and not report.skipped_hypothesis_lines
-        and not report.skipped_experiment_lines
     )
     if strict and (report.skipped_hypothesis_lines or report.skipped_experiment_lines):
         clean = False
+    if not strict and (report.skipped_hypothesis_lines or report.skipped_experiment_lines):
+        # Malformed lines alone do not fail non-strict validate; warn instead.
+        print("warning: malformed lines present (use --strict to fail on them)")
     _audit(
         AUDIT_ACTION_VALIDATE, "",
         OK if clean else VALIDATION_ERR,
