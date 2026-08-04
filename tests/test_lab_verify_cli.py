@@ -233,3 +233,69 @@ class TestLabVerify:
             and e.get("outcome") == "verified"
             for e in entries
         )
+
+    def test_scope_refusal_audits_exit_2_with_reason(
+        self, capsys, tmp_path, cli_env, monkeypatch
+    ):
+        payload = {
+            "finding_id": "cli-audit-refused",
+            "cross_actor_response": '{"owner_user_id":"user_42","marker":"ctrl_7f3a"}',
+            "control_response": '{"error":"forbidden"}',
+            "victim_marker": "ctrl_7f3a",
+            "ownership_verified": True,
+            "ownership_identity": "user_42",
+            "target": "http://outofscope.example",
+            "engagement": "my-eng",
+        }
+        p = _write_payload(tmp_path, payload)
+        rc = _run(monkeypatch, "authorization", "--payload", str(p))
+        assert rc == 2
+        log_path = cli_env / "findings" / ".agent-audit.jsonl"
+        assert log_path.is_file()
+        raw_lines = [
+            line
+            for line in log_path.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+        entries = [json.loads(line) for line in raw_lines]
+        matches = [
+            e
+            for e in entries
+            if e.get("action") == "lab-verify"
+            and e.get("finding_id") == "cli-audit-refused"
+        ]
+        assert matches, "no lab-verify audit entry for the refused run"
+        entry = matches[-1]
+        assert entry.get("exit") == 2
+        assert "refused=" in entry.get("detail", "")
+
+    def test_non_string_payload_engagement_fails_cleanly(
+        self, capsys, tmp_path, cli_env, monkeypatch
+    ):
+        secret = "flag{GUID}"
+        payload = {
+            "finding_id": "cli-eng-crash",
+            "canary_location": "x",
+            "expected_sha256": _sha(secret),
+            "retrieved_value": secret,
+            "engagement": 123,
+        }
+        p = _write_payload(tmp_path, payload)
+        rc = _run(monkeypatch, "sha256_canary", "--payload", str(p))
+        assert rc == 1
+        log_path = cli_env / "findings" / ".agent-audit.jsonl"
+        raw_lines = [
+            line
+            for line in log_path.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+        entries = [json.loads(line) for line in raw_lines]
+        matches = [
+            e
+            for e in entries
+            if e.get("action") == "lab-verify" and e.get("exit") == 1
+        ]
+        assert matches, "no lab-verify audit entry for the failed run"
+        assert any(
+            "engagement must be a string" in e.get("detail", "") for e in matches
+        )

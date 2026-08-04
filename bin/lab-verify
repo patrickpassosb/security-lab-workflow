@@ -280,13 +280,24 @@ def main() -> int:
 
     # Audit the run. The outcome is the load-bearing detail the supervisor
     # needs to see -- a verified/disproved/insufficient verdict, plus the
-    # oracle and finding_id.
+    # oracle and finding_id. A scope refusal exits 2, so the audit entry
+    # must record the FINAL exit code (and the refusal reason) -- the audit
+    # log is the supervisor's attribution source and its exit field must
+    # match the documented contract (2 = scope refusal).
+    final_exit = 2 if (
+        result.outcome == V.OUTCOME_INSUFFICIENT and result.reason.startswith("refused:")
+    ) else 0
+    audit_detail = f"oracle={oracle} outcome={result.outcome} finding={result.finding_id}"
+    if final_exit == 2:
+        audit_detail += (
+            f" refused={result.reason[len('refused:'):].strip()}"
+        )
     labutil.audit(
         "lab-verify",
         target=target,
         engagement=engagement,
-        exit_code=0,
-        detail=f"oracle={oracle} outcome={result.outcome} finding={result.finding_id}",
+        exit_code=final_exit,
+        detail=audit_detail,
         oracle=oracle,
         outcome=result.outcome,
         finding_id=result.finding_id,
@@ -295,7 +306,7 @@ def main() -> int:
     # A scope refusal produces outcome=insufficient_evidence with a reason
     # starting "refused:". Surface that as exit code 2 so the caller can
     # distinguish "verdict reached" (0) from "refused on scope" (2).
-    if result.outcome == V.OUTCOME_INSUFFICIENT and result.reason.startswith("refused:"):
+    if final_exit == 2:
         print(
             f"refused: {result.reason[len('refused:'):].strip()}",
             file=sys.stderr,

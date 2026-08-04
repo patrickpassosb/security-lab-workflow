@@ -46,9 +46,9 @@ its own transcript:
   4. oob_callback - the result is accepted only from a CAPTURED callback
      record (the verifier reads a record the agent supplied). The agent does
      not get to assert "I saw a callback"; the verifier inspects the record.
-     No live external collector setup is required in this task -- the caller
-     supplies a captured callback record. (Live interactsh wiring lives in
-     bin/lab-oob; this oracle consumes its captured output.)
+     Live collector binding ships with bin/lab-oob, which emits records with
+     collector_id/timestamp/token; the oracle requires those collector-produced
+     fields and binds the record's token to the expected identifier.
 
 SAFETY INVARIANTS:
 
@@ -296,7 +296,18 @@ def _check_scope(target: str, engagement: str) -> tuple[bool, str]:
 
     The verifier never contacts the target; this check is purely about
     authorization to record the finding, not to probe the host.
+
+    Raises VerificationInputError when `engagement` is supplied but fails
+    labutil.validate_name -- the engagement name is interpolated into a
+    filesystem path below, so an invalid name must never reach the path
+    (path-traversal guard, covering the direct-API callers that skip
+    build_result).
     """
+    if engagement and not labutil.validate_name(engagement):
+        raise VerificationInputError(
+            f"invalid engagement name {engagement!r} -- use only letters, "
+            f"numbers, dots, hyphens, underscores (no '..', '/', '\\')"
+        )
     if not target:
         return True, ""
     # Parse the host from the target so we can record it for audit, but the
@@ -1140,19 +1151,24 @@ def verify_oob_callback(
     callback record; the agent does not get to assert "I saw a callback."
 
     The caller supplies a captured callback record (a dict the verifier
-    inspects). No live external collector setup is required in this task --
-    the record is the evidence. (Live interactsh wiring lives in bin/lab-oob;
-    this oracle consumes its captured output.)
+    inspects). Live collector binding ships with bin/lab-oob, which emits
+    exactly this record format:
+
+        {"collector_id": <str>, "token": <oast hostname>, "timestamp":
+         <ISO8601 UTC>, "type": "HTTP|DNS|SMTP|LDAP", "time": <ISO8601>,
+         "raw": <line>}
 
     The finding (a blind injection -- SSRF, blind XXE, blind RCE) is verified
     only when ALL of the following hold:
 
       1. `callback_record` is a non-empty dict (the caller supplied a
-         captured record, not an assertion).
-      2. The record contains the expected callback identifier (the unique
-         hostname/token the operator generated for this engagement). The
-         oracle checks `expected_callback_identifier` appears in the record's
-         stringified contents -- a substring check.
+         captured record, not an assertion) carrying the collector-produced
+         fields: `collector_id` (non-empty str), `timestamp` (non-empty str,
+         ISO-8601 UTC), and `token` (non-empty str). Missing or invalid any
+         of the three = insufficient_evidence, never verified.
+      2. The record's `token` equals `expected_callback_identifier` EXACTLY
+         (the unique hostname/token the operator generated for this
+         engagement). A mismatch = disproved (unrelated callback).
       3. The record indicates a real interaction was observed (HTTP, DNS,
          SMTP, or an explicit "received": true field). The oracle looks for
          one of: a "type" field in {HTTP, DNS, SMTP, LDAP}, a "received":
@@ -1166,10 +1182,11 @@ def verify_oob_callback(
     Args:
         finding_id: opaque id of the candidate finding.
         callback_record: the captured callback record (a dict). Must be
-            non-empty. This is the evidence -- not an assertion.
+            non-empty and carry collector_id/timestamp/token. This is the
+            evidence -- not an assertion.
         expected_callback_identifier: the unique callback hostname/token the
-            operator generated (e.g. "abc123.oast.fun"). The oracle checks
-            this appears in the stringified record.
+            operator generated (e.g. "abc123.oast.fun"). The record's `token`
+            field must equal this exactly.
         target/engagement/evidence: see module docstring.
 
     Raises:
@@ -1210,8 +1227,47 @@ def verify_oob_callback(
 
     record_str = json.dumps(callback_record, sort_keys=True) if callback_record else ""
 
-    # Control 1: a captured record was supplied (non-empty dict).
+    # A captured record was supplied (non-empty dict).
     record_present = bool(callback_record) and bool(record_str)
+
+    # Control 0: a collector-produced record was supplied (non-empty dict
+    # carrying collector_id / timestamp / token -- the fields bin/lab-oob
+    # emits). A bare agent-asserted dict without these fields is NOT the
+    # captured-record evidence the oracle is contractually bound to.
+    collector_id = callback_record.get("collector_id", "")
+    record_timestamp = callback_record.get("timestamp", "")
+    record_token = callback_record.get("token", "")
+    collector_fields_present = (
+        record_present
+        and _is_nonempty_str(collector_id)
+        and _is_nonempty_str(record_timestamp)
+        and bool(_TS_RE.match(record_timestamp))
+        and _is_nonempty_str(record_token)
+    )
+    collector_field_reasons: list[str] = []
+    if not _is_nonempty_str(collector_id):
+        collector_field_reasons.append("missing/invalid collector_id")
+    if not (_is_nonempty_str(record_timestamp) and bool(_TS_RE.match(record_timestamp))):
+        collector_field_reasons.append("missing/invalid timestamp (need ISO-8601 UTC)")
+    if not _is_nonempty_str(record_token):
+        collector_field_reasons.append("missing/invalid token")
+    controls.append(DisconfirmingControl(
+        name="collector_record_fields",
+        passed=collector_fields_present,
+        detail=(
+            "record carries collector-produced collector_id/timestamp/token"
+            if collector_fields_present
+            else "record is missing collector-produced fields ("
+                 + "; ".join(collector_field_reasons) + ")"
+        ),
+    ))
+    if not collector_fields_present:
+        reason_parts.append(
+            "insufficient: callback record lacks collector-produced "
+            "collector_id/timestamp/token"
+        )
+
+    # Control 1: a captured record was supplied (non-empty dict).
     controls.append(DisconfirmingControl(
         name="callback_record_captured",
         passed=record_present,
@@ -1226,23 +1282,31 @@ def verify_oob_callback(
             "insufficient: no captured callback record (agent assertion not accepted)"
         )
 
-    # Control 2: the record contains the expected callback identifier.
+    # Control 2: the record's token binds EXACTLY to the expected callback
+    # identifier. The identifier must appear in the stringified record AND,
+    # when the record carries a "token" field, that field must equal the
+    # expected identifier exactly (a substring anywhere in the record is not
+    # a binding -- an unrelated record mentioning the hostname in prose must
+    # not pass).
     identifier_present = (
-        record_present and expected_callback_identifier in record_str
+        collector_fields_present
+        and expected_callback_identifier in record_str
+        and record_token == expected_callback_identifier
     )
     controls.append(DisconfirmingControl(
         name="callback_identifier_matches",
         passed=identifier_present,
         detail=(
-            f"callback record contains the expected identifier ({expected_callback_identifier})"
+            f"record token equals the expected identifier ({expected_callback_identifier})"
             if identifier_present
-            else "callback record does NOT contain the expected identifier "
+            else "record does NOT bind the expected identifier -- token "
+                 f"{record_token!r} != expected {expected_callback_identifier!r} "
                  "(wrong/unrelated callback)"
         ),
     ))
-    if record_present and not identifier_present:
+    if collector_fields_present and not identifier_present:
         reason_parts.append(
-            "disproved: callback record does not contain the expected identifier "
+            "disproved: callback record does not bind the expected identifier "
             "(unrelated callback)"
         )
 
@@ -1251,7 +1315,7 @@ def verify_oob_callback(
     interaction_detail = ""
     if record_present:
         ctype = str(callback_record.get("type", "")).upper()
-        if ctype in ("HTTP", "DNS", "SMTP", "LDAP", "SMTP"):
+        if ctype in ("HTTP", "DNS", "SMTP", "LDAP"):
             interaction_observed = True
             interaction_detail = f"record type={ctype}"
         elif callback_record.get("received") is True:
@@ -1293,7 +1357,7 @@ def verify_oob_callback(
         )
 
     # Outcome.
-    if integrity_failures or not record_present:
+    if integrity_failures or not record_present or not collector_fields_present:
         outcome = OUTCOME_INSUFFICIENT
     elif not identifier_present:
         outcome = OUTCOME_DISPROVED
@@ -1519,6 +1583,10 @@ def build_result(
     finding_id = payload.get("finding_id", "")
     tgt = target or payload.get("target", "")
     eng = engagement or payload.get("engagement", "")
+    if not isinstance(eng, str):
+        raise VerificationInputError(
+            f"engagement must be a string, got {type(eng).__name__}"
+        )
     if eng and not labutil.validate_name(eng):
         raise VerificationInputError(
             f"invalid engagement name {eng!r} -- use only letters, numbers, "

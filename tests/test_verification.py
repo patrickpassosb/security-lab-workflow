@@ -331,7 +331,14 @@ class TestSHA256CanaryOracle:
 
 class TestOOBCallbackOracle:
     def _record(self, **over):
-        rec = {"type": "HTTP", "host": "abc123.oast.fun", "protocol": "https"}
+        rec = {
+            "collector_id": "host-12345",
+            "token": "abc123.oast.fun",
+            "timestamp": "2026-08-03T12:00:00Z",
+            "type": "HTTP",
+            "host": "abc123.oast.fun",
+            "protocol": "https",
+        }
         rec.update(over)
         return rec
 
@@ -345,6 +352,71 @@ class TestOOBCallbackOracle:
         assert V.validate_result(r) == []
         assert any(e.kind == "callback_record" for e in r.evidence)
 
+    def test_missing_collector_fields_is_insufficient(self):
+        """A record without collector-produced fields (collector_id /
+        timestamp / token) is NOT the captured-record evidence -- never
+        verified."""
+        for missing in ("collector_id", "timestamp", "token"):
+            rec = self._record()
+            del rec[missing]
+            r = V.verify_oob_callback(
+                f"oob-missing-{missing}",
+                callback_record=rec,
+                expected_callback_identifier="abc123.oast.fun",
+            )
+            assert r.outcome == V.OUTCOME_INSUFFICIENT
+        bad_ts = self._record(timestamp="not-a-timestamp")
+        r = V.verify_oob_callback(
+            "oob-bad-ts",
+            callback_record=bad_ts,
+            expected_callback_identifier="abc123.oast.fun",
+        )
+        assert r.outcome == V.OUTCOME_INSUFFICIENT
+        assert V.validate_result(r) == []
+
+    def test_verified_with_collector_fields_matching_token(self):
+        r = V.verify_oob_callback(
+            "oob-collector-ok",
+            callback_record=self._record(),
+            expected_callback_identifier="abc123.oast.fun",
+        )
+        assert r.outcome == V.OUTCOME_VERIFIED
+        assert V.validate_result(r) == []
+
+    def test_token_mismatch_is_disproved(self):
+        """The record's token must equal the expected identifier exactly; a
+        record that merely mentions the identifier in prose is not bound to
+        it."""
+        rec = self._record()
+        rec["token"] = "otherhost.oast.fun"
+        rec["host"] = "otherhost.oast.fun"
+        rec["note"] = "abc123.oast.fun"
+        r = V.verify_oob_callback(
+            "oob-token-mismatch",
+            callback_record=rec,
+            expected_callback_identifier="abc123.oast.fun",
+        )
+        assert r.outcome == V.OUTCOME_DISPROVED
+
+    def test_received_true_with_collector_fields_stays_strict_bool(self):
+        """received:true with all collector fields but no type field stays
+        verified; a non-bool received (e.g. the string "true") is not an
+        interaction signal."""
+        rec = self._record(type="", received=True)
+        r = V.verify_oob_callback(
+            "oob-received-bool",
+            callback_record=rec,
+            expected_callback_identifier="abc123.oast.fun",
+        )
+        assert r.outcome == V.OUTCOME_VERIFIED
+        rec2 = self._record(type="", received="true")
+        r2 = V.verify_oob_callback(
+            "oob-received-str",
+            callback_record=rec2,
+            expected_callback_identifier="abc123.oast.fun",
+        )
+        assert r2.outcome == V.OUTCOME_INSUFFICIENT
+
     def test_assertion_without_record_is_insufficient(self):
         r = V.verify_oob_callback(
             "oob-no-record",
@@ -355,9 +427,12 @@ class TestOOBCallbackOracle:
 
     def test_unrelated_identifier_is_disproved(self):
         """Record exists but lacks the expected identifier -> not our callback."""
+        rec = self._record()
+        rec["token"] = "otherhost.oast.fun"
+        rec["host"] = "otherhost.oast.fun"
         r = V.verify_oob_callback(
             "oob-unrelated",
-            callback_record=self._record(host="otherhost.oast.fun"),
+            callback_record=rec,
             expected_callback_identifier="abc123.oast.fun",
         )
         assert r.outcome == V.OUTCOME_DISPROVED
@@ -367,7 +442,7 @@ class TestOOBCallbackOracle:
         real observed interaction."""
         r = V.verify_oob_callback(
             "oob-nointeract",
-            callback_record={"host": "abc123.oast.fun", "note": "saw nothing"},
+            callback_record=self._record(type="", host="abc123.oast.fun", note="saw nothing"),
             expected_callback_identifier="abc123.oast.fun",
         )
         assert r.outcome == V.OUTCOME_INSUFFICIENT
@@ -375,7 +450,7 @@ class TestOOBCallbackOracle:
     def test_received_true_accepts(self):
         r = V.verify_oob_callback(
             "oob-received",
-            callback_record={"received": True, "host": "abc123.oast.fun"},
+            callback_record=self._record(type="", received=True),
             expected_callback_identifier="abc123.oast.fun",
         )
         assert r.outcome == V.OUTCOME_VERIFIED

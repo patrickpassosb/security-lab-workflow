@@ -36,7 +36,7 @@
     },
     "oracle": {
       "type": "string",
-      "description": "Which deterministic oracle produced this result.\n  - authorization: cross-actor response differential + controlled victim marker\n    + verified ownership/workspace identity.\n  - business_logic: separate post-action state read (not the mutation response).\n  - sha256_canary: agent received only location + expected SHA-256; the canary\n    value it retrieved must hash to the expected digest.\n  - oob_callback: result accepted only from a captured callback record;\n    no live external collector setup is required in this task.",
+      "description": "Which deterministic oracle produced this result.\n  - authorization: cross-actor response differential + controlled victim marker\n    + verified ownership/workspace identity.\n  - business_logic: separate post-action state read (not the mutation response).\n  - sha256_canary: agent received only location + expected SHA-256; the canary\n    value it retrieved must hash to the expected digest.\n  - oob_callback: result accepted only from a captured callback record; the\n    record must carry the collector-produced fields collector_id/timestamp/token\n    as emitted by bin/lab-oob.",
       "enum": ["authorization", "business_logic", "sha256_canary", "oob_callback"],
       "examples": ["authorization", "sha256_canary"]
     },
@@ -101,7 +101,7 @@
     },
     "disconfirming_controls": {
       "type": "array",
-      "description": "Disconfirming controls the oracle checked. A control is a check that, if it\nfires, refutes the finding (forces disproved or blocks verified). For an\nauthorization oracle, the control is 'the no-credential request is denied\n(401/403) — proving the endpoint is actually access-gated, so a cross-actor\n200 is a real bypass, not an unauthenticated endpoint.' For business-logic, the\ncontrol is 'the state read confirms the mutation did NOT happen when the\nprecondition was violated.' For SHA-256 canary, the control is 'the retrieved\nvalue hashes to the expected digest (any mismatch disproves).' For OOB, the\ncontrol is 'the callback record exists and was captured by the verifier (not\nasserted by the agent).' Each entry documents whether the control passed\n(refutes) or held (supports the finding).",
+      "description": "Disconfirming controls the oracle checked. A control is a check that, if it\nfires, refutes the finding (forces disproved or blocks verified). For an\nauthorization oracle, the control is 'the no-credential request is denied\n(401/403) — proving the endpoint is actually access-gated, so a cross-actor\n200 is a real bypass, not an unauthenticated endpoint.' For business-logic, the\ncontrol is 'the state read confirms the mutation did NOT happen when the\nprecondition was violated.' For SHA-256 canary, the control is 'the retrieved\nvalue hashes to the expected digest (any mismatch disproves).' For OOB, the\ncontrol is 'the callback record exists and was captured by the verifier (not\nasserted by the agent), carrying the collector-produced fields\ncollector_id/timestamp/token as emitted by bin/lab-oob, with the record's\ntoken bound exactly to the expected identifier.' Each entry documents whether the control passed\n(refutes) or held (supports the finding).",
       "items": {
         "type": "object",
         "additionalProperties": false,
