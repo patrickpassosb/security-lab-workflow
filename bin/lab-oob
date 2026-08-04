@@ -50,10 +50,6 @@ def collector_id() -> str:
     return f"{socket.gethostname()}-{os.getpid()}"
 
 
-def iso_utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat()
-
-
 _CALLBACK_PROTOCOL_TOKENS = ("DNS", "HTTP", "SMTP", "LDAP")
 _CALLBACK_KEYWORDS = ("Interaction", "Received", "Received interaction")
 
@@ -263,6 +259,7 @@ def poll_listener(timeout: int = 60) -> int:
                         "token": url,
                         "timestamp": record_ts,
                         "type": cb_type,
+                        "received": True,
                         "time": datetime.now(timezone.utc).isoformat(),
                         "raw": line[:500],
                     })
@@ -308,6 +305,7 @@ def check_once() -> int:
                     "token": url,
                     "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
                     "type": cb_type,
+                    "received": True,
                     "time": datetime.now(timezone.utc).isoformat(),
                     "raw": line[:500],
                 })
