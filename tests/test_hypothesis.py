@@ -6,7 +6,9 @@ Covers the acceptance criteria:
     hallucinated ids raise HypothesisNotFoundError carrying the valid ids
     (structured retryable error).
   - deterministic deduplication: duplicate hypothesis (dedup key) and
-    duplicate experiment (hypothesis_id + action + tool) adds are no-ops.
+    duplicate experiment (hypothesis_id + action + tool + actor + result)
+    adds are no-ops; a re-test with a different outcome or actor records a
+    new experiment.
   - ranking: primitive leverage * scope safety * impact * novelty
     * (1 - dead_end_penalty); deterministic tie-breaks; unsafe-scope records
     dropped; contradictory surfaced at the top.
@@ -265,7 +267,8 @@ class TestReferentialIntegrity:
 
     def test_strict_mode_raises_on_duplicate(self, ws: Path) -> None:
         hyp = add_hyp(ws)
-        add_exp(ws, hyp["hypothesis_id"], action="probe", tool="curl")
+        add_exp(ws, hyp["hypothesis_id"], action="probe", tool="curl",
+                result="inconclusive", actor="agent")
         with pytest.raises(H.DuplicateExperimentError):
             H.add_experiment(
                 workspace_dir=ws,
@@ -274,7 +277,7 @@ class TestReferentialIntegrity:
                 engagement="demo",
                 action="probe",
                 observation="o",
-                expected_safe_observed=True,
+                expected_safe_observed=False,
                 violation_signal_observed=False,
                 result="inconclusive",
                 scope=_local_scope(),
@@ -339,6 +342,32 @@ class TestDeduplication:
                     observation="obs two")
         assert a["experiment_id"] == b["experiment_id"]
 
+    def test_experiment_differing_result_is_new_experiment(self, ws: Path) -> None:
+        """A re-test whose outcome differs records a NEW experiment instead of
+        returning the stale record (result is part of the dedup key)."""
+        hyp = add_hyp(ws)
+        a = add_exp(ws, hyp["hypothesis_id"], action="probe", tool="curl",
+                    result="inconclusive")
+        b = add_exp(ws, hyp["hypothesis_id"], action="probe", tool="curl",
+                    result="corroborating")
+        assert a["experiment_id"] != b["experiment_id"]
+        assert len(H.experiments_for(ws, hyp["hypothesis_id"])) == 2
+        c = add_exp(ws, hyp["hypothesis_id"], action="probe", tool="curl",
+                    result="inconclusive")
+        assert c["experiment_id"] == a["experiment_id"]
+
+    def test_experiment_differing_actor_is_new_experiment(self, ws: Path) -> None:
+        """A replay-harness corroboration is never silently swallowed by a
+        weaker actor's prior record (actor is part of the dedup key)."""
+        hyp = add_hyp(ws)
+        a = add_exp(ws, hyp["hypothesis_id"], action="probe", tool="curl",
+                    actor="agent", result="inconclusive")
+        b = add_exp(ws, hyp["hypothesis_id"], action="probe", tool="curl",
+                    actor="replay-harness", result="corroborating")
+        assert a["experiment_id"] != b["experiment_id"]
+        assert len(H.experiments_for(ws, hyp["hypothesis_id"])) == 2
+        assert H.derive_hypothesis_status(ws, hyp["hypothesis_id"]) == "confirmed"
+
 
 # ─── Ranking (deterministic) ──────────────────────────────────────────────────
 
@@ -377,6 +406,28 @@ class TestRanking:
         r2 = [(r.record["hypothesis_id"], r.score) for r in H.rank(ws)]
         assert r1 == r2
         assert len(r1) == 3
+
+    def test_impact_keyword_match_is_word_boundary(self, ws: Path) -> None:
+        """Short impact keys ('low'/'high'/'medium') must not substring-match
+        inside unrelated words (workflow, enforcement, glossary, highlight)."""
+        add_hyp(ws, invariant="workflow enforcement bypass", surface="/wf",
+                mutation="m", primitive_leverage="state_changing")
+        add_hyp(ws, invariant="glossary highlights the parser", surface="/gloss",
+                mutation="m", primitive_leverage="state_changing")
+        ranked = {r.record["surface"]: r for r in H.rank(ws)}
+        # Neither surface/invariant contains a standalone impact keyword ->
+        # both fall back to the default impact (no 'low'/'high'/'medium' bias).
+        assert ranked["/wf"].impact_potential == H._DEFAULT_IMPACT
+        assert ranked["/gloss"].impact_potential == H._DEFAULT_IMPACT
+
+    def test_impact_keyword_match_still_fires(self, ws: Path) -> None:
+        add_hyp(ws, invariant="rce in the upload parser", surface="/up",
+                mutation="m", tags=[])
+        add_hyp(ws, invariant="critical authz bug", surface="/up2",
+                mutation="m", tags=[])
+        ranked = {r.record["surface"]: r for r in H.rank(ws)}
+        assert ranked["/up"].impact_potential == H._IMPACT_BY_TAG["rce"]
+        assert ranked["/up2"].impact_potential == H._IMPACT_BY_TAG["critical"]
 
     def test_rank_orders_by_leverage_and_impact(self, ws: Path) -> None:
         ids = self._add_ranked_hyps(ws)
@@ -764,3 +815,76 @@ class TestCli:
         rc, out, _ = _run_cli([], cwd=ws)
         assert rc == 0
         assert "lab-hypothesis" in out
+
+    def test_cli_list_filters_derived_status(self, ws: Path) -> None:
+        """list --status filters the DERIVED status (contradictory accepted)."""
+        rc, out, _ = _run_cli([
+            "add", "--workspace", str(ws), "--engagement", "demo",
+            "--invariant", "inv", "--surface", "/api/x",
+            "--mutation", "m", "--expected-safe", "401",
+            "--violation-signal", "200", "--minimum-confirmation", "2",
+            "--primitive-leverage", "read_only", "--precondition-actor", "anon",
+        ], cwd=ws)
+        assert rc == 0
+        hyp_id = out.split("ADDED: ")[1].strip().splitlines()[0]
+        rc, out, err = _run_cli([
+            "experiment", "--workspace", str(ws), "--engagement", "demo",
+            "--hypothesis-id", hyp_id, "--action", "a", "--observation", "o",
+            "--expected-safe-observed", "true", "--violation-signal-observed", "false",
+            "--result", "corroborating", "--actor", "agent",
+        ], cwd=ws)
+        assert rc == 0, err
+        rc, out, err = _run_cli([
+            "experiment", "--workspace", str(ws), "--engagement", "demo",
+            "--hypothesis-id", hyp_id, "--action", "b", "--observation", "o2",
+            "--expected-safe-observed", "false", "--violation-signal-observed", "true",
+            "--result", "disconfirming", "--actor", "agent",
+        ], cwd=ws)
+        assert rc == 0, err
+        # The stored status is 'unverified'; the derived status is contradictory.
+        rc, out, err = _run_cli(
+            ["list", "--workspace", str(ws), "--status", "contradictory"], cwd=ws)
+        assert rc == 0, err
+        assert hyp_id in out
+        assert "contradictory" in out
+        rc, out, err = _run_cli(
+            ["list", "--workspace", str(ws), "--status", "confirmed"], cwd=ws)
+        assert rc == 0, err
+        assert "(no hypotheses)" in out
+        rc, out, err = _run_cli(
+            ["list", "--workspace", str(ws), "--status", "bogus"], cwd=ws)
+        assert rc == 1
+        assert "must be one of" in err
+
+    def test_cli_validate_strict_flags_malformed_lines(self, ws: Path) -> None:
+        rc, _, err = _run_cli([
+            "add", "--workspace", str(ws), "--engagement", "demo",
+            "--invariant", "inv", "--surface", "/api/x",
+            "--mutation", "m", "--expected-safe", "401",
+            "--violation-signal", "200", "--minimum-confirmation", "2",
+            "--primitive-leverage", "read_only", "--precondition-actor", "anon",
+        ], cwd=ws)
+        assert rc == 0, err
+        hyp_path = ws / ".lab" / "hypotheses.jsonl"
+        hyp_path.write_text(hyp_path.read_text(encoding="utf-8") + "not-json\n",
+                            encoding="utf-8")
+        rc, out, err = _run_cli(["validate", "--workspace", str(ws)], cwd=ws)
+        assert rc == 2  # non-strict still fails on malformed lines
+        assert "malformed JSONL: hypotheses=1" in out
+        rc, out, err = _run_cli(["validate", "--workspace", str(ws), "--strict"], cwd=ws)
+        assert rc == 2
+        assert "MALFORMED (hypothesis): line=2" in out
+        rc, out, err = _run_cli(["validate", "--workspace", str(ws)], cwd=ws)
+        assert rc == 2
+
+    def test_cli_validate_strict_accepts_clean_ledger(self, ws: Path) -> None:
+        rc, _, err = _run_cli([
+            "add", "--workspace", str(ws), "--engagement", "demo",
+            "--invariant", "inv", "--surface", "/api/x",
+            "--mutation", "m", "--expected-safe", "401",
+            "--violation-signal", "200", "--minimum-confirmation", "2",
+            "--primitive-leverage", "read_only", "--precondition-actor", "anon",
+        ], cwd=ws)
+        assert rc == 0, err
+        rc, out, err = _run_cli(["validate", "--workspace", str(ws), "--strict"], cwd=ws)
+        assert rc == 0, err

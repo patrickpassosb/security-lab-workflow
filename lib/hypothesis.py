@@ -25,8 +25,8 @@ scanner output):
      in hypotheses.jsonl. A hallucinated or otherwise unknown id is rejected
      with `HypothesisNotFoundError`, a structured retryable error carrying the
      list of valid ids so the caller (human or LLM) can retry with a real id.
-     A duplicate experiment (same hypothesis_id + action + tool) is a no-op
-     that returns the existing record.
+     A duplicate experiment (same hypothesis_id + action + tool + actor +
+     result) is a no-op that returns the existing record.
 
   2. Scope safety (default-deny, AGENTS.md):
      a record that bears a target (scope.target non-empty) MUST carry
@@ -51,7 +51,8 @@ scanner output):
 
   5. Deterministic deduplication:
      - hypotheses dedupe by (workspace_id, engagement, surface, invariant, mutation).
-     - experiments dedupe by (hypothesis_id, action, provenance.tool).
+     - experiments dedupe by (hypothesis_id, action, provenance.tool,
+       provenance.actor, result).
      `add_*` does an idempotent read-then-append: a duplicate add returns the
      existing record and writes nothing. The dedup keys are sortable strings
      so two agents running concurrently land on the same key.
@@ -178,11 +179,6 @@ _DEFAULT_IMPACT = 0.5
 
 # Dead-end penalty applied when a (surface, invariant) hashes to a known dead end.
 DEFAULT_DEAD_END_PENALTY = 0.85
-
-# Scope result values accepted by the library (lab-scope exit codes).
-SCOPE_RESULT_OK = "ok"
-SCOPE_RESULT_DENIED = "denied"
-SCOPE_RESULT_UNKNOWN = "unknown"
 
 
 # --- Errors --------------------------------------------------------------------
@@ -381,15 +377,23 @@ def hypothesis_dedup_key(record: dict[str, Any]) -> str:
 
 def experiment_dedup_key(record: dict[str, Any]) -> str:
     """The deterministic dedup key for an experiment:
-    (hypothesis_id, action, provenance.tool|null). Re-running the same action
-    by the same tool is a no-op; a different tool running the same action is a
-    distinct experiment (cross-tool corroboration)."""
+    (hypothesis_id, action, provenance.tool|null, provenance.actor|null,
+    result). Re-running the same action by the same tool and actor with the
+    same outcome is a no-op; a different tool or actor running the same
+    action is a distinct experiment (cross-tool/cross-actor corroboration),
+    and a re-test whose outcome differs records a NEW experiment instead of
+    silently returning the stale record."""
     hyp_id = str(record.get("hypothesis_id") or "")
     action = str(record.get("action") or "")
-    tool = str(record.get("provenance", {}).get("tool") or "none") if isinstance(
-        record.get("provenance"), dict
-    ) else "none"
-    return _stable_hash(hyp_id, action, tool)
+    prov = record.get("provenance")
+    if isinstance(prov, dict):
+        tool = str(prov.get("tool") or "none")
+        actor = str(prov.get("actor") or "none")
+    else:
+        tool = "none"
+        actor = "none"
+    result = str(record.get("result") or "")
+    return _stable_hash(hyp_id, action, tool, actor, result)
 
 
 # --- Scope safety -------------------------------------------------------------
@@ -402,7 +406,7 @@ def _target_is_borne(scope: dict[str, Any]) -> bool:
     return _is_non_empty_str(scope.get("target"))
 
 
-def _validate_scope(scope: Any, *, target_required_ok: bool = True) -> None:
+def _validate_scope(scope: Any) -> None:
     """Validate the scope block and enforce the default-deny scope gate.
 
     - scope must be a dict with scope_checked (bool), target (str), and
@@ -411,8 +415,6 @@ def _validate_scope(scope: Any, *, target_required_ok: bool = True) -> None:
       rejects target-bearing records with scope_checked=false - an
       out-of-scope finding cannot enter the ledger. This is the immutable
       scope-provenance gate (acceptance criterion).
-    - `target_required_ok` lets experiments relax the gate when the caller
-      has already validated scope upstream (kept for future use; default True).
     """
     if not isinstance(scope, dict):
         raise HypothesisValidationError(
@@ -526,7 +528,7 @@ def _validate_experiment(record: dict[str, Any], *, hypothesis_exists: bool, hyp
         )
     if not HYPOTHESIS_ID_RE.match(record["hypothesis_id"]):
         raise HypothesisValidationError(
-            f"hypothesis_id must match hyp-<uuid4>, got {record['experiment_id']!r}"
+            f"hypothesis_id must match hyp-<uuid4>, got {record['hypothesis_id']!r}"
         )
     # .refine() gate: the hypothesis must exist.
     if not hypothesis_exists:
@@ -678,9 +680,9 @@ def add_experiment(
     Referential integrity (.refine() gate, Shannon pattern): `hypothesis_id`
     MUST exist in hypotheses.jsonl. A hallucinated id raises
     `HypothesisNotFoundError` carrying the list of valid ids so the caller
-    can retry. A duplicate experiment (same hypothesis_id + action + tool) is
-    a no-op that returns the existing record (or, in strict mode, raises
-    `DuplicateExperimentError`).
+    can retry. A duplicate experiment (same hypothesis_id + action + tool +
+    actor + result) is a no-op that returns the existing record (or, in
+    strict mode, raises `DuplicateExperimentError`).
 
     Scanner-verdict guard: a record with provenance.actor="tool" and
     result="corroborating" is REJECTED with `ScannerVerdictError` - scanner
@@ -824,12 +826,14 @@ def _impact_score(record: dict[str, Any]) -> float:
             key = str(t).lower()
             if key in _IMPACT_BY_TAG:
                 return _IMPACT_BY_TAG[key]
-    # Keyword fallback on surface/invariant.
+    # Keyword fallback on surface/invariant. Word-boundary matching so short
+    # keys like 'low'/'high'/'medium'/'rce' do not substring-match inside
+    # unrelated words (workflow, enforcement, glossary, highlight).
     haystack = (
         str(record.get("surface") or "") + " " + str(record.get("invariant") or "")
     ).lower()
     for key, score in _IMPACT_BY_TAG.items():
-        if key in haystack:
+        if re.search(rf"\b{re.escape(key)}\b", haystack):
             return score
     return _DEFAULT_IMPACT
 

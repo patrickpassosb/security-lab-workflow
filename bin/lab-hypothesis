@@ -143,7 +143,7 @@ def _parse_flags(
                 single[a] = args[i + 1]
             i += 2
             continue
-        if a in ("--scope-ok",):
+        if a in ("--scope-ok", "--strict"):
             single[a] = "true"
             i += 1
             continue
@@ -435,30 +435,40 @@ def cmd_rank(args: list[str]) -> int:
 
 
 def cmd_list(args: list[str]) -> int:
-    """List hypotheses (optionally filter by status)."""
+    """List hypotheses (optionally filter by DERIVED status)."""
     value_flags = ("--workspace", "--status")
     single, _multi, rc = _parse_flags(args, value_flags)
     if rc != 0:
         return rc
     ws_dir = _resolve_workspace(single)
     read = H.list_hypotheses(ws_dir)
+    derived_statuses = {
+        H.DERIVED_UNVERIFIED, H.DERIVED_TESTING, H.DERIVED_CONFIRMED,
+        H.DERIVED_DISCONFIRMED, H.DERIVED_CONTRADICTORY, H.DERIVED_SUPERSEDED,
+    }
     status_filter = single.get("--status")
-    if status_filter and status_filter not in H.HYPOTHESIS_STATUSES:
-        print(f"--status must be one of {sorted(H.HYPOTHESIS_STATUSES)}, "
+    if status_filter and status_filter not in derived_statuses:
+        print(f"--status must be one of {sorted(derived_statuses)}, "
               f"got {status_filter!r}", file=sys.stderr)
         return USAGE_ERR
-    rows = read.records
-    if status_filter:
-        rows = [r for r in rows if r.get("status") == status_filter]
+    rows = []
+    for r in read.records:
+        hid = str(r.get("hypothesis_id") or "")
+        if not H.HYPOTHESIS_ID_RE.match(hid):
+            continue
+        derived = H.derive_hypothesis_status(ws_dir, hid)
+        if status_filter and derived != status_filter:
+            continue
+        rows.append((hid, derived, r))
     if not rows:
         print("(no hypotheses)")
         _audit(AUDIT_ACTION_LIST, "", OK, detail="no hypotheses")
         return OK
     print(f"{'ID':40}{'STATUS':14}{'PRIM':16}SURFACE")
-    for r in rows:
+    for hid, derived, r in rows:
         print(
-            f"{str(r.get('hypothesis_id'))[:40]:40}"
-            f"{str(r.get('status'))[:14]:14}"
+            f"{str(hid)[:40]:40}"
+            f"{str(derived)[:14]:14}"
             f"{str(r.get('primitive_leverage'))[:16]:16}"
             f"{str(r.get('surface'))}"
         )
@@ -505,12 +515,15 @@ def cmd_show(args: list[str]) -> int:
 
 def cmd_validate(args: list[str]) -> int:
     """Integrity check: referential integrity + scope safety + malformed-line
-    report. Read-only. Exit 0 when clean; 2 when any issue is found."""
+    report. Read-only. Exit 0 when clean; 2 when any issue is found.
+    With --strict, any malformed/shape-invalid line (not just the presence of
+    one) also fails the check and is listed."""
     value_flags = ("--workspace",)
     single, _multi, rc = _parse_flags(args, value_flags)
     if rc != 0:
         return rc
     ws_dir = _resolve_workspace(single)
+    strict = single.get("--strict") == "true"
     report = H.validate_ledger(ws_dir)
     print(f"hypotheses: {report.hypotheses_count}")
     print(f"experiments: {report.experiments_count}")
@@ -525,22 +538,59 @@ def cmd_validate(args: list[str]) -> int:
             f"malformed JSONL: hypotheses={report.skipped_hypothesis_lines} "
             f"experiments={report.skipped_experiment_lines}"
         )
+        if strict:
+            for bad in _malformed_lines(ws_dir):
+                print(f"  MALFORMED ({bad.get('kind')}): line={bad.get('line')} "
+                      f"file={bad.get('path')} error={bad.get('error')}")
     clean = (
         not report.orphan_experiments
         and not report.unsafe_scope_records
         and not report.skipped_hypothesis_lines
         and not report.skipped_experiment_lines
     )
+    if strict and (report.skipped_hypothesis_lines or report.skipped_experiment_lines):
+        clean = False
     _audit(
         AUDIT_ACTION_VALIDATE, "",
         OK if clean else VALIDATION_ERR,
         detail=(
             f"hyps={report.hypotheses_count} exps={report.experiments_count} "
             f"orphans={len(report.orphan_experiments)} "
-            f"unsafe={len(report.unsafe_scope_records)}"
+            f"unsafe={len(report.unsafe_scope_records)} "
+            f"strict={strict}"
         ),
     )
     return OK if clean else VALIDATION_ERR
+
+
+def _malformed_lines(ws_dir: Path) -> list[dict[str, str]]:
+    """Re-read both ledgers line by line and report each line that does not
+    parse to a dict (strict mode listing)."""
+    import json
+
+    out: list[dict[str, str]] = []
+    for fname, kind in (("hypotheses.jsonl", "hypothesis"),
+                        ("experiments.jsonl", "experiment")):
+        path = ws_dir / ".lab" / fname
+        if not path.is_file():
+            continue
+        try:
+            lines = path.read_text(encoding="utf-8").splitlines()
+        except OSError:
+            continue
+        for i, s in enumerate(lines, 1):
+            if not s.strip():
+                continue
+            try:
+                obj = json.loads(s)
+            except ValueError as e:
+                out.append({"kind": kind, "line": str(i), "path": fname,
+                            "error": str(e)})
+                continue
+            if not isinstance(obj, dict):
+                out.append({"kind": kind, "line": str(i), "path": fname,
+                            "error": "not a JSON object"})
+    return out
 
 
 # --- dispatch -----------------------------------------------------------------
