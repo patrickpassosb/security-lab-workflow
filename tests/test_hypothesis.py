@@ -371,6 +371,26 @@ class TestDeduplication:
         assert len(H.experiments_for(ws, hyp["hypothesis_id"])) == 2
         assert H.derive_hypothesis_status(ws, hyp["hypothesis_id"]) == "confirmed"
 
+    def test_controls_checked_rerecord_is_not_deduped_away(self, ws: Path) -> None:
+        """A remediation re-record (disconfirming controls now ruled out) is a
+        NEW experiment, never swallowed by a stale legacy record that left
+        them unchecked - the derived status can recover from 'testing'."""
+        hyp = add_hyp(
+            ws,
+            minimum_confirmation="1",
+            disconfirming_controls="Response is not cached",
+        )
+        TestStatusDerivation._append_raw_exp(ws, hyp["hypothesis_id"],
+                                             action="probe", result="corroborating",
+                                             disconfirming_controls_checked="")
+        assert H.derive_hypothesis_status(ws, hyp["hypothesis_id"]) == "testing"
+        exp = add_exp(ws, hyp["hypothesis_id"], action="probe", tool="curl",
+                      result="corroborating",
+                      disconfirming_controls_checked="no-store confirmed")
+        assert exp["disconfirming_controls_checked"] == "no-store confirmed"
+        assert len(H.experiments_for(ws, hyp["hypothesis_id"])) == 2
+        assert H.derive_hypothesis_status(ws, hyp["hypothesis_id"]) == "confirmed"
+
 
 # ─── Ranking (deterministic) ──────────────────────────────────────────────────
 
@@ -622,10 +642,31 @@ class TestStatusDerivation:
         add_exp(ws, hyp["hypothesis_id"], result="corroborating")
         assert H.derive_hypothesis_status(ws, hyp["hypothesis_id"]) == "confirmed"
 
+    def test_schema_canonical_example_is_single_confirmation(self, ws: Path) -> None:
+        """The schema's own canonical example contains a status code ('a
+        200') - it must parse as a named signal (bar=1), never 200."""
+        hyp = add_hyp(
+            ws,
+            minimum_confirmation="Cross-session request returns user-B's "
+            "controlled marker AND owner_user_id verified as user-B's "
+            "(not just a 200).",
+        )
+        add_exp(ws, hyp["hypothesis_id"], result="corroborating")
+        assert H.derive_hypothesis_status(ws, hyp["hypothesis_id"]) == "confirmed"
+
     def test_named_signal_with_count_is_counted(self, ws: Path) -> None:
         hyp = add_hyp(ws, minimum_confirmation="2 OOB callbacks observed")
         add_exp(ws, hyp["hypothesis_id"], result="corroborating", action="probe-1")
         add_exp(ws, hyp["hypothesis_id"], result="corroborating", action="probe-2")
+        assert H.derive_hypothesis_status(ws, hyp["hypothesis_id"]) == "confirmed"
+
+    def test_bare_integer_field_is_the_bar(self, ws: Path) -> None:
+        """A minimum_confirmation that is a bare integer is itself the bar."""
+        hyp = add_hyp(ws, minimum_confirmation="3")
+        add_exp(ws, hyp["hypothesis_id"], result="corroborating", action="probe-1")
+        add_exp(ws, hyp["hypothesis_id"], result="corroborating", action="probe-2")
+        assert H.derive_hypothesis_status(ws, hyp["hypothesis_id"]) == "testing"
+        add_exp(ws, hyp["hypothesis_id"], result="corroborating", action="probe-3")
         assert H.derive_hypothesis_status(ws, hyp["hypothesis_id"]) == "confirmed"
 
     def test_write_time_gate_requires_controls_checked(self, ws: Path) -> None:
@@ -693,6 +734,15 @@ class TestScannerVerdictGate:
         hyp = add_hyp(ws)
         with pytest.raises(H.ScannerVerdictError):
             add_exp(ws, hyp["hypothesis_id"], result="corroborating", actor="tool",
+                    tool="nuclei")
+        assert len(H.experiments_for(ws, hyp["hypothesis_id"])) == 0
+
+    def test_tool_origin_cannot_disconfirm(self, ws: Path) -> None:
+        """Symmetric guard: a tool cannot kill a hypothesis with a single
+        disconfirming record either (ranker treats disconfirmed as terminal)."""
+        hyp = add_hyp(ws)
+        with pytest.raises(H.ScannerVerdictError):
+            add_exp(ws, hyp["hypothesis_id"], result="disconfirming", actor="tool",
                     tool="nuclei")
         assert len(H.experiments_for(ws, hyp["hypothesis_id"])) == 0
 

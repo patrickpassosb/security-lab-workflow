@@ -21,7 +21,8 @@ Invariants enforced by the library (this CLI never bypasses them):
   - Scope safety (default-deny): a record with a --target MUST pass --scope-ok;
     target-bearing records without a passing scope check are rejected.
   - Scanner findings are hypotheses, never verdicts: --source != "manual" is
-    forced to status=unverified; only `experiment` records can corroborate.
+    forced to status=unverified; only `experiment` records (actor=agent or
+    replay-harness) can corroborate or disconfirm.
 
 Subcommands:
     add          append a hypothesis (manual or scanner/tool-sourced)

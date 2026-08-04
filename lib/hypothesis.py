@@ -39,9 +39,11 @@ scanner output):
   3. Scanner findings are hypotheses, never verdicts (AGENTS.md rule #2, the
      "tool output is data" rule): a record with provenance.source != "manual"
      is FORCED to status="unverified". Only an experiment record (authored by
-     an agent or a deterministic replay harness) can corroborate or disconfirm.
-     A scanner cannot record `result="corroborating"` directly - the library
-     rejects it with `ScannerVerdictError`.
+     an agent or a deterministic replay harness) can corroborate or
+     disconfirm. A scanner cannot record `result="corroborating"` or
+     `result="disconfirming"` directly - the library rejects both with
+     `ScannerVerdictError` (a tool must not be able to kill a hypothesis
+     with a single flaky disconfirming record).
 
   4. Append-only: records are never modified. The ledger is the source of
      truth; `derive_hypothesis_status()` reads the experiment ledger and
@@ -52,10 +54,12 @@ scanner output):
   5. Deterministic deduplication:
      - hypotheses dedupe by (workspace_id, engagement, surface, invariant, mutation).
      - experiments dedupe by (hypothesis_id, action, provenance.tool,
-       provenance.actor, result).
+       provenance.actor, result, disconfirming_controls_checked).
      `add_*` does an idempotent read-then-append: a duplicate add returns the
      existing record and writes nothing. The dedup keys are sortable strings
-     so two agents running concurrently land on the same key.
+     so two agents running concurrently land on the same key. The
+     disconfirming_controls_checked component ensures a remediation re-record
+     (controls ruled out) is never deduped away by a stale legacy record.
 
   6. Immutable provenance: scope, engagement, workspace_id, target, provenance,
      and ts are set at write time and never change. The ledger never deletes
@@ -378,11 +382,14 @@ def hypothesis_dedup_key(record: dict[str, Any]) -> str:
 def experiment_dedup_key(record: dict[str, Any]) -> str:
     """The deterministic dedup key for an experiment:
     (hypothesis_id, action, provenance.tool|null, provenance.actor|null,
-    result). Re-running the same action by the same tool and actor with the
-    same outcome is a no-op; a different tool or actor running the same
-    action is a distinct experiment (cross-tool/cross-actor corroboration),
-    and a re-test whose outcome differs records a NEW experiment instead of
-    silently returning the stale record."""
+    result, disconfirming_controls_checked). Re-running the same action by
+    the same tool and actor with the same outcome is a no-op; a different
+    tool or actor running the same action is a distinct experiment
+    (cross-tool/cross-actor corroboration), and a re-test whose outcome
+    differs records a NEW experiment instead of silently returning the
+    stale record. `disconfirming_controls_checked` is part of the key so a
+    remediation re-record (controls now ruled out) is never swallowed by a
+    stale legacy record that left them unchecked."""
     hyp_id = str(record.get("hypothesis_id") or "")
     action = str(record.get("action") or "")
     prov = record.get("provenance")
@@ -393,7 +400,8 @@ def experiment_dedup_key(record: dict[str, Any]) -> str:
         tool = "none"
         actor = "none"
     result = str(record.get("result") or "")
-    return _stable_hash(hyp_id, action, tool, actor, result)
+    controls = str(record.get("disconfirming_controls_checked") or "")
+    return _stable_hash(hyp_id, action, tool, actor, result, controls)
 
 
 # --- Scope safety -------------------------------------------------------------
@@ -697,10 +705,11 @@ def add_experiment(
     strict mode, raises `DuplicateExperimentError`).
 
     Scanner-verdict guard: a record with provenance.actor="tool" and
-    result="corroborating" is REJECTED with `ScannerVerdictError` - scanner
-    findings enter as unverified hypotheses only, never as verdicts. Tool
-    experiments that produce a deterministic signal (e.g. a fuzzer's ASan
-    crash) use actor="fuzz-harness"/"replay-harness", not "tool".
+    result="corroborating" OR "disconfirming" is REJECTED with
+    `ScannerVerdictError` - scanner findings enter as unverified hypotheses
+    only, never as verdicts in either direction. Tool experiments that
+    produce a deterministic signal (e.g. a fuzzer's ASan crash) use
+    actor="fuzz-harness"/"replay-harness", not "tool".
 
     Raises:
         HypothesisNotFoundError: hallucinated hypothesis_id (carries valid_ids).
@@ -709,13 +718,17 @@ def add_experiment(
         HypothesisValidationError: any shape/schema failure.
         DuplicateExperimentError: strict mode + duplicate dedup key.
     """
-    # Scanner-verdict guard: a bare tool cannot corroborate.
+    # Scanner-verdict guard: a bare tool cannot record a verdict in either
+    # direction. Scanner findings enter as unverified hypotheses only; verdicts
+    # (corroborating OR disconfirming) are the agent/replay-harness's job - a
+    # flaky or misconfigured tool must not be able to kill a hypothesis with a
+    # single disconfirming record (the ranker treats disconfirmed as terminal).
     actor = str(provenance.get("actor") or "")
-    if actor == "tool" and result == RESULT_CORROBORATING:
+    if actor == "tool" and result in (RESULT_CORROBORATING, RESULT_DISCONFIRMING):
         raise ScannerVerdictError(
-            "A tool-originated experiment cannot record result='corroborating' "
+            f"A tool-originated experiment cannot record result={result!r} "
             "directly. Scanner findings enter as unverified hypotheses only. "
-            "Use actor='replay-harness' or 'agent' for a corroborating experiment."
+            "Use actor='replay-harness' or 'agent' for a verdict experiment."
         )
 
     ledger = _ledger_path(workspace_dir, HYPOTHESES_FILENAME)
@@ -1042,26 +1055,21 @@ _MIN_CONF_COUNT_RE = re.compile(
     r"independent\w*|times?|repeats?|hits?|sessions?|runs?)",
     re.IGNORECASE,
 )
-_MIN_CONF_TIME_UNIT_RE = re.compile(
-    r"(?i)s\b|sec\b|second\w*|ms\b|min\b|minute\w*|h\b|hour\w*|day\w*|week\w*"
-)
-_MIN_CONF_STANDALONE_RE = re.compile(r"(?<![\w.])-?\d+(?![\w.])")
 
 
 def _min_confirmation_bar(minimum_confirmation: str | None) -> int:
     """Parse the confirmation bar from the hypothesis's free-text
     `minimum_confirmation` field. A count names the bar ("2 corroborating
-    experiments" -> 2, "1" -> 1, "2 OOB callbacks" -> 2). A named signal
-    without a count ("OOB callback observed within 30s of payload" - a time
-    window, not a count) is a single confirmation (bar = 1)."""
-    text = str(minimum_confirmation or "")
+    experiments" -> 2, "2 OOB callbacks" -> 2). A named signal without a
+    count ("OOB callback observed within 30s of payload" - a time window,
+    status code, version number, not a count) is a single confirmation
+    (bar = 1). A bare integer field ("1", "3") is itself the bar."""
+    text = str(minimum_confirmation or "").strip()
     m = _MIN_CONF_COUNT_RE.search(text)
     if m:
         return int(m.group(1))
-    for m in _MIN_CONF_STANDALONE_RE.finditer(text):
-        following = text[m.end():m.end() + 8]
-        if not _MIN_CONF_TIME_UNIT_RE.search(following):
-            return int(m.group(0))
+    if re.fullmatch(r"-?\d+", text):
+        return int(text)
     return 1
 
 
