@@ -655,8 +655,11 @@ class TestStatusDerivation:
         assert H.derive_hypothesis_status(ws, hyp["hypothesis_id"]) == "confirmed"
 
     def test_named_signal_with_count_is_counted(self, ws: Path) -> None:
+        """'2 OOB callbacks' names a bar of 2: a single corroboration must
+        NOT confirm (non-vacuous - would pass if the bar were 1)."""
         hyp = add_hyp(ws, minimum_confirmation="2 OOB callbacks observed")
         add_exp(ws, hyp["hypothesis_id"], result="corroborating", action="probe-1")
+        assert H.derive_hypothesis_status(ws, hyp["hypothesis_id"]) == "testing"
         add_exp(ws, hyp["hypothesis_id"], result="corroborating", action="probe-2")
         assert H.derive_hypothesis_status(ws, hyp["hypothesis_id"]) == "confirmed"
 
@@ -668,6 +671,17 @@ class TestStatusDerivation:
         assert H.derive_hypothesis_status(ws, hyp["hypothesis_id"]) == "testing"
         add_exp(ws, hyp["hypothesis_id"], result="corroborating", action="probe-3")
         assert H.derive_hypothesis_status(ws, hyp["hypothesis_id"]) == "confirmed"
+
+    def test_nonpositive_bare_int_cannot_disable_bar(self, ws: Path) -> None:
+        """A '0' or '-1' bar is clamped to 1: the confirmation gate can never
+        be silently disabled by an authoring slip."""
+        for bad in ("0", "-1"):
+            hyp = add_hyp(ws, minimum_confirmation=bad,
+                          invariant=f"inv {bad}", surface=f"/s{bad}", mutation=f"m{bad}")
+            add_exp(ws, hyp["hypothesis_id"], result="corroborating",
+                    action="probe")
+            assert H.derive_hypothesis_status(
+                ws, hyp["hypothesis_id"]) == "confirmed"
 
     def test_write_time_gate_requires_controls_checked(self, ws: Path) -> None:
         """A corroborating experiment for a hypothesis with named disconfirming

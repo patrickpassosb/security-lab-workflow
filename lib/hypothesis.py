@@ -1051,25 +1051,30 @@ def rank(
 
 
 _MIN_CONF_COUNT_RE = re.compile(
-    r"(\d+)\s*(?:corroborat\w*|confirm\w*|experiment\w*|replic\w*|"
-    r"independent\w*|times?|repeats?|hits?|sessions?|runs?)",
+    r"(\d+)\s+(?:[a-z]+\s+){0,2}(?:corroborat\w*|confirm\w*|experiment\w*|"
+    r"replic\w*|times?|repeats?|hits?|sessions?|runs?|callbacks?|"
+    r"observations?|probes?|replays?|requests?|attempts?|samples?|markers?)\b",
     re.IGNORECASE,
 )
 
 
 def _min_confirmation_bar(minimum_confirmation: str | None) -> int:
     """Parse the confirmation bar from the hypothesis's free-text
-    `minimum_confirmation` field. A count names the bar ("2 corroborating
-    experiments" -> 2, "2 OOB callbacks" -> 2). A named signal without a
-    count ("OOB callback observed within 30s of payload" - a time window,
-    status code, version number, not a count) is a single confirmation
-    (bar = 1). A bare integer field ("1", "3") is itself the bar."""
+    `minimum_confirmation` field. A count phrase names the bar: an integer
+    followed by a count noun, with up to two intervening words ("2
+    corroborating experiments" -> 2, "2 OOB callbacks" -> 2, "Replay 3
+    times" -> 3). A named signal without a count ("OOB callback observed
+    within 30s of payload" - a time window, status code, version number,
+    not a count) is a single confirmation (bar = 1). A bare integer field
+    ("1", "3") is itself the bar. The bar is clamped to >= 1 so a
+    non-positive authoring slip ("0", "-1") can never silently disable the
+    confirmation gate."""
     text = str(minimum_confirmation or "").strip()
     m = _MIN_CONF_COUNT_RE.search(text)
     if m:
-        return int(m.group(1))
+        return max(1, int(m.group(1)))
     if re.fullmatch(r"-?\d+", text):
-        return int(text)
+        return max(1, int(text))
     return 1
 
 
