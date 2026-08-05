@@ -499,6 +499,28 @@ class TestRanking:
         assert b_rh.dead_end_penalty == 0.0
         assert a_rh.score < b_rh.score
 
+    def test_dead_end_surface_only_overlap_does_not_penalize(self, ws: Path) -> None:
+        """A dead-end claim that shares the surface but ZERO invariant tokens
+        must NOT trigger the dead-end penalty (documented AND semantics: a
+        novel hypothesis on the same endpoint, different invariant, is not a
+        dead end)."""
+        add_hyp(ws, invariant="admin endpoint requires authz",
+                surface="/api/users", mutation="m", tags=["authz"])
+        claims = ["/api/users no signal found, 8 commands tried, 20 minutes"]
+        ranked = H.rank(ws, dead_end_claims=claims)
+        assert len(ranked) == 1
+        assert ranked[0].dead_end_penalty == 0.0
+        assert ranked[0].novelty == 1.0
+
+    def test_dead_end_with_invariant_overlap_still_penalizes(self, ws: Path) -> None:
+        """Surface AND invariant overlap (the documented AND semantics)
+        triggers the penalty."""
+        add_hyp(ws, invariant="token endpoint is dead", surface="/token",
+                mutation="request /token", tags=["authz"])
+        claims = ["/token token endpoint dead end — no signal, 8 commands tried"]
+        ranked = H.rank(ws, dead_end_claims=claims)
+        assert ranked[0].dead_end_penalty == H.DEFAULT_DEAD_END_PENALTY
+
     def test_rank_drops_unsafe_scope_records(self, ws: Path) -> None:
         add_hyp(ws, scope=_safe_scope(), tags=["authz"])
         # The write-time gate rejects unsafe records, so simulate a ledger

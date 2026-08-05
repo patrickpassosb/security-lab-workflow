@@ -953,10 +953,13 @@ def _novelty_score(
         claim_tokens = set(re.findall(r"[a-z0-9]+", claim_lower))
         if not claim_tokens:
             continue
-        # A claim matches if it overlaps substantially with the surface tokens
-        # AND shares at least one invariant token. Conservative - we'd rather
-        # false-negative (miss a weak dead-end match) than false-positive
-        # (penalize a novel hypothesis).
+        # A claim matches only if it overlaps substantially with the surface
+        # tokens AND shares at least one invariant token. The invariant
+        # overlap is a hard requirement: surface overlap alone (e.g. a
+        # dead-end claim about endpoint '/api/users' against a hypothesis on
+        # a different invariant) must not trigger the penalty. Conservative -
+        # we'd rather false-negative (miss a weak dead-end match) than
+        # false-positive (penalize a novel hypothesis).
         if surface_tokens:
             surface_overlap = len(surface_tokens & claim_tokens) / max(len(surface_tokens), 1)
         else:
@@ -966,6 +969,8 @@ def _novelty_score(
             if invariant_tokens
             else 0.0
         )
+        if invariant_overlap <= 0.0:
+            continue
         match_strength = surface_overlap * 0.6 + invariant_overlap * 0.4
         if match_strength > best:
             best = match_strength
@@ -1362,14 +1367,19 @@ def validate_ledger(workspace_dir: Path | str) -> LedgerIntegrityReport:
             if not isinstance(e, UnsafeScopeError):
                 shape_invalid.append({"kind": "hypothesis", "id": h.get("hypothesis_id"),
                                       "error": str(e)})
+    hyp_by_id = {str(h.get("hypothesis_id")): h for h in hyp_read.records}
     for e in exp_read.records:
         scope = e.get("scope") or {}
         if isinstance(scope, dict) and _target_is_borne(scope) and not scope.get("scope_checked"):
             unsafe.append({"kind": "experiment", "id": e.get("experiment_id"),
                            "target": scope.get("target")})
         try:
-            _validate_experiment(e, hypothesis_exists=True,
-                                 hyp_id=str(e.get("hypothesis_id") or ""))
+            _validate_experiment(
+                e,
+                hypothesis_exists=True,
+                hyp_id=str(e.get("hypothesis_id") or ""),
+                hyp=hyp_by_id.get(str(e.get("hypothesis_id") or "")),
+            )
         except (HypothesisValidationError, UnsafeScopeError) as ex:
             if not isinstance(ex, UnsafeScopeError):
                 shape_invalid.append({"kind": "experiment", "id": e.get("experiment_id"),

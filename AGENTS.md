@@ -189,8 +189,9 @@ falsifiable tests instead of unstructured scanner output. Library:
   check; scanner/tool findings enter only as `unverified` hypotheses (never
   verdicts). Status is derived from the experiment ledger, never mutated.
 - `rank` scores by primitive leverage × scope safety × impact × novelty ×
-  (1 − dead-end penalty); contradictory evidence is surfaced first. Dead-end
-  claims come from `playbooks/<program>.jsonl` (huntlesson).
+  (1 − dead-end penalty); contradictory evidence is surfaced first. Exported
+  dead-end claims are passed via `--dead-ends-file` (one claim per line); the
+  huntlesson playbooks (`playbooks/<program>.jsonl`) are their source.
 - Tests: `tests/test_hypothesis.py` (referential integrity, dedup, ranking,
   contradictory evidence, unsafe scope, malformed-JSONL recovery).
 
