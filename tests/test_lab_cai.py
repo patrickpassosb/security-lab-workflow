@@ -154,6 +154,65 @@ class TestSandboxEnforcement:
         # The LLM route must NOT be blocked.
         assert "route.test" not in content
 
+    def test_bwrap_argv_does_not_mount_run_sockets(self, tmp_path):
+        """The sandbox must not expose the host's /run sockets (docker,
+        tailscale) to the untrusted agent — /run is an empty tmpfs with
+        only the systemd-resolved dir bound for DNS."""
+        venv = _make_shim_venv(tmp_path)
+        run_dir = tmp_path / "run"
+        run_dir.mkdir(parents=True)
+        argv = labcai.build_bwrap_argv(
+            "/usr/bin/bwrap",
+            venv,
+            run_dir,
+            run_dir,
+            "ollama_cloud/deepseek-v4-flash:0731",
+            "http://route.test",
+            "not-required",
+            "bug_bounter",
+            "prompt",
+            5,
+            "1",
+            {},
+        )
+        assert "--tmpfs" in argv
+        assert argv[argv.index("--tmpfs") + 1] == "/run"
+        # /etc/resolv.conf's symlink target must be resolvable without /run.
+        assert "/run/systemd/resolve" in argv
+
+    def test_bwrap_argv_output_dir_readonly_run_dir_writable(self, tmp_path):
+        """The output dir is bound read-only so the untrusted agent cannot
+        rewrite the ledger/evidence; only the run dir itself is writable
+        (later --bind overrides the parent ro-bind)."""
+        venv = _make_shim_venv(tmp_path)
+        run_dir = tmp_path / "run"
+        run_dir.mkdir(parents=True)
+        argv = labcai.build_bwrap_argv(
+            "/usr/bin/bwrap",
+            venv,
+            run_dir,
+            run_dir,
+            "ollama_cloud/deepseek-v4-flash:0731",
+            "http://route.test",
+            "not-required",
+            "bug_bounter",
+            "prompt",
+            5,
+            "1",
+            {},
+        )
+        parent = str(run_dir.parent)
+        # The parent dir must be ro-bound somewhere before the writable
+        # run-dir bind, and never writable itself.
+        assert parent not in argv[argv.index("--bind") + 1 :: 2]
+        assert "--ro-bind" in argv and parent in argv
+        ro_idx = argv.index("--ro-bind", argv.index(parent) - 1)
+        assert argv[ro_idx + 1] == parent
+        # The run dir itself must be writable (later --bind overrides the
+        # parent ro-bind).
+        bind_idx = argv.index("--bind", ro_idx)
+        assert argv[bind_idx + 1] == str(run_dir)
+
 
 # ─── Ledger schema validity ───────────────────────────────────────────────────
 
@@ -277,6 +336,37 @@ class TestRedaction:
         content = path.read_text(encoding="utf-8")
         assert "sk-abcdefghijklmnop1234567890" not in content
         assert "<redacted>" in content
+
+    def test_sandboxed_flag_threaded_through(self, tmp_path):
+        """Provenance truth: parse_findings must record the actual run
+        mode, not a hardcoded True."""
+        ts = "2026-08-04T12:00:00Z"
+        transcript = (
+            "╭─ p ─╮\n│ [1] Agent: Bug Bounter [t] │\n│ Candidate XSS on /login?next= │\n╰─ p ─╯\n"
+        )
+        unsandboxed = labcai.parse_findings(
+            transcript,
+            target="https://example.com",
+            engagement="test-eng",
+            workspace_id="ws-1",
+            agent_type="bug_bounter",
+            tool_version="0.5.10",
+            scope_decision="OK",
+            ts=ts,
+            sandboxed=False,
+        )
+        assert unsandboxed[0]["sandboxed"] is False
+        default = labcai.parse_findings(
+            transcript,
+            target="https://example.com",
+            engagement="test-eng",
+            workspace_id="ws-1",
+            agent_type="bug_bounter",
+            tool_version="0.5.10",
+            scope_decision="OK",
+            ts=ts,
+        )
+        assert default[0]["sandboxed"] is True
 
 
 # ─── Dry-run mode ─────────────────────────────────────────────────────────────

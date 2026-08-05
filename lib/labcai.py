@@ -260,6 +260,13 @@ def build_bwrap_argv(
     paths (so CAI's `logs/`, `.cai/` history, and any agent scratch files
     stay inside the run dir), mounts only system paths + the CAI venv,
     and blackholes CAI's known egress hosts via a generated /etc/hosts.
+    The output dir (workdir.parent) is bound READ-ONLY — the untrusted
+    CAI agent must not be able to modify the findings.jsonl ledger or
+    prior runs' evidence; only the run dir itself is re-bound writable
+    (later bwrap mounts override earlier ones). `/run` is NOT mounted:
+    it would expose the host's docker/tailscale sockets to the sandboxed
+    agent (live-verified); /etc/resolv.conf is a symlink into /run on
+    systemd distros, so the resolver stub is bound directly instead.
     `--unshare-net` is NOT used: the LLM route lives on the host network
     (tailnet or public Ollama Cloud) and a private netns cannot reach it
     — the sandbox contract is "egress-restricted, LLM route only", not
@@ -288,9 +295,17 @@ def build_bwrap_argv(
         "--ro-bind",
         str(hosts_file),
         "/etc/hosts",
+        # /run is NOT mounted read-only: it would expose the host's
+        # docker/tailscale sockets to the untrusted agent (live-verified
+        # SOCKET_EXPOSED with a plain --ro-bind /run). Use an empty tmpfs
+        # /run and bind only the systemd-resolved dir so the
+        # /etc/resolv.conf symlink (../run/systemd/resolve/
+        # stub-resolv.conf) resolves and DNS keeps working.
+        "--tmpfs",
+        "/run",
         "--ro-bind",
-        "/run",
-        "/run",
+        "/run/systemd/resolve",
+        "/run/systemd/resolve",
         "--dev",
         "/dev",
         "--proc",
@@ -305,9 +320,17 @@ def build_bwrap_argv(
         "--symlink",
         "usr/sbin",
         "/sbin",
+        # Output dir bound READ-ONLY: the untrusted CAI agent must not be
+        # able to rewrite the findings.jsonl ledger or prior evidence.
+        # The run dir (inside it) is re-bound writable just below.
+        "--ro-bind",
+        str(workdir.parent),
+        str(workdir.parent),
+        # Only the run dir is writable (later bind overrides the ro-bind
+        # of its parent).
         "--bind",
-        str(workdir.parent),
-        str(workdir.parent),
+        str(workdir),
+        str(workdir),
         "--chdir",
         str(workdir),
         "--setenv",
@@ -437,6 +460,8 @@ def run_cai(
     only non-secret fragments into evidence.
     """
     bwrap = shutil.which("bwrap")
+    if bwrap is None:
+        return 127, "", "bwrap not found on PATH — cannot sandbox CAI run", str(workdir / "logs")
     argv = build_bwrap_argv(
         bwrap,
         venv_bin,
@@ -483,7 +508,7 @@ def extract_panels(text: str) -> list[str]:
     in_panel = False
     for line in text.splitlines():
         stripped = line.strip()
-        if stripped.startswith("╭─") or stripped.startswith("╭─"):
+        if stripped.startswith("╭"):
             in_panel = True
             current = []
             continue
@@ -557,8 +582,10 @@ def classify_hypothesis(text: str) -> tuple[str, str]:
 
     Heuristic, best-effort, and NEVER authoritative: the classification
     only populates the ledger's `vuln_class`/`cwe` fields for ranking
-    and dedup. `confidence` is the real signal; unknown classes are
-    emitted as-is with `vuln_class: unknown`.
+    and dedup. `confidence` is the real signal. Panels whose wording does
+    not match any keyword set are skipped by `parse_findings` (they are
+    too weak to rank as hypotheses), so this returns "unknown" only as a
+    signal to the caller — never emitted as a candidate.
     """
     lowered = text.lower()
     mapping = [
@@ -600,6 +627,7 @@ def parse_findings(
     tool_version: str,
     scope_decision: str,
     ts: str,
+    sandboxed: bool = True,
 ) -> list[dict[str, Any]]:
     """Parse UNTRUSTED CAI output into normalized finding-candidates.
 
@@ -608,7 +636,8 @@ def parse_findings(
     verification (evidence + finding_events/h1review) is the only thing
     that can raise it. The `raw` field keeps the originating line for
     provenance. CAI never self-reports impact — no impact field exists
-    in the schema.
+    in the schema. `sandboxed` records whether the tool actually ran in
+    the bwrap sandbox (provenance truth, default True for API compat).
     """
     candidates: list[dict[str, Any]] = []
     panels = extract_panels(transcript)
@@ -656,7 +685,7 @@ def parse_findings(
                 "agent": os.environ.get("USER", "agent"),
                 "tool_version": tool_version,
                 "scope_decision": scope_decision,
-                "sandboxed": True,
+                "sandboxed": sandboxed,
             }
         )
     return candidates
@@ -810,6 +839,7 @@ def run(
                 tool_version=tool_version,
                 scope_decision="dry-run",
                 ts=ts,
+                sandboxed=False,
             )
             n = emit_candidates(ledger_path(out_dir), candidates)
             print(
@@ -872,11 +902,15 @@ def run(
     else:
         # Explicit --no-sandbox: run CAI on the host with a scrubbed env
         # (no secrets, no telemetry) — same untrusted-output contract.
+        # Mirrors the sandboxed env: agent type set, TMPDIR pinned to the
+        # run dir, and OLLAMA_API_KEY only set when non-empty.
         cai_exe = venv_bin / "cai"
-        cai_env = {
+        cai_env: dict[str, str] = {
             "PATH": f"{venv_bin}:{os.environ.get('PATH', '/usr/bin:/bin')}",
             "HOME": str(home_dir),
+            "TMPDIR": str(home_dir),
             "CAI_MODEL": resolved_model,
+            "CAI_AGENT_TYPE": resolved_agent,
             "CAI_TELEMETRY": "false",
             "CAI_TRACING": "false",
             "CAI_STREAM": "false",
@@ -886,8 +920,9 @@ def run(
             "CAI_ENV_CONTEXT": "false",
             "CAI_SUPPORT_INTERVAL": "999999",
             "OLLAMA_API_BASE": resolved_api_base,
-            "OLLAMA_API_KEY": resolved_api_key,
         }
+        if resolved_api_key:
+            cai_env["OLLAMA_API_KEY"] = resolved_api_key
         cai_env.update(env_extra)
         stdin_data = f"{resolved_prompt}\n/exit\n"
         try:
@@ -976,6 +1011,7 @@ def run(
         tool_version=tool_version,
         scope_decision=redact(msg),
         ts=ts,
+        sandboxed=sandboxed,
     )
     n = emit_candidates(ledger_path(out_dir), candidates)
     print(
