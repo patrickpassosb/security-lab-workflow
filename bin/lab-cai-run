@@ -1,0 +1,160 @@
+#!/usr/bin/env python3
+"""lab-cai-run — run the open-source CAI agentic engine behind the lab's
+scope -> audit -> evidence contract.
+
+CAI (aliasrobotics/cai, MIT, `pip install cai-framework`) is an LLM-driven
+bug-hunting agent. This adapter wraps it so it can hunt on the captain's
+Ollama Cloud quota with zero external LLM egress:
+
+    lab-cai-run <target> --engagement <name> [options]
+
+Pipeline (per docs/ARCHITECTURE.md, adapted from the §7.5 agentic
+engine slot):
+
+    1. scope-check via lab-scope (default-deny; exit 2/3 refuses the run)
+    2. sandbox: bwrap container with fresh HOME + cwd; CAI telemetry/
+       tracing/support-agent egress disabled; the only network is the
+       configured LLM route
+    3. run CAI headless (piped stdin, initial prompt on argv)
+    4. capture output as UNTRUSTED data (evidence + SHA-256 hash)
+    5. emit finding-candidates to findings.jsonl
+       (schema security-lab/finding-candidate/v1) — hypotheses with a
+       confidence field, never verdicts; CAI never self-reports impact
+    6. audit-log entry (target, engagement, scope decision, tool version,
+       output hash)
+
+LLM route: OLLAMA_API_BASE + OLLAMA_API_KEY (or OPENAI_API_KEY) from the
+environment — never hardcoded. Model: CAI_MODEL, default
+ollama_cloud/deepseek-v4-flash:0731 (Ollama Cloud via Aperture).
+
+Exit codes:
+    0 = completed (0 findings is normal — record and move on)
+    2 = scope DENIED (refused, nothing ran)
+    3 = scope UNKNOWN (default-deny — add to engagement scope or ask human)
+    4 = CAI not installed
+    5 = sandbox unavailable (bwrap missing)
+    6 = CAI run failed (hard failure; evidence saved anyway).
+        rc=1 (EOFError) and rc=124 (wall-clock budget) are NORMAL
+        budget ends and return 0 — findings are still emitted.
+Options:
+    --engagement <name>   engagement scope file (required)
+    --output <dir>        run dir for logs/evidence/findings.jsonl
+                          (default: ./.cai-runs)
+    --model <name>        CAI_MODEL override
+    --agent <name>        CAI agent type (bug_bounter_agent |
+                          one_tool_agent; default bug_bounter_agent)
+    --prompt <text>       initial prompt (default: built-in hunting brief)
+    --max-turns <n>       CAI turn limit (default 10)
+    --price-limit <usd>   CAI price limit (default 1)
+    --timeout <s>         wall-clock budget (default 600)
+    --no-sandbox          run without bwrap (explicit opt-out only)
+    --dry-run             prove install + route + pipeline on a local
+                          fixture; never touches the target
+"""
+
+from __future__ import annotations
+
+import os
+import sys
+from pathlib import Path
+
+# Import shared labutil helpers and the adapter library.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib"))
+import labcai  # noqa: E402
+
+# Re-export the adapter's exit codes so tests can assert on them.
+EXIT_OK = 0
+EXIT_DENIED = 2
+EXIT_UNKNOWN = 3
+EXIT_NO_CAI = 4
+EXIT_NO_SANDBOX = 5
+EXIT_RUN_FAILED = 6
+
+
+def main() -> int:
+    args = sys.argv[1:]
+
+    if not args or args[0] in ("-h", "--help"):
+        print(__doc__)
+        return 0 if args else 1
+
+    target = ""
+    engagement = ""
+    output_dir: str | None = None
+    model: str | None = None
+    agent = "bug_bounter_agent"
+    prompt: str | None = None
+    max_turns = 10
+    price_limit = "1"
+    timeout = 600
+    sandboxed = True
+    dry_run = False
+
+    i = 0
+    while i < len(args):
+        arg = args[i]
+        if arg == "--engagement" and i + 1 < len(args):
+            engagement = args[i + 1]
+            i += 2
+        elif arg.startswith("--engagement="):
+            engagement = arg.split("=", 1)[1]
+            i += 1
+        elif arg == "--output" and i + 1 < len(args):
+            output_dir = args[i + 1]
+            i += 2
+        elif arg == "--model" and i + 1 < len(args):
+            model = args[i + 1]
+            i += 2
+        elif arg == "--agent" and i + 1 < len(args):
+            agent = args[i + 1]
+            i += 2
+        elif arg == "--prompt" and i + 1 < len(args):
+            prompt = args[i + 1]
+            i += 2
+        elif arg == "--max-turns" and i + 1 < len(args):
+            max_turns = int(args[i + 1])
+            i += 2
+        elif arg == "--price-limit" and i + 1 < len(args):
+            price_limit = args[i + 1]
+            i += 2
+        elif arg == "--timeout" and i + 1 < len(args):
+            timeout = int(args[i + 1])
+            i += 2
+        elif arg == "--no-sandbox":
+            sandboxed = False
+            i += 1
+        elif arg == "--dry-run":
+            dry_run = True
+            i += 1
+        elif arg.startswith("-"):
+            print(f"Unknown option: {arg}")
+            return 1
+        else:
+            target = arg
+            i += 1
+
+    if not target or not engagement:
+        print("Usage: lab-cai-run <target> --engagement <name> [options]")
+        print(__doc__)
+        return 1
+
+    return labcai.run(
+        target,
+        engagement,
+        output_dir=Path(output_dir) if output_dir else None,
+        venv_bin=labcai.find_cai_venv(),
+        model=model,
+        api_base=os.environ.get("OLLAMA_API_BASE", ""),
+        api_key=os.environ.get("OLLAMA_API_KEY", ""),
+        agent_type=agent,
+        prompt=prompt,
+        max_turns=max_turns,
+        price_limit=price_limit,
+        timeout=timeout,
+        sandboxed=sandboxed,
+        dry_run=dry_run,
+    )
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

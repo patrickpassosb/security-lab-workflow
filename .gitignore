@@ -81,6 +81,13 @@ coverage.xml
 .ruff_cache/
 .mypy_cache/
 
+# ─── lab-cai-run runtime artifacts ────────────────────────────────────────
+# Run dirs, evidence, findings.jsonl ledgers, and CAI session logs produced
+# by bin/lab-cai-run (lib/labcai.py). Untrusted transcripts + redacted
+# fragments; workspace data — never committed.
+.cai-runs/
+logs/cai_*.jsonl
+
 # ─── Secrets (the .env pattern) ───
 .env
 .env.*
