@@ -110,13 +110,11 @@ def _parse_flags(
     args: list[str],
     value_flags: tuple[str, ...],
     multi_flags: tuple[str, ...] = (),
-) -> tuple[dict[str, str], list[str], int]:
-    """Generic flag parser. Returns (single-value flags, multi-value flags, exit).
-
-    Supports `--flag value` and `--flag=value`. Multi-flags accumulate into a
-    list under their key (the returned dict has the last value for singles;
-    callers handle multi-flags via the separate multi_flags list).
-    """
+) -> tuple[dict[str, str], dict[str, list[str]], int]:
+    """Generic flag parser. Returns (single-value flags, multi-value flags,
+    exit). Supports `--flag value` and `--flag=value`. Multi-flags accumulate
+    into a dict of lists under their flag name; single flags keep the last
+    value."""
     single: dict[str, str] = {}
     multi: dict[str, list[str]] = {}
     i = 0
@@ -133,11 +131,11 @@ def _parse_flags(
                 i += 1
                 continue
             print(f"unknown flag: {a}", file=sys.stderr)
-            return {}, [], USAGE_ERR
+            return {}, {}, USAGE_ERR
         if a in all_value:
             if i + 1 >= len(args):
                 print(f"flag {a} requires a value", file=sys.stderr)
-                return {}, [], USAGE_ERR
+                return {}, {}, USAGE_ERR
             if a in multi_flags:
                 multi.setdefault(a, []).append(args[i + 1])
             else:
@@ -150,12 +148,11 @@ def _parse_flags(
             continue
         if a.startswith("-"):
             print(f"unknown flag: {a}", file=sys.stderr)
-            return {}, [], USAGE_ERR
+            return {}, {}, USAGE_ERR
         # Positional (used by `show <id>`).
         single.setdefault("__pos__", []).append(a)
         i += 1
-    # Flatten multi into the return for callers.
-    return single, [f"{k}={v}" for k, vs in multi.items() for v in vs], 0
+    return single, multi, 0
 
 
 def _resolve_workspace(flags: dict[str, str]) -> Path:
@@ -207,7 +204,7 @@ def cmd_add(args: list[str]) -> int:
         "--workspace", "--workspace-id",
     )
     multi_flags = ("--tag", "--evidence-ref")
-    single, _multi_raw, rc = _parse_flags(args, value_flags, multi_flags)
+    single, multi, rc = _parse_flags(args, value_flags, multi_flags)
     if rc != 0:
         return rc
     required = (
@@ -229,22 +226,6 @@ def cmd_add(args: list[str]) -> int:
     ):
         if single.get(flag):
             preconditions[k] = single[flag]
-    # Multi-flags: re-parse to collect lists.
-    multi: dict[str, list[str]] = {}
-    i = 0
-    while i < len(args):
-        a = args[i]
-        if a in multi_flags and i + 1 < len(args):
-            multi.setdefault(a, []).append(args[i + 1])
-            i += 2
-            continue
-        if a.startswith("--") and "=" in a:
-            name, _, value = a.partition("=")
-            if name in multi_flags:
-                multi.setdefault(name, []).append(value)
-            i += 1
-            continue
-        i += 1
     src = single.get("--source", "manual")
     agent = os.environ.get("USER", os.environ.get("LOGNAME", "agent"))
     provenance: dict[str, object] = {"source": src, "agent": agent}
@@ -308,7 +289,7 @@ def cmd_experiment(args: list[str]) -> int:
         "--disconfirming-controls-checked",
     )
     multi_flags = ("--evidence-ref",)
-    single, _multi_raw, rc = _parse_flags(args, value_flags, multi_flags)
+    single, multi, rc = _parse_flags(args, value_flags, multi_flags)
     if rc != 0:
         return rc
     required = (
@@ -337,22 +318,6 @@ def cmd_experiment(args: list[str]) -> int:
         "replay_fixture": single.get("--replay-fixture"),
     }
     scope = _build_scope(single)
-    # Re-parse evidence-ref multi-flag.
-    multi: dict[str, list[str]] = {}
-    i = 0
-    while i < len(args):
-        a = args[i]
-        if a in multi_flags and i + 1 < len(args):
-            multi.setdefault(a, []).append(args[i + 1])
-            i += 2
-            continue
-        if a.startswith("--") and "=" in a:
-            name, _, value = a.partition("=")
-            if name in multi_flags:
-                multi.setdefault(name, []).append(value)
-            i += 1
-            continue
-        i += 1
     try:
         record = H.add_experiment(
             workspace_dir=ws_dir,
@@ -515,12 +480,12 @@ def cmd_show(args: list[str]) -> int:
 
 
 def cmd_validate(args: list[str]) -> int:
-    """Integrity check: referential integrity + scope safety + malformed-line
-    report. Read-only. Exit 0 when clean; 2 when orphans or unsafe-scope
-    records are found. Malformed JSONL lines alone exit 0 with a warning
-    (they do not break the ledger read - the parser skips them) unless
-    --strict is given: with --strict, any malformed/shape-invalid line fails
-    the check (exit 2) and is listed."""
+    """Integrity check: referential integrity + scope safety + shape
+    validation + malformed-line report. Read-only. Exit 0 when clean; 2 when
+    orphans, unsafe-scope, or shape-invalid records are found. Malformed
+    JSONL lines alone exit 0 with a warning (they do not break the ledger
+    read - the parser skips them) unless --strict is given: with --strict,
+    any malformed line fails the check (exit 2) and is listed."""
     value_flags = ("--workspace",)
     single, _multi, rc = _parse_flags(args, value_flags)
     if rc != 0:
@@ -536,6 +501,9 @@ def cmd_validate(args: list[str]) -> int:
     print(f"unsafe-scope records: {len(report.unsafe_scope_records)}")
     for u in report.unsafe_scope_records:
         print(f"  UNSAFE ({u.get('kind')}): id={u.get('id')} target={u.get('target')}")
+    print(f"shape-invalid records: {len(report.shape_invalid_records)}")
+    for s in report.shape_invalid_records:
+        print(f"  SHAPE-INVALID ({s.get('kind')}): id={s.get('id')} error={s.get('error')}")
     if report.skipped_hypothesis_lines or report.skipped_experiment_lines:
         print(
             f"malformed JSONL: hypotheses={report.skipped_hypothesis_lines} "
@@ -548,6 +516,7 @@ def cmd_validate(args: list[str]) -> int:
     clean = (
         not report.orphan_experiments
         and not report.unsafe_scope_records
+        and not report.shape_invalid_records
     )
     if strict and (report.skipped_hypothesis_lines or report.skipped_experiment_lines):
         clean = False
@@ -561,6 +530,7 @@ def cmd_validate(args: list[str]) -> int:
             f"hyps={report.hypotheses_count} exps={report.experiments_count} "
             f"orphans={len(report.orphan_experiments)} "
             f"unsafe={len(report.unsafe_scope_records)} "
+            f"shape={len(report.shape_invalid_records)} "
             f"strict={strict}"
         ),
     )

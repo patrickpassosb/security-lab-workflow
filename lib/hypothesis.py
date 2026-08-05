@@ -1050,29 +1050,57 @@ def rank(
     return ranked
 
 
+_MIN_CONF_QUAL_RE = re.compile(
+    r"^(?:at least|minimum|min|a minimum of|no fewer than|at minimum)\s+",
+    re.IGNORECASE,
+)
 _MIN_CONF_COUNT_RE = re.compile(
-    r"^\s*(\d+)\s+(?:[a-z]+\s+){0,2}(?:corroborat\w*|confirm\w*|experiment\w*|"
+    r"^(\d+)\s+(?:[a-z]+\s+){0,2}(?:corroborat\w*|confirm\w*|experiment\w*|"
     r"replic\w*|times?|repeats?|hits?|sessions?|runs?|callbacks?|"
     r"observations?|probes?|replays?|requests?|attempts?|samples?|markers?)\b",
     re.IGNORECASE,
 )
+_MIN_CONF_WORD_HEAD_RE = re.compile(
+    r"^(one|two|three|four|five|six|seven|eight|nine|ten)\s+"
+    r"(?:[a-z]+\s+){0,2}(?:corroborat\w*|confirm\w*|experiment\w*|replic\w*|"
+    r"times?|repeats?|hits?|sessions?|runs?|callbacks?|observations?|probes?|"
+    r"replays?|requests?|attempts?|samples?|markers?)\b",
+    re.IGNORECASE,
+)
+_MIN_CONF_WORD_COUNTS: dict[str, int] = {
+    "one": 1, "two": 2, "three": 3, "four": 4, "five": 5,
+    "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10,
+}
 
 
 def _min_confirmation_bar(minimum_confirmation: str | None) -> int:
     """Parse the confirmation bar from the hypothesis's free-text
-    `minimum_confirmation` field. A count phrase at the START of the field
-    names the bar: an integer followed by a count noun, with up to two
-    intervening words ("2 corroborating experiments" -> 2, "2 OOB
-    callbacks" -> 2). A named signal without a leading count ("OOB callback
-    observed within 30s of payload", "Replay produces HTTP 200 requests" -
-    status codes and time windows mid-sentence are NOT counts) is a single
-    confirmation (bar = 1). A bare integer field ("1", "3") is itself the
-    bar. The bar is clamped to >= 1 so a non-positive authoring slip ("0",
-    "-1") can never silently disable the confirmation gate."""
+    `minimum_confirmation` field. A count phrase that IS the field names the
+    bar: an integer or word-form count followed by a count noun, with up to
+    two intervening words and an optional leading qualifier ("2 corroborating
+    experiments" -> 2, "two OOB callbacks" -> 2, "Minimum 3 independent
+    confirmations" -> 3, "At least 2 corroborating experiments" -> 2).
+    Status codes and time windows mid-sentence ("OOB callback observed
+    within 30s of payload", "Replay produces HTTP 200 requests") are NOT
+    counts - a named signal without a count is a single confirmation
+    (bar = 1). A bare integer field ("1", "3") is itself the bar. The bar is
+    clamped to >= 1 so a non-positive authoring slip ("0", "-1") can never
+    silently disable the confirmation gate."""
     text = str(minimum_confirmation or "").strip()
-    m = _MIN_CONF_COUNT_RE.search(text)
-    if m:
+    if not text:
+        return 1
+    head = text
+    qual = _MIN_CONF_QUAL_RE.match(head)
+    if qual:
+        head = head[qual.end():]
+    m = _MIN_CONF_COUNT_RE.match(head)
+    # 3-digit values are status codes (400 responses confirm the error),
+    # not confirmation counts - never raise the bar on them.
+    if m and int(m.group(1)) < 100:
         return max(1, int(m.group(1)))
+    m = _MIN_CONF_WORD_HEAD_RE.match(head)
+    if m:
+        return max(1, _MIN_CONF_WORD_COUNTS[m.group(1).lower()])
     if re.fullmatch(r"-?\d+", text):
         return max(1, int(text))
     return 1
@@ -1251,6 +1279,7 @@ class LedgerIntegrityReport:
     experiments_count: int
     orphan_experiments: list[str]  # experiment_ids referencing a missing hypothesis
     unsafe_scope_records: list[dict[str, Any]]  # records that failed the scope gate
+    shape_invalid_records: list[dict[str, Any]]  # records that failed shape validation
     skipped_hypothesis_lines: int
     skipped_experiment_lines: int
 
@@ -1265,7 +1294,10 @@ def validate_ledger(workspace_dir: Path | str) -> LedgerIntegrityReport:
       1. Every experiment's hypothesis_id references an existing hypothesis
          (the .refine() gate, audited after the fact).
       2. No target-bearing record has scope_checked=false (the scope gate).
-      3. Reports malformed-JSONL line counts (skipped on read).
+      3. Every record passes shape validation (_validate_hypothesis /
+         _validate_experiment) - schema-invalid records (missing fields, bad
+         types) are surfaced for the CLI's --strict path.
+      4. Reports malformed-JSONL line counts (skipped on read).
     """
     hyp_read = list_hypotheses(workspace_dir)
     exp_read = list_experiments(workspace_dir)
@@ -1274,21 +1306,40 @@ def validate_ledger(workspace_dir: Path | str) -> LedgerIntegrityReport:
     orphan = [str(e.get("experiment_id") or "<unknown>") for e in exp_read.records
               if str(e.get("hypothesis_id") or "") not in valid_ids]
     unsafe: list[dict[str, Any]] = []
+    shape_invalid: list[dict[str, Any]] = []
     for h in hyp_read.records:
         scope = h.get("scope") or {}
         if isinstance(scope, dict) and _target_is_borne(scope) and not scope.get("scope_checked"):
             unsafe.append({"kind": "hypothesis", "id": h.get("hypothesis_id"),
                            "target": scope.get("target")})
+        try:
+            _validate_hypothesis(h)
+        except (HypothesisValidationError, UnsafeScopeError) as e:
+            # UnsafeScopeError is reported separately above (scope gate).
+            if not isinstance(e, UnsafeScopeError):
+                shape_invalid.append({"kind": "hypothesis", "id": h.get("hypothesis_id"),
+                                      "error": str(e)})
     for e in exp_read.records:
         scope = e.get("scope") or {}
         if isinstance(scope, dict) and _target_is_borne(scope) and not scope.get("scope_checked"):
             unsafe.append({"kind": "experiment", "id": e.get("experiment_id"),
                            "target": scope.get("target")})
+        try:
+            _validate_experiment(e, hypothesis_exists=True,
+                                 hyp_id=str(e.get("hypothesis_id") or ""))
+        except (HypothesisValidationError, UnsafeScopeError) as ex:
+            if not isinstance(ex, UnsafeScopeError):
+                shape_invalid.append({"kind": "experiment", "id": e.get("experiment_id"),
+                                      "error": str(ex)})
+        except HypothesisNotFoundError:
+            # Orphaned experiments are reported separately above.
+            pass
     return LedgerIntegrityReport(
         hypotheses_count=len(hyp_read.records),
         experiments_count=len(exp_read.records),
         orphan_experiments=orphan,
         unsafe_scope_records=unsafe,
+        shape_invalid_records=shape_invalid,
         skipped_hypothesis_lines=hyp_read.skipped_lines,
         skipped_experiment_lines=exp_read.skipped_lines,
     )

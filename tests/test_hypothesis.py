@@ -663,6 +663,24 @@ class TestStatusDerivation:
         add_exp(ws, hyp["hypothesis_id"], result="corroborating", action="probe-2")
         assert H.derive_hypothesis_status(ws, hyp["hypothesis_id"]) == "confirmed"
 
+    def test_word_form_count_is_counted(self, ws: Path) -> None:
+        """Word-form bars ('two corroborating experiments') count: a single
+        corroboration must NOT confirm."""
+        hyp = add_hyp(ws, minimum_confirmation="two corroborating experiments")
+        add_exp(ws, hyp["hypothesis_id"], result="corroborating", action="probe-1")
+        assert H.derive_hypothesis_status(ws, hyp["hypothesis_id"]) == "testing"
+        add_exp(ws, hyp["hypothesis_id"], result="corroborating", action="probe-2")
+        assert H.derive_hypothesis_status(ws, hyp["hypothesis_id"]) == "confirmed"
+
+    def test_qualified_count_phrase_is_counted(self, ws: Path) -> None:
+        """'Minimum 3 independent confirmations' names a bar of 3."""
+        hyp = add_hyp(ws, minimum_confirmation="Minimum 3 independent confirmations")
+        add_exp(ws, hyp["hypothesis_id"], result="corroborating", action="probe-1")
+        add_exp(ws, hyp["hypothesis_id"], result="corroborating", action="probe-2")
+        assert H.derive_hypothesis_status(ws, hyp["hypothesis_id"]) == "testing"
+        add_exp(ws, hyp["hypothesis_id"], result="corroborating", action="probe-3")
+        assert H.derive_hypothesis_status(ws, hyp["hypothesis_id"]) == "confirmed"
+
     def test_bare_integer_field_is_the_bar(self, ws: Path) -> None:
         """A minimum_confirmation that is a bare integer is itself the bar."""
         hyp = add_hyp(ws, minimum_confirmation="3")
@@ -691,6 +709,22 @@ class TestStatusDerivation:
             "HTTP 400 responses confirm the error",
             "produces HTTP 200 responses confirming the marker is present",
             "TLS 1.2 handshake observed",
+        ):
+            hyp = add_hyp(ws, minimum_confirmation=text,
+                          invariant=f"inv {text[:20]}", surface=f"/s{len(text)}",
+                          mutation=f"m{len(text)}")
+            add_exp(ws, hyp["hypothesis_id"], result="corroborating",
+                    action="probe")
+            assert H.derive_hypothesis_status(
+                ws, hyp["hypothesis_id"]) == "confirmed", text
+
+    def test_leading_status_code_is_not_a_bar(self, ws: Path) -> None:
+        """A field that BEGINS with a status code followed by a count noun is
+        a named signal (bar=1), not a hundreds-bar."""
+        for text in (
+            "400 responses confirm the error",
+            "401 responses confirm the request is rejected",
+            "500 OOB callbacks observed",
         ):
             hyp = add_hyp(ws, minimum_confirmation=text,
                           invariant=f"inv {text[:20]}", surface=f"/s{len(text)}",
@@ -1102,3 +1136,23 @@ class TestCli:
         assert rc == 0, err
         rc, out, err = _run_cli(["validate", "--workspace", str(ws), "--strict"], cwd=ws)
         assert rc == 0, err
+
+    def test_cli_validate_flags_shape_invalid_records(self, ws: Path) -> None:
+        """A schema-shape-invalid record (valid JSON, bad field) fails
+        validate even in non-strict mode (shape errors are integrity errors,
+        unlike malformed lines)."""
+        rc, out, err = _run_cli([
+            "add", "--workspace", str(ws), "--engagement", "demo",
+            "--invariant", "inv", "--surface", "/api/x",
+            "--mutation", "m", "--expected-safe", "401",
+            "--violation-signal", "200", "--minimum-confirmation", "2",
+            "--primitive-leverage", "read_only", "--precondition-actor", "anon",
+        ], cwd=ws)
+        assert rc == 0, err
+        hyp_path = ws / ".lab" / "hypotheses.jsonl"
+        rec = json.loads(hyp_path.read_text(encoding="utf-8").strip())
+        rec["status"] = "bogus"
+        hyp_path.write_text(json.dumps(rec) + "\n", encoding="utf-8")
+        rc, out, err = _run_cli(["validate", "--workspace", str(ws)], cwd=ws)
+        assert rc == 2
+        assert "SHAPE-INVALID (hypothesis)" in out
