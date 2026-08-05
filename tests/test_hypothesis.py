@@ -312,6 +312,29 @@ class TestDeduplication:
         assert a["hypothesis_id"] == b["hypothesis_id"]
         assert len(H.list_hypotheses(ws).records) == 1
 
+    def test_shape_invalid_prior_record_is_not_dedup_target(self, ws: Path) -> None:
+        """A shape-invalid record with a matching dedup key is NOT the
+        existing hypothesis: re-adding a valid record appends a fresh valid
+        one (no crash, no malformed-record return) and subsequent adds
+        dedupe to the valid record. The corrupt line stays (append-only) and
+        remains flagged by validate."""
+        rec = add_hyp(ws)
+        path = ws / ".lab" / "hypotheses.jsonl"
+        bad = dict(rec)
+        del bad["hypothesis_id"]
+        del bad["status"]
+        path.write_text(json.dumps(bad) + "\n", encoding="utf-8")
+        repaired = add_hyp(ws)
+        assert repaired["hypothesis_id"] != rec["hypothesis_id"]
+        assert repaired["status"] == "unverified"
+        records = H.list_hypotheses(ws).records
+        valid = [r for r in records if r.get("hypothesis_id") == repaired["hypothesis_id"]]
+        assert len(valid) == 1
+        assert valid[0]["status"] == "unverified"
+        # A third add dedupes to the VALID record, not the corrupt one.
+        again = add_hyp(ws)
+        assert again["hypothesis_id"] == repaired["hypothesis_id"]
+
     def test_dedup_keys_are_deterministic(self, ws: Path) -> None:
         rec = add_hyp(ws)
         key1 = H.hypothesis_dedup_key(rec)
@@ -809,6 +832,19 @@ class TestScannerVerdictGate:
         with pytest.raises(H.ScannerVerdictError):
             add_exp(ws, hyp["hypothesis_id"], result="disconfirming", actor="tool",
                     tool="nuclei")
+        assert len(H.experiments_for(ws, hyp["hypothesis_id"])) == 0
+
+    def test_tool_actor_normalization_cannot_bypass_guard(self, ws: Path) -> None:
+        """The actor comparison is case/whitespace-normalized: 'Tool', 'TOOL'
+        and ' tool ' cannot bypass the scanner-verdict gate."""
+        hyp = add_hyp(ws)
+        for actor in ("Tool", "TOOL", " tool ", "tOoL"):
+            with pytest.raises(H.ScannerVerdictError):
+                add_exp(ws, hyp["hypothesis_id"], result="disconfirming",
+                        actor=actor, tool="nuclei")
+            with pytest.raises(H.ScannerVerdictError):
+                add_exp(ws, hyp["hypothesis_id"], result="corroborating",
+                        actor=actor, tool="nuclei")
         assert len(H.experiments_for(ws, hyp["hypothesis_id"])) == 0
 
     def test_tool_origin_can_record_inconclusive(self, ws: Path) -> None:

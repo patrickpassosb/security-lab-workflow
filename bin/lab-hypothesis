@@ -265,6 +265,12 @@ def cmd_add(args: list[str]) -> int:
         _audit(AUDIT_ACTION_ADD, single.get("--target", ""), VALIDATION_ERR,
                detail=f"validation: {e}")
         return VALIDATION_ERR
+    if not record.get("hypothesis_id"):
+        print("ERROR: add returned a record without hypothesis_id (corrupt ledger?)",
+              file=sys.stderr)
+        _audit(AUDIT_ACTION_ADD, single.get("--target", ""), VALIDATION_ERR,
+               detail="missing hypothesis_id in returned record")
+        return VALIDATION_ERR
     print(f"ADDED: {record['hypothesis_id']}")
     print(f"STATUS: {record['status']}")
     print(f"ENGAGEMENT: {record['engagement']}")

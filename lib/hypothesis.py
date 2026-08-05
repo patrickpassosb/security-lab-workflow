@@ -670,6 +670,14 @@ def add_hypothesis(
         existing_read = _read_ledger(ledger)
         key = hypothesis_dedup_key(record)
         for prior in existing_read.records:
+            # A shape-invalid prior record (e.g. a crashed/pre-schema write)
+            # is NOT the existing hypothesis - it cannot be the idempotent
+            # no-op target. Only a shape-valid record with the same key is a
+            # duplicate; re-adding a valid record repairs the corrupt line.
+            try:
+                _validate_hypothesis(prior)
+            except (HypothesisValidationError, UnsafeScopeError):
+                continue
             if hypothesis_dedup_key(prior) == key:
                 # Idempotent no-op - return the existing hypothesis.
                 return prior
@@ -723,7 +731,9 @@ def add_experiment(
     # (corroborating OR disconfirming) are the agent/replay-harness's job - a
     # flaky or misconfigured tool must not be able to kill a hypothesis with a
     # single disconfirming record (the ranker treats disconfirmed as terminal).
-    actor = str(provenance.get("actor") or "")
+    # The actor comparison is normalized (strip + lower) so 'Tool'/' TOOL '
+    # cannot bypass the gate (the dedup key already normalizes the same way).
+    actor = str(provenance.get("actor") or "").strip().lower()
     if actor == "tool" and result in (RESULT_CORROBORATING, RESULT_DISCONFIRMING):
         raise ScannerVerdictError(
             f"A tool-originated experiment cannot record result={result!r} "
@@ -768,6 +778,16 @@ def add_experiment(
         existing_exp = _read_ledger(exp_ledger)
         key = experiment_dedup_key(record)
         for prior in existing_exp.records:
+            # A shape-invalid prior record is NOT a duplicate (same reasoning
+            # as add_hypothesis): it cannot be the no-op target, so re-adding
+            # a valid record repairs the corrupt line.
+            try:
+                _validate_experiment(prior, hypothesis_exists=True,
+                                     hyp_id=str(prior.get("hypothesis_id") or ""))
+            except (HypothesisValidationError, UnsafeScopeError):
+                continue
+            except HypothesisNotFoundError:
+                continue
             if experiment_dedup_key(prior) == key:
                 if strict:
                     raise DuplicateExperimentError(
