@@ -220,6 +220,14 @@ def main() -> int:
     if not engagement and isinstance(payload.get("engagement"), str):
         engagement = payload["engagement"]
 
+    # Symmetric resolution for the target: when --target is absent, resolve
+    # it from the payload before the oracle call so the audit entry records
+    # the SAME target the scope gate actually enforced (an asymmetry here
+    # would let a payload-only run audit with an empty target while the
+    # oracle already refused/verified against the payload's target).
+    if not target and isinstance(payload.get("target"), str):
+        target = payload["target"]
+
     # Run the oracle.
     try:
         result = V.build_result(

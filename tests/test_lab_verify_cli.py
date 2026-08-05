@@ -234,6 +234,63 @@ class TestLabVerify:
             for e in entries
         )
 
+    def test_audit_entry_records_payload_target(
+        self, capsys, tmp_path, cli_env, monkeypatch
+    ):
+        payload = {
+            "finding_id": "cli-audit-payload-target",
+            "cross_actor_response": '{"owner_user_id":"user_42","marker":"ctrl_7f3a"}',
+            "control_response": '{"error":"forbidden"}',
+            "victim_marker": "ctrl_7f3a",
+            "ownership_verified": True,
+            "ownership_identity": "user_42",
+            "target": "http://example.com/api/workspaces/123",
+            "engagement": "my-eng",
+        }
+        p = _write_payload(tmp_path, payload)
+        rc = _run(monkeypatch, "authorization", "--payload", str(p))
+        assert rc == 0
+        log_path = cli_env / "findings" / ".agent-audit.jsonl"
+        assert log_path.is_file()
+        raw_lines = [
+            line
+            for line in log_path.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+        entries = [json.loads(line) for line in raw_lines]
+        matches = [
+            e
+            for e in entries
+            if e.get("action") == "lab-verify"
+            and e.get("finding_id") == "cli-audit-payload-target"
+        ]
+        assert matches, "no lab-verify audit entry for the payload-target run"
+        assert matches[-1].get("target") == "http://example.com/api/workspaces/123"
+
+    def test_payload_target_in_scope_gate_enforced_without_flag(
+        self, capsys, tmp_path, cli_env, monkeypatch
+    ):
+        # The scope gate must enforce the payload's target even when no
+        # --target flag is supplied (no flag/target asymmetry).
+        payload = {
+            "finding_id": "cli-payload-target-oos",
+            "cross_actor_response": '{"owner_user_id":"user_42","marker":"ctrl_7f3a"}',
+            "control_response": '{"error":"forbidden"}',
+            "victim_marker": "ctrl_7f3a",
+            "ownership_verified": True,
+            "ownership_identity": "user_42",
+            "target": "http://outofscope.example",
+            "engagement": "my-eng",
+        }
+        p = _write_payload(tmp_path, payload)
+        out = tmp_path / "result.json"
+        rc = _run(monkeypatch, "authorization", "--payload", str(p), "--out", str(out))
+        assert rc == 2  # refused: the payload target was enforced
+        loaded = json.loads(out.read_text(encoding="utf-8"))
+        assert loaded["outcome"] == "insufficient_evidence"
+        assert loaded["reason"].startswith("refused:")
+        assert loaded["target"] == "http://outofscope.example"
+
     def test_scope_refusal_audits_exit_2_with_reason(
         self, capsys, tmp_path, cli_env, monkeypatch
     ):
@@ -268,6 +325,9 @@ class TestLabVerify:
         entry = matches[-1]
         assert entry.get("exit") == 2
         assert "refused=" in entry.get("detail", "")
+        # The audit entry must record the payload-resolved target (the same
+        # target the scope gate enforced) -- no target/audit asymmetry.
+        assert entry.get("target") == "http://outofscope.example"
 
     def test_non_string_payload_engagement_fails_cleanly(
         self, capsys, tmp_path, cli_env, monkeypatch
