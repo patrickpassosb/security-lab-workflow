@@ -8,8 +8,8 @@ Ollama Cloud quota with zero external LLM egress:
 
     lab-cai-run <target> --engagement <name> [options]
 
-Pipeline (per docs/ARCHITECTURE.md, adapted from the §7.5 agentic
-engine slot):
+Pipeline (per docs/ARCHITECTURE.md — agentic engine slot, tool-integration
+design):
 
     1. scope-check via lab-scope (default-deny; exit 2/3 refuses the run)
     2. sandbox: bwrap container with fresh HOME + cwd; CAI telemetry/
