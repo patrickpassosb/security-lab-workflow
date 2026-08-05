@@ -21,12 +21,16 @@ engine that ran — it is the version of a tool, not a trusted verdict.
 
 LLM route (Ollama Cloud / Aperture): provider config is read ONLY from the
 environment — never hardcoded. `OLLAMA_API_BASE` (e.g. http://ai.tail492ce8.ts.net)
-and `OLLAMA_API_KEY` (or the CAI default `OPENAI_API_KEY`); the model is
-`CAI_MODEL` (default `ollama_cloud/deepseek-v4-flash:0731`). CAI resolves
-`ollama_cloud/` prefixed models to `OLLAMA_API_BASE/v1` via its OpenAI-
-compatible client (see cai/sdk/agents/models/openai_chatcompletions.py).
-No secret is written to the repo, ledger, or audit log; the api key is
-scrubbed from any captured output before it is stored or printed.
+and `OLLAMA_API_KEY`; the model is `CAI_MODEL` (default
+`ollama_cloud/deepseek-v4-flash:0731`). CAI resolves `ollama_cloud/`
+prefixed models to `OLLAMA_API_BASE/v1` via its OpenAI-compatible client
+(see cai/sdk/agents/models/openai_chatcompletions.py). `OPENAI_API_KEY`
+is used as a route key ONLY when an explicit base is configured (it is
+always set — mirrored from OLLAMA_API_KEY — to satisfy CAI's import-time
+client construction, but with no base the run fails closed rather than
+routing a credential to an implicit default endpoint). No secret is
+written to the repo, ledger, or audit log; the api key is scrubbed from
+any captured output before it is stored or printed.
 
 Telemetry/egress notes (verified against cai-framework 0.5.10):
   - `CAI_TELEMETRY=false` disables the session-log upload to the vendor
@@ -273,6 +277,7 @@ def build_bwrap_argv(
     argv: list[str] = [
         bwrap,
         "--unshare-user",
+        "--unshare-pid",
         "--share-net",
         "--ro-bind",
         "/usr",
@@ -797,10 +802,14 @@ def run(
     run_dir, home_dir = prepare_run_dir(out_dir)
 
     resolved_model = model or os.environ.get("CAI_MODEL") or DEFAULT_MODEL
-    resolved_api_base = api_base or os.environ.get("OLLAMA_API_BASE") or "https://ollama.com"
-    resolved_api_key = (
-        api_key or os.environ.get("OLLAMA_API_KEY") or os.environ.get("OPENAI_API_KEY", "")
-    )
+    resolved_api_base = api_base or os.environ.get("OLLAMA_API_BASE") or ""
+    # The route key must never be routed to an implicit default endpoint:
+    # OPENAI_API_KEY is only a route key when an explicit base is set.
+    # With no base configured the run fails closed (no route) rather than
+    # sending a credential to a default-unconfigured endpoint.
+    resolved_api_key = api_key or os.environ.get("OLLAMA_API_KEY", "")
+    if not resolved_api_key and resolved_api_base:
+        resolved_api_key = os.environ.get("OPENAI_API_KEY", "")
     resolved_agent = AGENT_ALIASES.get(agent_type, agent_type)
     if resolved_agent not in AGENT_TYPES:
         resolved_agent = "one_tool_agent"
@@ -921,8 +930,9 @@ def run(
             "CAI_GUARDRAILS": "true",
             "CAI_ENV_CONTEXT": "false",
             "CAI_SUPPORT_INTERVAL": "999999",
-            "OLLAMA_API_BASE": resolved_api_base,
         }
+        if resolved_api_base:
+            cai_env["OLLAMA_API_BASE"] = resolved_api_base
         if resolved_api_key:
             cai_env["OLLAMA_API_KEY"] = resolved_api_key
         cai_env.update(env_extra)
