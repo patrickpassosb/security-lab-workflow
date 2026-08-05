@@ -464,6 +464,13 @@ def _validate_hypothesis(record: dict[str, Any]) -> None:
         raise HypothesisValidationError(
             f"schema must be {HYPOTHESIS_SCHEMA!r}, got {record['schema']!r}"
         )
+    # Type-guard the id BEFORE the regex: a JSON-parseable-but-typed-wrong
+    # record (e.g. hypothesis_id=12345 from a crashed/pre-schema write) must
+    # raise HypothesisValidationError, never a TypeError from the regex.
+    if not isinstance(record["hypothesis_id"], str):
+        raise HypothesisValidationError(
+            f"hypothesis_id must be a string, got {type(record['hypothesis_id']).__name__}"
+        )
     if not HYPOTHESIS_ID_RE.match(record["hypothesis_id"]):
         raise HypothesisValidationError(
             f"hypothesis_id must match hyp-<uuid4>, got {record['hypothesis_id']!r}"
@@ -481,12 +488,12 @@ def _validate_hypothesis(record: dict[str, Any]) -> None:
             "disconfirming_controls must be a string (use '' for none)"
         )
     pl = record["primitive_leverage"]
-    if pl not in PRIMITIVE_LEVERAGE_SCORES:
+    if not isinstance(pl, str) or pl not in PRIMITIVE_LEVERAGE_SCORES:
         raise HypothesisValidationError(
             f"primitive_leverage must be one of {sorted(PRIMITIVE_LEVERAGE_SCORES)}, got {pl!r}"
         )
     status = record["status"]
-    if status not in HYPOTHESIS_STATUSES:
+    if not isinstance(status, str) or status not in HYPOTHESIS_STATUSES:
         raise HypothesisValidationError(
             f"status must be one of {sorted(HYPOTHESIS_STATUSES)}, got {status!r}"
         )
@@ -533,6 +540,17 @@ def _validate_experiment(record: dict[str, Any], *, hypothesis_exists: bool, hyp
         raise HypothesisValidationError(
             f"schema must be {EXPERIMENT_SCHEMA!r}, got {record['schema']!r}"
         )
+    # Type-guards BEFORE the regexes: typed-wrong ids (int/None) must raise
+    # HypothesisValidationError, never TypeError from the regex (the ledger
+    # never crashes on corruption - module docstring rule #8).
+    if not isinstance(record["experiment_id"], str):
+        raise HypothesisValidationError(
+            f"experiment_id must be a string, got {type(record['experiment_id']).__name__}"
+        )
+    if not isinstance(record["hypothesis_id"], str):
+        raise HypothesisValidationError(
+            f"hypothesis_id must be a string, got {type(record['hypothesis_id']).__name__}"
+        )
     if not EXPERIMENT_ID_RE.match(record["experiment_id"]):
         raise HypothesisValidationError(
             f"experiment_id must match exp-<uuid4>, got {record['experiment_id']!r}"
@@ -563,7 +581,7 @@ def _validate_experiment(record: dict[str, Any], *, hypothesis_exists: bool, hyp
     if not isinstance(record["violation_signal_observed"], bool):
         raise HypothesisValidationError("violation_signal_observed must be a boolean")
     result = record["result"]
-    if result not in EXPERIMENT_RESULTS:
+    if not isinstance(result, str) or result not in EXPERIMENT_RESULTS:
         raise HypothesisValidationError(
             f"result must be one of {sorted(EXPERIMENT_RESULTS)}, got {result!r}"
         )
@@ -1071,8 +1089,8 @@ def rank(
 
 
 _MIN_CONF_QUAL_RE = re.compile(
-    r"^(?:a minimum of|at least|no fewer than|at minimum|no less than|"
-    r"minimum of|min of|minimum|min|exactly|need|requires?)\s+",
+    r"^(?:a minimum of|a min of|at least|no fewer than|at minimum|no less than|"
+    r"minimum of|min of|minimum|min|exactly|need|needs|requires?)\s+",
     re.IGNORECASE,
 )
 _MIN_CONF_COUNT_RE = re.compile(
@@ -1123,8 +1141,11 @@ def _min_confirmation_bar(minimum_confirmation: str | None) -> int:
     m = _MIN_CONF_WORD_HEAD_RE.match(head)
     if m:
         return max(1, _MIN_CONF_WORD_COUNTS[m.group(1).lower()])
-    if re.fullmatch(r"-?\d+", text):
-        return max(1, int(text))
+    if re.fullmatch(r"-?\d+", head):
+        # Applied to the qualifier-stripped head so 'minimum 2' / 'min 2'
+        # parse as bar=2, never fail open to 1. The clamp neutralizes
+        # 'minimum 0' / 'minimum -1'.
+        return max(1, int(head))
     return 1
 
 

@@ -723,6 +723,22 @@ class TestStatusDerivation:
             assert H.derive_hypothesis_status(
                 ws, hyp["hypothesis_id"]) == "testing", text
 
+    def test_qualifier_bare_int_does_not_fail_open(self, ws: Path) -> None:
+        """Terse qualifier+bare-number forms ('minimum 2', 'min 2',
+        'needs 2 replays') parse as the stated bar, never fail open to 1."""
+        for text in ("minimum 2", "min 2", "a min of 2 requests", "needs 2 replays"):
+            hyp = add_hyp(ws, minimum_confirmation=text,
+                          invariant=f"inv {text[:20]}", surface=f"/s{len(text)}",
+                          mutation=f"m{len(text)}")
+            add_exp(ws, hyp["hypothesis_id"], result="corroborating",
+                    action="probe")
+            assert H.derive_hypothesis_status(
+                ws, hyp["hypothesis_id"]) == "testing", text
+            add_exp(ws, hyp["hypothesis_id"], result="corroborating",
+                    action="probe-2")
+            assert H.derive_hypothesis_status(
+                ws, hyp["hypothesis_id"]) == "confirmed", text
+
     def test_bare_integer_field_is_the_bar(self, ws: Path) -> None:
         """A minimum_confirmation that is a bare integer is itself the bar."""
         hyp = add_hyp(ws, minimum_confirmation="3")
@@ -993,6 +1009,31 @@ class TestMalformedJsonlRecovery:
         read = H.list_hypotheses(ws)
         assert read.skipped_lines == 1
         assert len(read.records) == 1
+
+    def test_typed_wrong_prior_line_does_not_crash(self, ws: Path) -> None:
+        """A JSON-parseable but typed-wrong prior line (int hypothesis_id) is
+        skipped as a dedup target and re-adding a valid record succeeds —
+        the ledger never crashes on corruption (TypeError must not escape)."""
+        rec = add_hyp(ws)
+        path = ws / ".lab" / "hypotheses.jsonl"
+        bad = dict(rec)
+        bad["hypothesis_id"] = 12345
+        path.write_text(json.dumps(bad) + "\n", encoding="utf-8")
+        repaired = add_hyp(ws)
+        assert repaired["hypothesis_id"] != rec["hypothesis_id"]
+        # validate also survives the typed-wrong line without crashing.
+        report = H.validate_ledger(ws)
+        assert report.hypotheses_count >= 1
+
+    def test_validate_typed_wrong_experiment_line_no_crash(self, ws: Path) -> None:
+        hyp = add_hyp(ws)
+        exp = add_exp(ws, hyp["hypothesis_id"], result="inconclusive")
+        path = ws / ".lab" / "experiments.jsonl"
+        bad = dict(exp)
+        bad["experiment_id"] = None
+        path.write_text(json.dumps(bad) + "\n", encoding="utf-8")
+        report = H.validate_ledger(ws)
+        assert report.experiments_count >= 1
 
 
 # ─── Rendering / query surface (agent worklist) ───────────────────────────────
