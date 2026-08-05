@@ -37,9 +37,7 @@ def _redirect_audit_log(tmp_path, monkeypatch):
     ~/security-lab/findings/.agent-audit.jsonl. Same convention as
     tests/test_audit_schema.py.
     """
-    monkeypatch.setattr(
-        labutil, "AUDIT_LOG_PATH", tmp_path / "findings" / ".agent-audit.jsonl"
-    )
+    monkeypatch.setattr(labutil, "AUDIT_LOG_PATH", tmp_path / "findings" / ".agent-audit.jsonl")
 
 
 # A synthetic CAI venv shim: `cai` prints a banner and consumes stdin.
