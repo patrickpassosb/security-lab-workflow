@@ -13,8 +13,8 @@ contract in AGENTS.md "CAI agentic hunting (lab-cai-run)"):
 
     1. scope-check via lab-scope (default-deny; exit 2/3 refuses the run)
     2. sandbox: bwrap container with fresh HOME + cwd; CAI telemetry/
-       tracing/support-agent egress disabled; the only network is the
-       configured LLM route
+       tracing/support-agent egress disabled; CAI's known egress hosts
+       blackholed via /etc/hosts (other egress remains possible)
     3. run CAI headless (piped stdin, initial prompt on argv)
     4. capture output as UNTRUSTED data (evidence + SHA-256 hash)
     5. emit finding-candidates to findings.jsonl

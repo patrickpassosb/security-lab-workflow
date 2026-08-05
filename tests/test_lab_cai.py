@@ -242,10 +242,8 @@ class TestSandboxEnforcement:
         # It MUST live under the ro-bound output dir.
         assert run_dir.parent in hosts_path.parents
 
-    def test_stdin_carries_only_exit(self, tmp_path, monkeypatch):
-        """The prompt is delivered on argv; stdin must carry only /exit
-        so the REPL exits without re-executing the prompt as a second
-        user turn (doubled LLM spend + duplicate hypotheses)."""
+    def test_run_forwards_prompt_to_cai(self, tmp_path, monkeypatch):
+        """run() must forward the caller's prompt to run_cai unchanged."""
         captured: dict[str, str] = {}
 
         def _fake_run(
@@ -278,6 +276,58 @@ class TestSandboxEnforcement:
             "https://example.com", "test-eng", venv_bin=venv, output_dir=out, prompt="probe prompt"
         )
         assert captured["prompt"] == "probe prompt"
+
+    def test_real_run_cai_stdin_carries_only_exit(self, tmp_path, monkeypatch):
+        """Behavioral regression for the single-prompt contract: the real
+        run_cai must deliver the prompt once on argv and pipe only /exit
+        on stdin — piping the prompt again would execute it as a second
+        user turn (doubled LLM spend + duplicate hypotheses). A fake
+        bwrap passes through to a fake `cai` that records what it
+        received on argv and stdin."""
+        fake_bin = tmp_path / "fakebin"
+        fake_bin.mkdir()
+        (fake_bin / "bwrap").write_text(
+            "#!/usr/bin/env python3\n"
+            "import os, sys\n"
+            "i = sys.argv.index('--')\n"
+            "os.execvpe(sys.argv[i + 1], sys.argv[i + 1:], os.environ)\n",
+            encoding="utf-8",
+        )
+        os.chmod(fake_bin / "bwrap", 0o755)
+        venv = tmp_path / "cai-venv"
+        bin_dir = venv / "bin"
+        bin_dir.mkdir(parents=True)
+        record = tmp_path / "cai_received.json"
+        (bin_dir / "cai").write_text(
+            "#!/usr/bin/env python3\n"
+            "import json, sys\n"
+            f"rec = {{'argv': sys.argv[1:], 'stdin': sys.stdin.read()}}\n"
+            f"with open({str(record)!r}, 'w') as f:\n"
+            "    f.write(json.dumps(rec))\n"
+            "print('Cybersecurity AI (CAI), vunknown')\n"
+            "sys.exit(0)\n",
+            encoding="utf-8",
+        )
+        os.chmod(bin_dir / "cai", 0o755)
+        monkeypatch.setenv("PATH", f"{fake_bin}:{os.environ.get('PATH', '')}")
+        run_dir = tmp_path / "run"
+        run_dir.mkdir(parents=True)
+        rc, _, _, _ = labcai.run_cai(
+            bin_dir,
+            run_dir,
+            "ollama_cloud/deepseek-v4-flash:0731",
+            "http://route.test",
+            "k",
+            "bug_bounter",
+            "probe prompt",
+            timeout=30,
+        )
+        assert rc == 0
+        rec = json.loads(record.read_text(encoding="utf-8"))
+        stdin_lines = rec["stdin"].splitlines()
+        assert stdin_lines == ["/exit"], f"stdin must carry only /exit, got {stdin_lines}"
+        assert rec["argv"] == ["probe prompt"], "prompt must arrive once, on argv"
+        assert (rec["argv"] + stdin_lines).count("probe prompt") == 1
 
     def test_cai_version_from_distinfo_only(self, tmp_path):
         """cai_version must never execute the CAI binary (it would start
@@ -645,8 +695,10 @@ class TestRecorderBackedRun:
         assert lines[0]["vuln_class"] == "idor"
 
     def test_openai_key_mirrored_into_env(self, tmp_path, monkeypatch):
-        """OPENAI_API_KEY must be set (import-time requirement of CAI's
-        android_sast_agent) even when only OLLAMA_API_KEY is provided."""
+        """OPENAI_API_KEY must mirror the OLLAMA route key (import-time
+        requirement of CAI's android_sast_agent) — the host's own
+        OPENAI_API_KEY must never be forwarded into the sandbox."""
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-host-key-must-not-forward")
         seen: dict[str, str] = {}
 
         def _fake_run(
@@ -682,6 +734,109 @@ class TestRecorderBackedRun:
         )
         assert seen.get("OPENAI_API_KEY") == "not-required"
         assert seen.get("OLLAMA_API_KEY") == "not-required"
+        assert "sk-host-key-must-not-forward" not in "".join(seen.values())
+
+    def test_host_openai_key_not_forwarded_without_base(self, tmp_path, monkeypatch):
+        """Fail-closed route key: without an explicit OLLAMA_API_BASE the
+        host's OPENAI_API_KEY must not reach the sandbox env (it could be
+        routed to CAI's implicit default endpoint)."""
+        seen: dict[str, str] = {}
+
+        def _fake_run(
+            venv,
+            workdir,
+            model,
+            api_base,
+            api_key,
+            agent,
+            prompt,
+            *,
+            max_turns=10,
+            price_limit="1",
+            timeout=600,
+            env_extra=None,
+        ):
+            seen.update(env_extra or {})
+            return 1, "", "EOFError\n", str(workdir / "logs")
+
+        monkeypatch.setattr(labcai, "scope_check", lambda t, e: (0, "OK"))
+        monkeypatch.setattr(labcai, "run_cai", _fake_run)
+        monkeypatch.setattr(
+            labcai.shutil,
+            "which",
+            lambda n: "/usr/bin/bwrap" if n == "bwrap" else "/usr/bin/x",
+        )
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-host-live-key-123456789")
+        monkeypatch.delenv("OLLAMA_API_BASE", raising=False)
+        monkeypatch.delenv("OLLAMA_API_KEY", raising=False)
+        venv = _make_shim_venv(tmp_path)
+        labcai.run("https://example.com", "test-eng", venv_bin=venv, output_dir=tmp_path / "out")
+        assert seen.get("OPENAI_API_KEY") in (None, "")
+        assert seen.get("OLLAMA_API_KEY") in (None, "")
+        assert "sk-host-live-key-123456789" not in "".join(seen.values())
+
+    def test_openai_key_becomes_route_key_only_with_base(self, tmp_path, monkeypatch):
+        """With an explicit base but no OLLAMA key, the host's
+        OPENAI_API_KEY is adopted as the route key (mirrored into both
+        env vars) — the documented fail-closed exception."""
+        seen: dict[str, str] = {}
+
+        def _fake_run(
+            venv,
+            workdir,
+            model,
+            api_base,
+            api_key,
+            agent,
+            prompt,
+            *,
+            max_turns=10,
+            price_limit="1",
+            timeout=600,
+            env_extra=None,
+        ):
+            seen.update(env_extra or {})
+            return 1, "", "EOFError\n", str(workdir / "logs")
+
+        monkeypatch.setattr(labcai, "scope_check", lambda t, e: (0, "OK"))
+        monkeypatch.setattr(labcai, "run_cai", _fake_run)
+        monkeypatch.setattr(
+            labcai.shutil,
+            "which",
+            lambda n: "/usr/bin/bwrap" if n == "bwrap" else "/usr/bin/x",
+        )
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-route-key-123456789")
+        monkeypatch.setenv("OLLAMA_API_BASE", "http://route.test")
+        monkeypatch.delenv("OLLAMA_API_KEY", raising=False)
+        venv = _make_shim_venv(tmp_path)
+        labcai.run("https://example.com", "test-eng", venv_bin=venv, output_dir=tmp_path / "out")
+        assert seen.get("OLLAMA_API_KEY") == "sk-route-key-123456789"
+        assert seen.get("OPENAI_API_KEY") == "sk-route-key-123456789"
+
+    def test_evidence_ref_links_to_captured_evidence(self, tmp_path, monkeypatch):
+        """Candidates must reference the captured evidence file so
+        consumers can trace a hypothesis back to its raw output."""
+        monkeypatch.setattr(labcai, "scope_check", lambda t, e: (0, "OK: in scope"))
+        venv = self._shim_with_recorder(tmp_path)
+        out = tmp_path / "out"
+        rc = labcai.run(
+            "https://example.com",
+            "test-eng",
+            venv_bin=venv,
+            output_dir=out,
+            timeout=30,
+            sandboxed=False,
+        )
+        assert rc == 0
+        lines = [
+            json.loads(ln)
+            for ln in labcai.ledger_path(out).read_text(encoding="utf-8").splitlines()
+            if ln.strip()
+        ]
+        assert lines, "recorder transcript must produce findings"
+        ref = lines[0]["evidence_ref"]
+        assert ref.startswith("evidence/")
+        assert (out / ref).exists(), f"evidence_ref {ref} must exist on disk"
 
     def test_run_failure_not_eof_still_exit_6(self, tmp_path, monkeypatch):
         """A real crash (rc=2, no EOFError) is still a run failure."""

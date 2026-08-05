@@ -4,8 +4,9 @@ Wraps the open-source CAI framework (aliasrobotics/cai, `pip install
 cai-framework`) behind the lab's scope -> audit -> evidence contract:
 
   scope-check (default-deny, refuse out-of-scope)
-    -> sandbox (bwrap network-isolated run dir, telemetry/recorder egress
-       disabled — the only network allowed is the configured LLM route)
+    -> sandbox (bwrap run dir with CAI's known egress hosts blackholed;
+       telemetry/recorder egress disabled — other egress remains
+       possible; the LLM route stays reachable)
     -> run CAI headless (piped stdin, initial prompt on argv)
     -> capture output as UNTRUSTED data
     -> emit finding-candidates to findings.jsonl
@@ -58,8 +59,9 @@ Headless transcript contract (verified against cai-framework 0.5.10):
     `cai/agents/android_sast_agent.py` constructs `AsyncOpenAI()` at
     import time, which requires `OPENAI_API_KEY` to be set even when the
     Ollama Cloud route is used. The adapter therefore always sets
-    `OPENAI_API_KEY` alongside `OLLAMA_API_KEY` (both from the host env;
-    `not-required` on the Aperture tailnet route).
+    `OPENAI_API_KEY` (mirrored from the OLLAMA route key; empty when no
+    route is configured) alongside `OLLAMA_API_KEY` — the host's own
+    OPENAI key is never forwarded into the sandbox.
   - Upstream defect: `cai/util.fix_message_list` (message-history repair
     in the non-streaming path) can spin on multi-tool turns, so the
     adapter's wall-clock timeout (rc=124) fires first. The adapter
@@ -270,8 +272,9 @@ def build_bwrap_argv(
     systemd distros, so the resolver stub is bound directly instead.
     `--unshare-net` is NOT used: the LLM route lives on the host network
     (tailnet or public Ollama Cloud) and a private netns cannot reach it
-    — the sandbox contract is "egress-restricted, LLM route only", not
-    "no network". See the module docstring for the full egress analysis.
+    — the sandbox contract is "known egress hosts blackholed; the LLM
+    route stays reachable", not "no network". See the module docstring
+    for the full egress analysis.
     """
     hosts_file = _egress_block_hosts_file(workdir.parent)
     argv: list[str] = [
@@ -426,7 +429,7 @@ def _cai_env(
         env["OLLAMA_API_KEY"] = api_key
     if agent_type:
         env["CAI_AGENT_TYPE"] = agent_type
-    # Any additional env (e.g. OPENAI_API_KEY fallback) is merged in.
+    # Any additional env (e.g. the OPENAI_API_KEY mirror) is merged in.
     env.update(env_extra)
     return env
 
@@ -596,11 +599,11 @@ def classify_hypothesis(text: str) -> tuple[str, str]:
     """
     lowered = text.lower()
     mapping = [
-        (("sql", "sqli", "injection"), "sqli", "CWE-89"),
+        (("sql", "sqli"), "sqli", "CWE-89"),
         (("xss", "cross-site", "cross site"), "xss", "CWE-79"),
         (("ssrf", "server-side request"), "ssrf", "CWE-918"),
         (("idor", "broken object", "access control", "object level"), "idor", "CWE-639"),
-        (("auth", "authentication", "bypass"), "auth-bypass", "CWE-287"),
+        (("authentication", "bypass"), "auth-bypass", "CWE-287"),
         (("csrf", "cross-site request"), "csrf", "CWE-352"),
         (("rce", "remote code", "code execution"), "rce", "CWE-94"),
         (("path traversal", "traversal"), "path-traversal", "CWE-22"),
@@ -621,6 +624,11 @@ def classify_hypothesis(text: str) -> tuple[str, str]:
     for keywords, cls, cwe in mapping:
         if any(k in lowered for k in keywords):
             return cls, cwe
+    # "auth" as a standalone word only — never as a substring of
+    # "authorization", which is an access-control concern rather than an
+    # authentication flaw.
+    if re.search(r"\bauth\b", lowered):
+        return "auth-bypass", "CWE-287"
     return "unknown", ""
 
 
@@ -635,6 +643,7 @@ def parse_findings(
     scope_decision: str,
     ts: str,
     sandboxed: bool = True,
+    evidence_ref: str = "",
 ) -> list[dict[str, Any]]:
     """Parse UNTRUSTED CAI output into normalized finding-candidates.
 
@@ -645,6 +654,8 @@ def parse_findings(
     provenance. CAI never self-reports impact — no impact field exists
     in the schema. `sandboxed` records whether the tool actually ran in
     the bwrap sandbox (provenance truth, default True for API compat).
+    `evidence_ref` links each candidate to its captured evidence file
+    (relative to the output dir); empty when no evidence was captured.
     """
     candidates: list[dict[str, Any]] = []
     panels = extract_panels(transcript)
@@ -685,7 +696,7 @@ def parse_findings(
                 "cwe": cwe,
                 "severity": "low",
                 "confidence": 0.3,
-                "evidence_ref": "",
+                "evidence_ref": evidence_ref,
                 "raw": {"engine": "cai", "agent": agent_type, "text": redact(text)},
                 "ts": ts,
                 "scope_checked": True,
@@ -884,18 +895,17 @@ def run(
         return 0
 
     env_extra: dict[str, str] = {}
-    if resolved_api_key and "OLLAMA_API_KEY" not in env_extra:
+    if resolved_api_key:
         env_extra["OLLAMA_API_KEY"] = resolved_api_key
     # CAI's agent registry imports every agent module at startup and
     # cai/agents/android_sast_agent.py constructs AsyncOpenAI() at import
     # time — that requires OPENAI_API_KEY to be *set* (any value) even
-    # when the Ollama Cloud route is used. Mirror the OLLAMA key into
-    # OPENAI_API_KEY so the default agent (bug_bounter) does not crash
-    # before the LLM route is configured.
-    env_extra.setdefault(
-        "OPENAI_API_KEY",
-        os.environ.get("OPENAI_API_KEY") or resolved_api_key,
-    )
+    # when the Ollama Cloud route is used. Mirror the OLLAMA route key
+    # into OPENAI_API_KEY (empty when no route is configured) so the
+    # default agent (bug_bounter) does not crash before the LLM route is
+    # set up; the host's own OPENAI_API_KEY is never forwarded into the
+    # sandbox env.
+    env_extra["OPENAI_API_KEY"] = resolved_api_key
     if sandboxed:
         rc, stdout, stderr, logs_dir = run_cai(
             venv_bin,
@@ -975,6 +985,11 @@ def run(
         (evidence_dir / f"cai-session-fragment-{output_hash[:12]}.txt").write_text(
             log_fragment, encoding="utf-8"
         )
+    evidence_ref = (
+        f"evidence/cai-session-fragment-{output_hash[:12]}.txt"
+        if log_fragment
+        else f"evidence/cai-stdout-{output_hash[:12]}.txt"
+    )
 
     if rc != 0:
         # rc=1 is the NORMAL headless end for a budgeted hunt, not a
@@ -1025,6 +1040,7 @@ def run(
         scope_decision=redact(msg),
         ts=ts,
         sandboxed=sandboxed,
+        evidence_ref=evidence_ref,
     )
     n = emit_candidates(ledger_path(out_dir), candidates)
     print(
