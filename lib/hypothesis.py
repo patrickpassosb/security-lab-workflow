@@ -1071,7 +1071,8 @@ def rank(
 
 
 _MIN_CONF_QUAL_RE = re.compile(
-    r"^(?:at least|minimum|min|a minimum of|no fewer than|at minimum)\s+",
+    r"^(?:a minimum of|at least|no fewer than|at minimum|no less than|"
+    r"minimum of|min of|minimum|min|exactly|need|requires?)\s+",
     re.IGNORECASE,
 )
 _MIN_CONF_COUNT_RE = re.compile(
@@ -1099,7 +1100,8 @@ def _min_confirmation_bar(minimum_confirmation: str | None) -> int:
     bar: an integer or word-form count followed by a count noun, with up to
     two intervening words and an optional leading qualifier ("2 corroborating
     experiments" -> 2, "two OOB callbacks" -> 2, "Minimum 3 independent
-    confirmations" -> 3, "At least 2 corroborating experiments" -> 2).
+    confirmations" -> 3, "At least 2 corroborating experiments" -> 2,
+    "minimum of 2 corroborating experiments" -> 2, "exactly 2 requests" -> 2).
     Status codes and time windows mid-sentence ("OOB callback observed
     within 30s of payload", "Replay produces HTTP 200 requests") are NOT
     counts - a named signal without a count is a single confirmation

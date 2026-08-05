@@ -704,6 +704,25 @@ class TestStatusDerivation:
         add_exp(ws, hyp["hypothesis_id"], result="corroborating", action="probe-3")
         assert H.derive_hypothesis_status(ws, hyp["hypothesis_id"]) == "confirmed"
 
+    def test_qualifier_prefix_forms_do_not_fail_open(self, ws: Path) -> None:
+        """'minimum of 2...' / 'min of 3...' parse the qualifier as a whole:
+        the bar must not silently collapse to 1 (fail-open weakness)."""
+        for text in (
+            "minimum of 2 corroborating experiments",
+            "min of 3 independent confirmations",
+            "a minimum of 2 corroborating experiments",
+            "exactly 2 requests",
+            "need 2 replays",
+            "requires 4 independent confirmations",
+        ):
+            hyp = add_hyp(ws, minimum_confirmation=text,
+                          invariant=f"inv {text[:20]}", surface=f"/s{len(text)}",
+                          mutation=f"m{len(text)}")
+            add_exp(ws, hyp["hypothesis_id"], result="corroborating",
+                    action="probe")
+            assert H.derive_hypothesis_status(
+                ws, hyp["hypothesis_id"]) == "testing", text
+
     def test_bare_integer_field_is_the_bar(self, ws: Path) -> None:
         """A minimum_confirmation that is a bare integer is itself the bar."""
         hyp = add_hyp(ws, minimum_confirmation="3")
