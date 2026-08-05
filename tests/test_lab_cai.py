@@ -27,6 +27,21 @@ import labutil  # noqa: E402
 FIXTURE = HERE / "fixtures" / "cai_transcript.txt"
 
 
+@pytest.fixture(autouse=True)
+def _redirect_audit_log(tmp_path, monkeypatch):
+    """Redirect the audit sink to a per-test tmp file.
+
+    labcai.run() writes an audit entry for every completed/failed run;
+    without this, unit tests (target https://example.com, engagement
+    test-eng) pollute the lab's real audit trail at
+    ~/security-lab/findings/.agent-audit.jsonl. Same convention as
+    tests/test_audit_schema.py.
+    """
+    monkeypatch.setattr(
+        labutil, "AUDIT_LOG_PATH", tmp_path / "findings" / ".agent-audit.jsonl"
+    )
+
+
 # A synthetic CAI venv shim: `cai` prints a banner and consumes stdin.
 def _make_shim_venv(tmp_path: Path) -> Path:
     venv = tmp_path / "cai-venv"
