@@ -213,6 +213,83 @@ class TestSandboxEnforcement:
         bind_idx = argv.index("--bind", ro_idx)
         assert argv[bind_idx + 1] == str(run_dir)
 
+    def test_egress_hosts_file_outside_writable_surface(self, tmp_path):
+        """The egress-blocklist hosts file must be written where the
+        sandboxed agent cannot rewrite it (the ro-bound output dir), not
+        inside the writable run dir / HOME."""
+        venv = _make_shim_venv(tmp_path)
+        run_dir = tmp_path / "run"
+        run_dir.mkdir(parents=True)
+        argv = labcai.build_bwrap_argv(
+            "/usr/bin/bwrap",
+            venv,
+            run_dir,
+            run_dir,
+            "ollama_cloud/deepseek-v4-flash:0731",
+            "http://route.test",
+            "not-required",
+            "bug_bounter",
+            "prompt",
+            5,
+            "1",
+            {},
+        )
+        hosts_mount = argv[argv.index("--ro-bind", argv.index("/etc")) + 1]
+        hosts_path = Path(hosts_mount)
+        assert hosts_path.is_file()
+        # It must NOT live under the writable run dir.
+        assert run_dir not in hosts_path.parents
+        # It MUST live under the ro-bound output dir.
+        assert run_dir.parent in hosts_path.parents
+
+    def test_stdin_carries_only_exit(self, tmp_path, monkeypatch):
+        """The prompt is delivered on argv; stdin must carry only /exit
+        so the REPL exits without re-executing the prompt as a second
+        user turn (doubled LLM spend + duplicate hypotheses)."""
+        captured: dict[str, str] = {}
+
+        def _fake_run(
+            venv,
+            workdir,
+            model,
+            api_base,
+            api_key,
+            agent,
+            prompt,
+            *,
+            max_turns=10,
+            price_limit="1",
+            timeout=600,
+            env_extra=None,
+        ):
+            captured["prompt"] = prompt
+            return 1, "", "EOFError\n", str(workdir / "logs")
+
+        monkeypatch.setattr(labcai, "scope_check", lambda t, e: (0, "OK"))
+        monkeypatch.setattr(labcai, "run_cai", _fake_run)
+        monkeypatch.setattr(
+            labcai.shutil,
+            "which",
+            lambda n: "/usr/bin/bwrap" if n == "bwrap" else "/usr/bin/x",
+        )
+        venv = _make_shim_venv(tmp_path)
+        out = tmp_path / "out"
+        labcai.run(
+            "https://example.com", "test-eng", venv_bin=venv, output_dir=out, prompt="probe prompt"
+        )
+        assert captured["prompt"] == "probe prompt"
+
+    def test_cai_version_from_distinfo_only(self, tmp_path):
+        """cai_version must never execute the CAI binary (it would start
+        the recorder + telemetry on the host); dist-info metadata is the
+        only source."""
+        venv = _make_shim_venv(tmp_path)
+        site = venv.parent / "lib" / "python3.12" / "site-packages"
+        site.mkdir(parents=True)
+        (site / "cai_framework-0.5.10.dist-info").mkdir()
+        assert labcai.cai_version(venv) == "0.5.10"
+        assert labcai.cai_version(tmp_path / "missing-venv") == "unknown"
+
 
 # ─── Ledger schema validity ───────────────────────────────────────────────────
 

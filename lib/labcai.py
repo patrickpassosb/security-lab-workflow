@@ -136,24 +136,14 @@ def redact(text: str) -> str:
 def cai_version(venv_bin: Path) -> str:
     """Return the installed CAI version, or "unknown" on any failure.
 
-    Runs `cai --version` in the given venv. Never raises.
+    Version comes from the venv's dist-info metadata ONLY. The CAI binary
+    is deliberately never executed for the probe: cai-framework 0.5.10
+    treats `--version` as an initial prompt and enters the full CLI loop,
+    which starts the session recorder (public-IP lookup, ALIAS_API_KEY
+    logged verbatim) and, with default env, can upload telemetry from
+    the host — bypassing every egress control the sandbox enforces.
+    Never raises.
     """
-    exe = venv_bin / "cai"
-    try:
-        proc = subprocess.run(
-            [str(exe), "--version"],
-            capture_output=True,
-            text=True,
-            timeout=20,
-        )
-        out = (proc.stdout or "").strip()
-        # The banner prints "Cybersecurity AI (CAI), vunknown" for sdist
-        # installs; the dist-info version is authoritative.
-        m = re.search(r"v([\d.]+)", out)
-        if m:
-            return m.group(1)
-    except Exception:  # noqa: BLE001 — version probe must never raise
-        pass
     try:
         dists = list(venv_bin.parent.glob("lib/python*/site-packages/cai_framework-*.dist-info"))
         if dists:
@@ -217,8 +207,15 @@ EGRESS_BLOCK_HOSTS = (
 )
 
 
-def _egress_block_hosts_file(home_dir: Path) -> Path:
-    """Write the egress-blocklist /etc/hosts file into the run dir."""
+def _egress_block_hosts_file(base_dir: Path) -> Path:
+    """Write the egress-blocklist /etc/hosts file under `base_dir`.
+
+    `base_dir` MUST be a path the sandbox cannot write — the file is the
+    source of the ro-bound /etc/hosts, and if the untrusted agent could
+    rewrite it (e.g. via the writable run-dir bind) it could remove the
+    egress blackhole entirely. The adapter passes `workdir.parent` (the
+    output dir, bound read-only into the sandbox); never `home_dir`.
+    """
     lines = [
         "127.0.0.1 localhost",
         "::1 localhost ip6-localhost ip6-loopback",
@@ -226,7 +223,7 @@ def _egress_block_hosts_file(home_dir: Path) -> Path:
     for host in EGRESS_BLOCK_HOSTS:
         lines.append(f"127.0.0.1 {host}")
         lines.append(f"::1 {host}")
-    path = home_dir / "egress-block.hosts"
+    path = base_dir / "egress-block.hosts"
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return path
 
@@ -272,7 +269,7 @@ def build_bwrap_argv(
     — the sandbox contract is "egress-restricted, LLM route only", not
     "no network". See the module docstring for the full egress analysis.
     """
-    hosts_file = _egress_block_hosts_file(home_dir)
+    hosts_file = _egress_block_hosts_file(workdir.parent)
     argv: list[str] = [
         bwrap,
         "--unshare-user",
@@ -303,7 +300,7 @@ def build_bwrap_argv(
         # stub-resolv.conf) resolves and DNS keeps working.
         "--tmpfs",
         "/run",
-        "--ro-bind",
+        "--ro-bind-try",
         "/run/systemd/resolve",
         "/run/systemd/resolve",
         "--dev",
@@ -476,7 +473,12 @@ def run_cai(
         price_limit,
         env_extra or {},
     )
-    stdin_data = f"{prompt}\n/exit\n"
+    # The initial prompt is delivered on argv (CAI uses it as
+    # initial_prompt for the first loop iteration); stdin carries only
+    # /exit so the REPL exits instead of dropping into interactive mode.
+    # Piping the prompt again on stdin would execute it a SECOND time as
+    # a user turn — doubling LLM spend and duplicating hypotheses.
+    stdin_data = "/exit\n"
     try:
         proc = subprocess.run(
             argv,
@@ -924,7 +926,7 @@ def run(
         if resolved_api_key:
             cai_env["OLLAMA_API_KEY"] = resolved_api_key
         cai_env.update(env_extra)
-        stdin_data = f"{resolved_prompt}\n/exit\n"
+        stdin_data = "/exit\n"
         try:
             proc = subprocess.run(
                 [str(cai_exe), resolved_prompt],
