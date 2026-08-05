@@ -933,6 +933,7 @@ def run(
                 text=True,
                 timeout=timeout,
                 env=cai_env,
+                cwd=str(home_dir),
             )
             rc, stdout, stderr = proc.returncode, proc.stdout or "", proc.stderr or ""
         except subprocess.TimeoutExpired:
