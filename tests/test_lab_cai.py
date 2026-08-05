@@ -699,6 +699,7 @@ class TestRecorderBackedRun:
         requirement of CAI's android_sast_agent) — the host's own
         OPENAI_API_KEY must never be forwarded into the sandbox."""
         monkeypatch.setenv("OPENAI_API_KEY", "sk-host-key-must-not-forward")
+        monkeypatch.setenv("OLLAMA_API_BASE", "http://route.test")
         seen: dict[str, str] = {}
 
         def _fake_run(
@@ -774,6 +775,45 @@ class TestRecorderBackedRun:
         assert seen.get("OPENAI_API_KEY") in (None, "")
         assert seen.get("OLLAMA_API_KEY") in (None, "")
         assert "sk-host-live-key-123456789" not in "".join(seen.values())
+
+    def test_ollama_key_not_forwarded_without_base(self, tmp_path, monkeypatch):
+        """Fail-closed route key: OLLAMA_API_KEY without an explicit
+        OLLAMA_API_BASE must not reach the sandbox env — CAI's OpenAI
+        client falls back to its implicit https://ollama.com default and
+        would route the key to a third party."""
+        seen: dict[str, str] = {}
+
+        def _fake_run(
+            venv,
+            workdir,
+            model,
+            api_base,
+            api_key,
+            agent,
+            prompt,
+            *,
+            max_turns=10,
+            price_limit="1",
+            timeout=600,
+            env_extra=None,
+        ):
+            seen.update(env_extra or {})
+            return 1, "", "EOFError\n", str(workdir / "logs")
+
+        monkeypatch.setattr(labcai, "scope_check", lambda t, e: (0, "OK"))
+        monkeypatch.setattr(labcai, "run_cai", _fake_run)
+        monkeypatch.setattr(
+            labcai.shutil,
+            "which",
+            lambda n: "/usr/bin/bwrap" if n == "bwrap" else "/usr/bin/x",
+        )
+        monkeypatch.delenv("OLLAMA_API_BASE", raising=False)
+        monkeypatch.setenv("OLLAMA_API_KEY", "ollama-route-key-987654321")
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        venv = _make_shim_venv(tmp_path)
+        labcai.run("https://example.com", "test-eng", venv_bin=venv, output_dir=tmp_path / "out")
+        assert seen.get("OLLAMA_API_KEY") in (None, "")
+        assert "ollama-route-key-987654321" not in "".join(seen.values())
 
     def test_openai_key_becomes_route_key_only_with_base(self, tmp_path, monkeypatch):
         """With an explicit base but no OLLAMA key, the host's
