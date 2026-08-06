@@ -212,6 +212,7 @@ Global, shared scripts that implement the workflow. All read env vars (`$HACKING
 | `caido-mode` | Caido SDK integration (search, replay, export) |
 | `setup-caido-mode` | Caido PAT setup (interactive, never stored) |
 | `jwt-tool` | JWT analysis wrapper (uses `$HACKING_LAB/tools/jwt_tool`) |
+| `moa-run` | Local Mixture-of-Agents wrapper (captain-test preset via Aperture); see `lib/moa.py` |
 
 ## The templates system
 

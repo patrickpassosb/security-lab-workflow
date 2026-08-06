@@ -96,9 +96,7 @@ class TestConfig:
     def test_yaml_never_supplies_api_key(self, tmp_path, monkeypatch):
         monkeypatch.delenv("MOA_API_KEY", raising=False)
         monkeypatch.delenv("OLLAMA_API_KEY", raising=False)
-        (tmp_path / "moa.yaml").write_text(
-            "api_key: super-secret\n", encoding="utf-8"
-        )
+        (tmp_path / "moa.yaml").write_text("api_key: super-secret\n", encoding="utf-8")
         cfg = moa.load_config(tmp_path / "moa.yaml")
         assert cfg.api_key == "not-required"
 

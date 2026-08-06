@@ -313,11 +313,14 @@ def run_moa(
         prompt_slug = _slugify(prompt[:40]).strip("_") or "run"
         trace_dir_path = Path(trace_dir) / f"{stamp}-{prompt_slug}"
         trace_dir_path.mkdir(parents=True, exist_ok=True)
-        _write_json(trace_dir_path / "run.json", {
-            "prompt": prompt,
-            "context": context,
-            "config": _config_snapshot(config),
-        })
+        _write_json(
+            trace_dir_path / "run.json",
+            {
+                "prompt": prompt,
+                "context": context,
+                "config": _config_snapshot(config),
+            },
+        )
 
     advisor_results: list[tuple[str, str, str, dict[str, Any] | None]] = []
     # ^ (label, model, analysis, trace_meta) — trace_meta carries the raw
@@ -353,9 +356,7 @@ def run_moa(
         if meta is not None and trace_dir_path is not None:
             _write_json(advisor_trace_path(trace_dir_path, label), meta)
 
-    messages = build_aggregator_messages(
-        prompt, context, ok, config.system_prompt_aggregator
-    )
+    messages = build_aggregator_messages(prompt, context, ok, config.system_prompt_aggregator)
     started = time.monotonic()
     try:
         response = chat_completions(
@@ -378,12 +379,15 @@ def run_moa(
     if not verdict.strip():
         verdict = "[aggregator returned an empty answer]"
     if trace_dir_path is not None:
-        _write_json(trace_dir_path / "aggregator.json", {
-            "request": messages,
-            "response": response,
-            "extracted": verdict,
-            "duration_ms": duration_ms,
-        })
+        _write_json(
+            trace_dir_path / "aggregator.json",
+            {
+                "request": messages,
+                "response": response,
+                "extracted": verdict,
+                "duration_ms": duration_ms,
+            },
+        )
 
     return {
         "verdict": verdict,
