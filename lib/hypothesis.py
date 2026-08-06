@@ -657,6 +657,18 @@ def add_hypothesis(
     # raise a bare ValueError for a non-dict, but callers expect the
     # structured HypothesisValidationError/UnsafeScopeError from the gate.
     _validate_scope(scope)
+    # Type-guard preconditions/provenance the same way: a non-dict must
+    # surface as a structured HypothesisValidationError, never a raw
+    # TypeError/ValueError from dict(...) (the ledger never crashes on
+    # malformed input - module docstring rule #8).
+    if not isinstance(preconditions, dict):
+        raise HypothesisValidationError(
+            f"preconditions must be a dict, got {type(preconditions).__name__}"
+        )
+    if not isinstance(provenance, dict):
+        raise HypothesisValidationError(
+            f"provenance must be a dict, got {type(provenance).__name__}"
+        )
     # Scanner findings enter ONLY as unverified hypotheses (never verdicts).
     # Every hypothesis starts unverified; only experiment records can move it.
     status = STATUS_UNVERIFIED
@@ -751,6 +763,12 @@ def add_experiment(
     # single disconfirming record (the ranker treats disconfirmed as terminal).
     # The actor comparison is normalized (strip + lower) so 'Tool'/' TOOL '
     # cannot bypass the gate (the dedup key already normalizes the same way).
+    # Type-guard provenance BEFORE .get(): a non-dict must surface as a
+    # structured HypothesisValidationError, never a raw AttributeError.
+    if not isinstance(provenance, dict):
+        raise HypothesisValidationError(
+            f"provenance must be a dict, got {type(provenance).__name__}"
+        )
     actor = str(provenance.get("actor") or "").strip().lower()
     if actor == "tool" and result in (RESULT_CORROBORATING, RESULT_DISCONFIRMING):
         raise ScannerVerdictError(
@@ -918,6 +936,28 @@ def _scope_safety_score(record: dict[str, Any]) -> float:
     return 1.0 if bool(scope.get("scope_checked")) else 0.0
 
 
+_DEAD_END_STOPWORDS: frozenset[str] = frozenset({
+    "the", "a", "an", "is", "are", "was", "were", "be", "been", "being",
+    "of", "to", "in", "on", "at", "for", "with", "and", "or", "but", "not",
+    "no", "yes", "it", "its", "this", "that", "these", "those", "from",
+    "by", "as", "via", "endpoint", "endpoints", "signal", "signals",
+    "found", "tried", "commands", "command", "minutes", "minute", "time",
+    "times", "response", "responses", "request", "requests", "result",
+    "results", "observed", "returns", "returned", "return", "status",
+    "code", "codes", "http", "https", "get", "post", "put", "delete",
+    "against", "after", "before", "during", "within", "without", "using",
+    "use", "used", "over", "under", "between", "into", "out",
+})
+
+
+def _content_tokens(text: str) -> set[str]:
+    """Tokenize text and drop generic stop-words so only meaningful tokens
+    count toward dead-end overlap (a claim wording change like 'endpoint:
+    no signal' must not gate a different-invariant hypothesis)."""
+    tokens = set(re.findall(r"[a-z0-9]+", text.lower()))
+    return tokens - _DEAD_END_STOPWORDS
+
+
 def _novelty_score(
     record: dict[str, Any],
     dead_end_claims: Iterable[str] | None,
@@ -943,23 +983,22 @@ def _novelty_score(
     invariant = str(record.get("invariant") or "").lower()
     if not surface and not invariant:
         return 1.0, 0.0
-    surface_tokens = set(re.findall(r"[a-z0-9]+", surface))
-    invariant_tokens = set(re.findall(r"[a-z0-9]+", invariant))
+    surface_tokens = _content_tokens(surface)
+    invariant_tokens = _content_tokens(invariant)
     best = 0.0
     for claim in dead_end_claims:
         if not isinstance(claim, str) or not claim:
             continue
-        claim_lower = claim.lower()
-        claim_tokens = set(re.findall(r"[a-z0-9]+", claim_lower))
+        claim_tokens = _content_tokens(claim)
         if not claim_tokens:
             continue
         # A claim matches only if it overlaps substantially with the surface
-        # tokens AND shares at least one invariant token. The invariant
-        # overlap is a hard requirement: surface overlap alone (e.g. a
-        # dead-end claim about endpoint '/api/users' against a hypothesis on
-        # a different invariant) must not trigger the penalty. Conservative -
-        # we'd rather false-negative (miss a weak dead-end match) than
-        # false-positive (penalize a novel hypothesis).
+        # tokens AND shares at least one meaningful invariant token (stop-words
+        # excluded). The invariant overlap is a hard requirement: surface
+        # overlap alone (e.g. a dead-end claim about endpoint '/api/users'
+        # against a hypothesis on a different invariant) must not trigger the
+        # penalty. Conservative - we'd rather false-negative (miss a weak
+        # dead-end match) than false-positive (penalize a novel hypothesis).
         if surface_tokens:
             surface_overlap = len(surface_tokens & claim_tokens) / max(len(surface_tokens), 1)
         else:

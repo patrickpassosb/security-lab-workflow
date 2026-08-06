@@ -521,6 +521,18 @@ class TestRanking:
         ranked = H.rank(ws, dead_end_claims=claims)
         assert ranked[0].dead_end_penalty == H.DEFAULT_DEAD_END_PENALTY
 
+    def test_dead_end_stopword_wording_does_not_penalize(self, ws: Path) -> None:
+        """A claim wording change that only adds generic tokens ('endpoint:
+        no signal') must not gate a different-invariant hypothesis: stop-words
+        are excluded from the invariant overlap."""
+        add_hyp(ws, invariant="admin endpoint requires authz",
+                surface="/api/users", mutation="m", tags=["authz"])
+        claims = ["/api/users endpoint: no signal found, 8 commands tried, 20 minutes"]
+        ranked = H.rank(ws, dead_end_claims=claims)
+        assert len(ranked) == 1
+        assert ranked[0].dead_end_penalty == 0.0
+        assert ranked[0].novelty == 1.0
+
     def test_rank_drops_unsafe_scope_records(self, ws: Path) -> None:
         add_hyp(ws, scope=_safe_scope(), tags=["authz"])
         # The write-time gate rejects unsafe records, so simulate a ledger
@@ -904,6 +916,40 @@ class TestScannerVerdictGate:
                         actor=actor, tool="nuclei")
         assert len(H.experiments_for(ws, hyp["hypothesis_id"])) == 0
 
+    def test_non_dict_provenance_raises_structured_error(self, ws: Path) -> None:
+        """A non-dict provenance must surface as HypothesisValidationError,
+        never a raw AttributeError/TypeError."""
+        hyp = add_hyp(ws)
+        with pytest.raises(H.HypothesisValidationError):
+            H.add_experiment(
+                workspace_dir=ws,
+                hypothesis_id=hyp["hypothesis_id"],
+                workspace_id=None,
+                engagement="demo",
+                action="a",
+                observation="o",
+                expected_safe_observed=True,
+                violation_signal_observed=False,
+                result="inconclusive",
+                scope=_safe_scope(),
+                provenance="not-a-dict",  # type: ignore[arg-type]
+            )
+        with pytest.raises(H.HypothesisValidationError):
+            H.add_hypothesis(
+                workspace_dir=ws,
+                workspace_id=None,
+                engagement="demo",
+                invariant="inv",
+                surface="surf",
+                preconditions={"actor": "anon"},
+                mutation="mut",
+                expected_safe="safe",
+                violation_signal="signal",
+                minimum_confirmation="1",
+                scope=_safe_scope(),
+                provenance="not-a-dict",  # type: ignore[arg-type]
+            )
+
     def test_tool_origin_can_record_inconclusive(self, ws: Path) -> None:
         hyp = add_hyp(ws)
         exp = add_exp(ws, hyp["hypothesis_id"], result="inconclusive", actor="tool",
@@ -1135,6 +1181,28 @@ class TestCli:
         ], cwd=ws)
         assert rc == 3  # UNSAFE_SCOPE
         assert "unsafe scope" in err.lower()
+
+    def test_cli_missing_bool_value_not_swallowed(self, ws: Path) -> None:
+        """A missing boolean value must not silently swallow the next flag as
+        the value (durable wrong data in an append-only ledger)."""
+        rc, out, err = _run_cli([
+            "add", "--workspace", str(ws), "--engagement", "demo",
+            "--invariant", "inv", "--surface", "/api/x",
+            "--mutation", "m", "--expected-safe", "401",
+            "--violation-signal", "200", "--minimum-confirmation", "2",
+            "--primitive-leverage", "read_only", "--precondition-actor", "anon",
+        ], cwd=ws)
+        assert rc == 0, err
+        hyp_id = out.split("ADDED: ")[1].strip().splitlines()[0]
+        rc, _, err = _run_cli([
+            "experiment", "--workspace", str(ws), "--engagement", "demo",
+            "--hypothesis-id", hyp_id, "--action", "a", "--observation", "o",
+            "--expected-safe-observed", "--violation-signal-observed", "false",
+            "--result", "corroborating", "--actor", "agent",
+        ], cwd=ws)
+        assert rc == 1  # USAGE_ERR: the flag was not swallowed
+        assert "requires a value" in err
+        assert len(H.experiments_for(ws, hyp_id)) == 0
 
     def test_cli_rank_is_agent_worklist(self, ws: Path) -> None:
         _run_cli([

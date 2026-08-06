@@ -94,6 +94,11 @@ UNSAFE_SCOPE = 3
 NOT_FOUND = 4
 SCANNER_VERDICT = 5
 
+# Flags whose value must be a boolean (used by the parser to reject a
+# swallowed non-boolean token instead of silently recording a wrong value).
+_BOOL_FLAGS = frozenset({"--expected-safe-observed", "--violation-signal-observed"})
+_BOOL_VALUES = frozenset({"true", "false", "1", "0", "yes", "no"})
+
 
 def usage() -> None:
     print(__doc__)
@@ -136,10 +141,22 @@ def _parse_flags(
             if i + 1 >= len(args):
                 print(f"flag {a} requires a value", file=sys.stderr)
                 return {}, {}, USAGE_ERR
+            nxt = args[i + 1]
+            # A missing value must not silently swallow the next flag (or a
+            # non-boolean token for boolean flags) as the value - in an
+            # append-only evidence ledger a silently wrong value is durable
+            # wrong data with no error signal.
+            if nxt.startswith("--"):
+                print(f"flag {a} requires a value (got flag {nxt!r})", file=sys.stderr)
+                return {}, {}, USAGE_ERR
+            if a in _BOOL_FLAGS and nxt.lower() not in _BOOL_VALUES:
+                print(f"flag {a} requires a boolean value (true/false/1/0/yes/no), "
+                      f"got {nxt!r}", file=sys.stderr)
+                return {}, {}, USAGE_ERR
             if a in multi_flags:
-                multi.setdefault(a, []).append(args[i + 1])
+                multi.setdefault(a, []).append(nxt)
             else:
-                single[a] = args[i + 1]
+                single[a] = nxt
             i += 2
             continue
         if a in ("--scope-ok", "--strict"):
