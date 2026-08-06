@@ -1149,16 +1149,18 @@ _MIN_CONF_QUAL_RE = re.compile(
     re.IGNORECASE,
 )
 _MIN_CONF_COUNT_RE = re.compile(
-    r"^(\d+)\s+(?:[a-z]+\s+){0,2}(?:corroborat\w*|confirm\w*|experiment\w*|"
+    r"^(\d+)\s+(?:\S+\s+){0,2}(?:corroborat\w*|confirm\w*|experiment\w*|"
     r"replic\w*|times?|repeats?|hits?|sessions?|runs?|callbacks?|"
-    r"observations?|probes?|replays?|requests?|attempts?|samples?|markers?)\b",
+    r"observations?|probes?|replays?|requests?|attempts?|samples?|markers?|"
+    r"tests?|checks?|signals?|witnesses?|proofs?|verifications?)\b",
     re.IGNORECASE,
 )
 _MIN_CONF_WORD_HEAD_RE = re.compile(
     r"^(one|two|three|four|five|six|seven|eight|nine|ten)\s+"
-    r"(?:[a-z]+\s+){0,2}(?:corroborat\w*|confirm\w*|experiment\w*|replic\w*|"
+    r"(?:\S+\s+){0,2}(?:corroborat\w*|confirm\w*|experiment\w*|replic\w*|"
     r"times?|repeats?|hits?|sessions?|runs?|callbacks?|observations?|probes?|"
-    r"replays?|requests?|attempts?|samples?|markers?)\b",
+    r"replays?|requests?|attempts?|samples?|markers?|tests?|checks?|signals?|"
+    r"witnesses?|proofs?|verifications?)\b",
     re.IGNORECASE,
 )
 _MIN_CONF_WORD_COUNTS: dict[str, int] = {

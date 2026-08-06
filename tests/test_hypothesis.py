@@ -729,6 +729,23 @@ class TestStatusDerivation:
         add_exp(ws, hyp["hypothesis_id"], result="corroborating", action="probe-2")
         assert H.derive_hypothesis_status(ws, hyp["hypothesis_id"]) == "confirmed"
 
+    def test_extended_count_nouns_are_counted(self, ws: Path) -> None:
+        """Natural count phrasings outside the original vocabulary ('2
+        tests', '2 signals', '2 user-B controlled markers') name the bar."""
+        for text in ("2 tests", "2 signals", "2 user-B controlled markers",
+                     "two tests", "2 checks"):
+            hyp = add_hyp(ws, minimum_confirmation=text,
+                          invariant=f"inv {text[:20]}", surface=f"/s{len(text)}",
+                          mutation=f"m{len(text)}")
+            add_exp(ws, hyp["hypothesis_id"], result="corroborating",
+                    action="probe")
+            assert H.derive_hypothesis_status(
+                ws, hyp["hypothesis_id"]) == "testing", text
+            add_exp(ws, hyp["hypothesis_id"], result="corroborating",
+                    action="probe-2")
+            assert H.derive_hypothesis_status(
+                ws, hyp["hypothesis_id"]) == "confirmed", text
+
     def test_qualified_count_phrase_is_counted(self, ws: Path) -> None:
         """'Minimum 3 independent confirmations' names a bar of 3."""
         hyp = add_hyp(ws, minimum_confirmation="Minimum 3 independent confirmations")
