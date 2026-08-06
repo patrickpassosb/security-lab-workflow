@@ -565,6 +565,18 @@ def _validate_hypothesis(record: dict[str, Any]) -> None:
         raise HypothesisValidationError(
             "provenance must be a dict with non-empty 'source' and 'agent'"
         )
+    # Schema alignment (hypothesis-v1 declares provenance.additionalProperties:
+    # false): only source/agent/tool_rule_id/raw_ref are valid keys - an
+    # extra key passes the runtime gate but fails schema validation (the
+    # library/schema drift class closed for preconditions in round 20 and
+    # experiment provenance in round 21).
+    allowed_provenance_keys = {"source", "agent", "tool_rule_id", "raw_ref"}
+    extra = set(prov) - allowed_provenance_keys
+    if extra:
+        raise HypothesisValidationError(
+            f"provenance has unsupported key(s): {sorted(extra)} "
+            "(allowed: source, agent, tool_rule_id, raw_ref)"
+        )
     pre = record["preconditions"]
     if not isinstance(pre, dict) or not _is_non_empty_str(pre.get("actor")):
         raise HypothesisValidationError(

@@ -303,6 +303,11 @@ def cmd_add(args: list[str]) -> int:
         _audit(AUDIT_ACTION_ADD, single.get("--target", ""), VALIDATION_ERR,
                detail=f"write failed: {e}")
         return VALIDATION_ERR
+    except H.LedgerReadError as e:
+        print(f"ERROR (read): {e}", file=sys.stderr)
+        _audit(AUDIT_ACTION_ADD, single.get("--target", ""), VALIDATION_ERR,
+               detail=f"read failed: {e}")
+        return VALIDATION_ERR
     except OSError as e:
         # Read-only workspace, permission denied, disk full - the record was
         # not written; surface a structured error instead of a raw traceback.
@@ -411,6 +416,11 @@ def cmd_experiment(args: list[str]) -> int:
         print(f"ERROR (write): {e}", file=sys.stderr)
         _audit(AUDIT_ACTION_EXP, single.get("--target", ""), VALIDATION_ERR,
                detail=f"write failed: {e}")
+        return VALIDATION_ERR
+    except H.LedgerReadError as e:
+        print(f"ERROR (read): {e}", file=sys.stderr)
+        _audit(AUDIT_ACTION_EXP, single.get("--target", ""), VALIDATION_ERR,
+               detail=f"read failed: {e}")
         return VALIDATION_ERR
     except OSError as e:
         # Read-only workspace, permission denied, disk full - the record was
