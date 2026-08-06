@@ -1,0 +1,248 @@
+#!/usr/bin/env python3
+"""lab-verify-findings — automatic finding-evaluation loop for completed hunts.
+
+Every completed hunt is evaluated BEFORE any finding reaches the captain.
+This CLI runs a hunt's completed findings (the findings.jsonl ledger of
+finding-candidates, schema security-lab/finding-candidate/v1) through the
+deterministic gates:
+
+  1. scope             — target in scope for the engagement (shared labutil
+                        scope primitives; finding must attest scope_checked).
+  2. evidence_shape   — the finding carries the evidence the verification
+                        oracle needs (request/response pairs, callback
+                        records, canary values — the payload contracts from
+                        lib/verification.py).
+  3. oracle           — the deterministic verification oracle itself runs
+                        and returns outcome=verified (lib/verification.py).
+  4. hypothesis_ledger— the hypothesis ledger (lib/hypothesis.py) derived
+                        status does not veto (disconfirmed/contradictory
+                        veto; confirmed/testing/unverified pass).
+
+Findings that pass ALL gates are tagged `candidate` (they surface to the
+captain). Findings that fail any gate are tagged `noisy` with the failing
+gate and reason, and the reason is recorded into the program playbook
+(bin/lab-hunt-lesson, category=dead_end) so the dead end is never re-found.
+
+Verdict files: findings/eval/<hunt-id>.json + .md (schema
+security-lab/finding-eval/v1). Only candidates surface to the captain.
+
+Model-authored prose can never produce verdict=candidate — only the
+deterministic gates can. The CLI never contacts live targets.
+
+Usage:
+    lab-verify-findings <workspace> --engagement <name> [--hunt-id <id>]
+        [--findings <file.jsonl>] [--out <dir>] [--no-lesson]
+    lab-verify-findings --help
+
+Exit codes:
+    0 = evaluation ran; verdict file written (candidate/noisy mix is a
+        valid result — the verdict file is the output).
+    1 = bad input (missing args, unreadable ledger, invalid engagement).
+    2 = invalid engagement name (argument-injection defense).
+
+Audit: every invocation writes one audit-log entry via labutil.audit
+(action=lab-verify-findings) carrying the hunt_id, engagement, and the
+candidate/noisy counts.
+"""
+
+from __future__ import annotations
+
+import os
+import sys
+from pathlib import Path
+
+# Import shared labutil helpers (sys.path hack -- E402-ignored per ruff.toml).
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib"))
+import findingeval as FE  # noqa: E402
+import labutil  # noqa: E402
+
+
+def _usage() -> str:
+    return (
+        "usage: lab-verify-findings <workspace> --engagement <name> "
+        "[--hunt-id <id>] [--findings <file.jsonl>] [--out <dir>] [--no-lesson]\n"
+    )
+
+
+def _resolve_lab_root() -> Path:
+    """Resolve the lab root ($HACKING_LAB or ~/security-lab) and keep
+    labutil's audit log path in sync with it (mirrors lab-hunt-lesson)."""
+    lab_root = Path(os.environ.get("HACKING_LAB", os.path.expanduser("~/security-lab")))
+    labutil.AUDIT_LOG_PATH = lab_root / "findings" / ".agent-audit.jsonl"
+    return lab_root
+
+
+def main() -> int:
+    args = sys.argv[1:]
+    if not args or args[0] in ("-h", "--help"):
+        print(__doc__)
+        return 0
+
+    workspace = ""
+    engagement = ""
+    hunt_id = ""
+    findings_path: Path | None = None
+    out_dir: Path | None = None
+    record_lesson = True
+
+    i = 0
+    positional: list[str] = []
+    while i < len(args):
+        a = args[i]
+        if a == "--engagement" and i + 1 < len(args):
+            engagement = args[i + 1]
+            i += 2
+        elif a.startswith("--engagement="):
+            engagement = a.split("=", 1)[1]
+            i += 1
+        elif a == "--hunt-id" and i + 1 < len(args):
+            hunt_id = args[i + 1]
+            i += 2
+        elif a.startswith("--hunt-id="):
+            hunt_id = a.split("=", 1)[1]
+            i += 1
+        elif a == "--findings" and i + 1 < len(args):
+            findings_path = Path(args[i + 1])
+            i += 2
+        elif a.startswith("--findings="):
+            findings_path = Path(a.split("=", 1)[1])
+            i += 1
+        elif a == "--out" and i + 1 < len(args):
+            out_dir = Path(args[i + 1])
+            i += 2
+        elif a.startswith("--out="):
+            out_dir = Path(a.split("=", 1)[1])
+            i += 1
+        elif a == "--no-lesson":
+            record_lesson = False
+            i += 1
+        elif a.startswith("-") and a not in ("--",):
+            print(f"unknown option: {a}", file=sys.stderr)
+            print(_usage(), file=sys.stderr)
+            return 1
+        else:
+            positional.append(a)
+            i += 1
+
+    if positional:
+        workspace = positional[0]
+
+    if not workspace:
+        print("error: a workspace directory is required", file=sys.stderr)
+        print(_usage(), file=sys.stderr)
+        return 1
+    if not engagement:
+        print("error: --engagement <name> is required", file=sys.stderr)
+        print(_usage(), file=sys.stderr)
+        return 1
+
+    # Validate the engagement name before it is used in any filesystem path
+    # downstream (defense against argument injection via --engagement).
+    if not labutil.validate_name(engagement):
+        print(
+            f"error: invalid engagement name {engagement!r} -- use only "
+            f"letters, numbers, dots, hyphens, underscores (no '..', '/', '\\')",
+            file=sys.stderr,
+        )
+        labutil.audit(
+            "lab-verify-findings",
+            engagement=engagement,
+            exit_code=2,
+            detail=f"invalid engagement name: {engagement!r}",
+        )
+        return 2
+
+    lab_root = _resolve_lab_root()
+    workspace_dir = Path(workspace)
+    if not workspace_dir.is_dir():
+        print(f"error: workspace directory not found: {workspace_dir}", file=sys.stderr)
+        labutil.audit(
+            "lab-verify-findings",
+            engagement=engagement,
+            exit_code=1,
+            detail=f"workspace not found: {workspace_dir}",
+        )
+        return 1
+
+    # Resolve the findings ledger: explicit --findings wins; else the
+    # workspace's findings.jsonl (the labcai convention).
+    ledger = findings_path or (workspace_dir / FE.FINDINGS_LEDGER_FILENAME)
+    findings = FE.read_findings_ledger(ledger)
+    if not findings:
+        print(
+            f"error: no finding-candidates found in {ledger}",
+            file=sys.stderr,
+        )
+        labutil.audit(
+            "lab-verify-findings",
+            engagement=engagement,
+            exit_code=1,
+            detail=f"empty findings ledger: {ledger}",
+        )
+        return 1
+
+    # hunt_id defaults to the workspace name (safe path component by
+    # construction — the workspace dir name is a single component).
+    if not hunt_id:
+        hunt_id = workspace_dir.name
+
+    try:
+        eval_dict = FE.evaluate_hunt(
+            findings,
+            hunt_id=hunt_id,
+            workspace=str(workspace_dir),
+            engagement=engagement,
+            lab_root=lab_root,
+            playbooks_dir=lab_root / "playbooks",
+            record_lesson=record_lesson,
+        )
+    except FE.FindingEvalInputError as e:
+        print(f"error: {e}", file=sys.stderr)
+        labutil.audit(
+            "lab-verify-findings",
+            engagement=engagement,
+            exit_code=1,
+            detail=f"evaluation input error: {e}",
+        )
+        return 1
+
+    # Write the verdict files under findings/eval/ (or --out).
+    out_dir = out_dir or (lab_root / "findings" / "eval")
+    try:
+        json_path, md_path = FE.write_eval(eval_dict, out_dir)
+    except FE.FindingEvalError as e:
+        print(f"error: refusing to write verdict: {e}", file=sys.stderr)
+        labutil.audit(
+            "lab-verify-findings",
+            engagement=engagement,
+            exit_code=1,
+            detail=f"verdict write refused: {e}",
+        )
+        return 1
+
+    summary = eval_dict["summary"]
+    print(f"evaluation written: {json_path}")
+    print(f"  markdown: {md_path}")
+    print(
+        f"  findings: {summary['total']} | candidates: {summary['candidates']} "
+        f"| noisy: {summary['noisy']}"
+    )
+    for v in eval_dict["findings"]:
+        mark = "CANDIDATE" if v["verdict"] == FE.VERDICT_CANDIDATE else "noisy"
+        print(f"  [{mark}] {v['finding_id']} ({v['vuln_class']}): {v['reason']}")
+
+    labutil.audit(
+        "lab-verify-findings",
+        engagement=engagement,
+        exit_code=0,
+        detail=(
+            f"hunt={hunt_id} total={summary['total']} "
+            f"candidates={summary['candidates']} noisy={summary['noisy']}"
+        ),
+        hunt_id=hunt_id,
+    )
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

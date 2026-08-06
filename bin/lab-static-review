@@ -1,0 +1,141 @@
+#!/usr/bin/env python3
+"""lab-static-review — source-review scaffold: inventory -> sink grep -> reachability -> report.
+
+A deterministic, no-LLM first pass over a source tree before any manual or
+agentic review. Four stages (see lib/staticreview.py):
+
+  1. inventory   — walk the tree, group files by language, count lines, and
+                   find entry points (main(), handlers, route decorators).
+  2. sink grep   — scan for dangerous sinks (command execution, SQL, eval,
+                   deserialization, path traversal, file writes) per language.
+  3. reachability— for each sink hit, decide whether it is reachable from an
+                   entry point (same file, or imported — directly or
+                   transitively — by an entry-point file).
+  4. report      — render a markdown report (findings table + per-sink
+                   detail) that a reviewer or the lab's finding-evaluation
+                   loop consumes.
+
+This is a SCAFFOLD: the sink patterns and entry-point heuristics are
+deliberately small and conservative. Sink hits are hypotheses, never
+verdicts — the lab's verification gates (lab-verify / lab-verify-findings)
+decide. The CLI performs no network I/O and no subprocess execution.
+
+Usage:
+    lab-static-review <dir> [--out <report.md>]
+    lab-static-review --help
+
+Exit codes:
+    0 = review ran; report written (or printed to stdout).
+    1 = bad input (missing dir, unreadable tree).
+
+Audit: every invocation writes one audit-log entry via labutil.audit
+(action=lab-static-review) carrying the target dir and hit counts.
+"""
+
+from __future__ import annotations
+
+import os
+import sys
+from pathlib import Path
+
+# Import shared labutil helpers (sys.path hack -- E402-ignored per ruff.toml).
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib"))
+import labutil  # noqa: E402
+import staticreview as SR  # noqa: E402
+
+
+def _usage() -> str:
+    return "usage: lab-static-review <dir> [--out <report.md>]\n"
+
+
+def _resolve_lab_root() -> Path:
+    """Resolve the lab root ($HACKING_LAB or ~/security-lab) and keep
+    labutil's audit log path in sync with it (mirrors lab-hunt-lesson)."""
+    lab_root = Path(os.environ.get("HACKING_LAB", os.path.expanduser("~/security-lab")))
+    labutil.AUDIT_LOG_PATH = lab_root / "findings" / ".agent-audit.jsonl"
+    return lab_root
+
+
+def main() -> int:
+    args = sys.argv[1:]
+    if not args or args[0] in ("-h", "--help"):
+        print(__doc__)
+        return 0
+
+    target = ""
+    out_path: Path | None = None
+
+    i = 0
+    positional: list[str] = []
+    while i < len(args):
+        a = args[i]
+        if a == "--out" and i + 1 < len(args):
+            out_path = Path(args[i + 1])
+            i += 2
+        elif a.startswith("--out="):
+            out_path = Path(a.split("=", 1)[1])
+            i += 1
+        elif a.startswith("-") and a not in ("--",):
+            print(f"unknown option: {a}", file=sys.stderr)
+            print(_usage(), file=sys.stderr)
+            return 1
+        else:
+            positional.append(a)
+            i += 1
+
+    if positional:
+        target = positional[0]
+
+    if not target:
+        print("error: a directory to review is required", file=sys.stderr)
+        print(_usage(), file=sys.stderr)
+        return 1
+
+    _resolve_lab_root()
+    root = Path(target)
+    if not root.is_dir():
+        print(f"error: directory not found: {root}", file=sys.stderr)
+        labutil.audit(
+            "lab-static-review",
+            target=str(root),
+            exit_code=1,
+            detail=f"directory not found: {root}",
+        )
+        return 1
+
+    try:
+        result = SR.run_static_review(root)
+    except SR.StaticReviewError as e:
+        print(f"error: {e}", file=sys.stderr)
+        labutil.audit(
+            "lab-static-review",
+            target=str(root),
+            exit_code=1,
+            detail=f"review error: {e}",
+        )
+        return 1
+
+    report = result["report"]
+    if out_path is not None:
+        labutil.atomic_write(out_path, report)
+        print(f"static review written: {out_path}", file=sys.stderr)
+    else:
+        print(report)
+
+    inv = result["inventory"]
+    hits = result["hits"]
+    reachable = sum(1 for h in hits if h.get("reachable"))
+    labutil.audit(
+        "lab-static-review",
+        target=str(root),
+        exit_code=0,
+        detail=(
+            f"files={len(inv['files'])} entry_points={len(inv['entry_points'])} "
+            f"sink_hits={len(hits)} reachable={reachable}"
+        ),
+    )
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -19,6 +19,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   audit. Stdlib-only HTTP (urllib), thread-pool fan-out, per-advisor failure
   isolation. `tests/test_moa.py` + `tests/test_moa_run_cli.py` mock the model
   calls — no live quota in tests.
+- `bin/lab-verify-findings` + `lib/findingeval.py` +
+  `schemas/finding-eval-v1.schema.json`: automatic finding-evaluation loop.
+  Every completed hunt's findings (the `findings.jsonl` ledger of
+  finding-candidates) run through four deterministic gates — scope (shared
+  labutil primitives + `scope_checked` attestation), evidence shape (the
+  payload contracts from `lib/verification.py`), the verification oracle
+  itself (`outcome=verified`, never model prose), and the hypothesis ledger
+  (`lib/hypothesis.py` derived status; `disconfirmed`/`contradictory`
+  veto). Findings that pass all gates are tagged `candidate` (surface to
+  the captain); failures are tagged `noisy` with the failing gate and
+  reason recorded into the program playbook (`bin/lab-hunt-lesson`,
+  category `dead_end`) so the dead end is never re-found. Verdict files:
+  `findings/eval/<hunt-id>.json` + `.md`.
+- `bin/lab-hunt-end`: hunt-completion wrapper that auto-runs the finding
+  evaluation when a hunt completes (same gates as `lab-verify-findings`).
+- `bin/lab-static-review` + `lib/staticreview.py`: source-review scaffold —
+  inventory -> sink grep -> reachability -> report. Sink hits are
+  hypotheses, never verdicts.
+- `tests/test_findingeval.py`, `tests/test_lab_verify_findings_cli.py`,
+  `tests/test_static_review.py`: gate, CLI, and scaffold test suites,
+  including the notion-sdk F2 validation case (path-normalization endpoint
+  confusion) which must classify as `candidate`.
+- `tests/fixtures/f2-notion/`: F2 validation fixture (findings ledger +
+  hypothesis/experiment ledgers).
 
 ### Fixed
 - `Makefile`: `BIN_BASH_SCRIPTS` `$(shell ...)` assignment contained an

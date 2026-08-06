@@ -1,0 +1,189 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://security-lab/schemas/finding-eval-v1.schema.json",
+  "title": "Finding Evaluation v1",
+  "description": "Per-hunt automatic finding-evaluation verdict (bin/lab-verify-findings, lib/findingeval.py).\n\nEvery completed hunt is evaluated before any finding reaches the captain: each\nfinding-candidate (schema security-lab/finding-candidate/v1) is run through the\ndeterministic gates — scope (lab-scope semantics via the shared labutil scope\nprimitives), evidence shape (request/response pairs, callback records, canary\nvalues — the oracles from lib/verification.py), the verification oracle itself\n(outcome must be verified), and the hypothesis ledger (lib/hypothesis.py\nderived status). Findings that pass ALL gates are tagged `candidate`; findings\nthat fail any gate are tagged `noisy` with the failing oracle and reason, and\nthe reason is recorded into the program playbook (bin/lab-hunt-lesson) so the\ndead end is never re-found.\n\nOnly candidates surface to the captain. The verdict file is written to\n<lab>/findings/eval/<hunt-id>.json (+ .md) by the CLI.\n\nModel-authored prose can never produce verdict=candidate — only the\ndeterministic gates can.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "eval_id",
+    "hunt_id",
+    "workspace",
+    "engagement",
+    "evaluated_at",
+    "findings",
+    "summary"
+  ],
+  "properties": {
+    "schema": {
+      "type": "string",
+      "const": "security-lab/finding-eval/v1",
+      "description": "Schema identifier."
+    },
+    "eval_id": {
+      "type": "string",
+      "description": "Unique evaluation id, eval-<uuid4>.",
+      "minLength": 1
+    },
+    "hunt_id": {
+      "type": "string",
+      "description": "Hunt identifier (defaults to the workspace name). Used as the verdict\nfile stem: findings/eval/<hunt-id>.json.",
+      "minLength": 1
+    },
+    "workspace": {
+      "type": "string",
+      "description": "Workspace directory the findings were evaluated from (as supplied to\nthe CLI).",
+      "minLength": 1
+    },
+    "engagement": {
+      "type": "string",
+      "description": "Engagement name the findings belong to (matches engagements/<name>.yaml).",
+      "minLength": 1
+    },
+    "evaluated_at": {
+      "type": "string",
+      "description": "ISO 8601 UTC timestamp the evaluation ran.",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}Z$"
+    },
+    "findings": {
+      "type": "array",
+      "description": "Per-finding verdicts, one per evaluated finding-candidate.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "finding_id",
+          "target",
+          "vuln_class",
+          "verdict",
+          "gates",
+          "reason"
+        ],
+        "properties": {
+          "finding_id": {
+            "type": "string",
+            "description": "The finding-candidate's finding_id (fc-<uuid4>).",
+            "minLength": 1
+          },
+          "target": {
+            "type": "string",
+            "description": "The scoped target the finding applies to.",
+            "minLength": 1
+          },
+          "vuln_class": {
+            "type": "string",
+            "description": "Hypothesized vulnerability class (sqli, xss, idor, auth-bypass, ...).",
+            "minLength": 1
+          },
+          "verdict": {
+            "type": "string",
+            "enum": ["candidate", "noisy"],
+            "description": "candidate = passed all gates (surfaces to the captain). noisy = failed\nat least one gate (recorded as a dead-end lesson, never re-found)."
+          },
+          "gates": {
+            "type": "array",
+            "description": "The deterministic gates run, in order: scope, evidence_shape,\noracle, hypothesis_ledger. Each records pass/fail + detail.",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["name", "passed", "detail"],
+              "properties": {
+                "name": {
+                  "type": "string",
+                  "enum": ["scope", "evidence_shape", "oracle", "hypothesis_ledger"]
+                },
+                "passed": {
+                  "type": "boolean",
+                  "description": "True when the gate held."
+                },
+                "detail": {
+                  "type": "string",
+                  "description": "Deterministic reason for the gate result.",
+                  "minLength": 1
+                },
+                "oracle": {
+                  "type": "string",
+                  "description": "For the oracle gate: which verification oracle ran\n(authorization|business_logic|sha256_canary|oob_callback).",
+                  "enum": ["authorization", "business_logic", "sha256_canary", "oob_callback"]
+                },
+                "outcome": {
+                  "type": "string",
+                  "description": "For the oracle gate: the verification outcome\n(verified|disproved|insufficient_evidence).",
+                  "enum": ["verified", "disproved", "insufficient_evidence"]
+                },
+                "status": {
+                  "type": "string",
+                  "description": "For the hypothesis_ledger gate: the derived status\n(confirmed|testing|disconfirmed|contradictory|unverified|superseded).",
+                  "enum": ["confirmed", "testing", "disconfirmed", "contradictory", "unverified", "superseded"]
+                }
+              }
+            }
+          },
+          "failing_oracle": {
+            "type": ["string", "null"],
+            "description": "The first gate that failed (null when verdict=candidate).",
+            "enum": ["scope", "evidence_shape", "oracle", "hypothesis_ledger", null]
+          },
+          "reason": {
+            "type": "string",
+            "description": "One-line deterministic reason for the verdict.",
+            "minLength": 1
+          },
+          "lesson_recorded": {
+            "type": "boolean",
+            "description": "True when a dead-end lesson was recorded to the program playbook for a\nnoisy finding (best-effort; false when the program slug was empty or the\nplaybook write failed).",
+            "default": false
+          }
+        }
+      }
+    },
+    "summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["total", "candidates", "noisy"],
+      "properties": {
+        "total": {
+          "type": "integer",
+          "description": "Number of findings evaluated."
+        },
+        "candidates": {
+          "type": "integer",
+          "description": "Findings that passed all gates (surface to the captain)."
+        },
+        "noisy": {
+          "type": "integer",
+          "description": "Findings that failed at least one gate (recorded as dead ends)."
+        }
+      }
+    }
+  },
+  "examples": [
+    {
+      "schema": "security-lab/finding-eval/v1",
+      "eval_id": "eval-3f7a2c1e-9b6d-4c2e-8f1a-0b2c3d4e5f6a",
+      "hunt_id": "notion-sdk-f2",
+      "workspace": "bounties/bounty-notion/findings/notion-sdk-f2",
+      "engagement": "bounty-notion",
+      "evaluated_at": "2026-08-06T12:00:00Z",
+      "findings": [
+        {
+          "finding_id": "fc-3f7a2c1e-9b6d-4c2e-8f1a-0b2c3d4e5f6a",
+          "target": "https://api.notion.com",
+          "vuln_class": "endpoint-confusion",
+          "verdict": "candidate",
+          "gates": [
+            {"name": "scope", "passed": true, "detail": "OK: api.notion.com matches in-scope pattern '*.notion.com'"},
+            {"name": "evidence_shape", "passed": true, "detail": "authorization oracle payload present (cross_actor_response/control_response/victim_marker/ownership)"},
+            {"name": "oracle", "passed": true, "detail": "cross-actor response contained victim marker, control response did not, ownership verified", "oracle": "authorization", "outcome": "verified"},
+            {"name": "hypothesis_ledger", "passed": true, "detail": "derived status confirmed", "status": "confirmed"}
+          ],
+          "failing_oracle": null,
+          "reason": "all gates passed",
+          "lesson_recorded": false
+        }
+      ],
+      "summary": {"total": 1, "candidates": 1, "noisy": 0}
+    }
+  ]
+}
