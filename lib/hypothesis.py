@@ -664,6 +664,17 @@ def _validate_experiment(record: dict[str, Any], *, hypothesis_exists: bool, hyp
         raise HypothesisValidationError(
             "provenance must be a dict with non-empty 'actor' and 'agent'"
         )
+    # Schema alignment (experiment-v1 declares provenance.additionalProperties:
+    # false): only actor/agent/tool/replay_fixture are valid keys - an extra
+    # key passes the runtime gate but fails schema validation (the
+    # library/schema drift class closed for preconditions in round 20).
+    allowed_provenance_keys = {"actor", "agent", "tool", "replay_fixture"}
+    extra = set(prov) - allowed_provenance_keys
+    if extra:
+        raise HypothesisValidationError(
+            f"provenance has unsupported key(s): {sorted(extra)} "
+            "(allowed: actor, agent, tool, replay_fixture)"
+        )
     if not _is_iso_ts(record["ts"]):
         raise HypothesisValidationError("ts must be an ISO 8601 timestamp")
     for k in ("evidence_refs",):
@@ -771,6 +782,7 @@ def add_hypothesis(
     ledger = _ledger_path(workspace_dir, HYPOTHESES_FILENAME)
     with _ledger_lock(workspace_dir):
         existing_read = _read_ledger(ledger)
+        _raise_if_unreadable(existing_read)
         key = hypothesis_dedup_key(record)
         for prior in existing_read.records:
             # A shape-invalid prior record (e.g. a crashed/pre-schema write)
@@ -861,6 +873,9 @@ def add_experiment(
     ledger = _ledger_path(workspace_dir, HYPOTHESES_FILENAME)
     with _ledger_lock(workspace_dir):
         hyp_read = _read_ledger(ledger)
+        # An unreadable hypotheses ledger must surface as a read error, not
+        # as a misleading 'hallucinated id' (valid_ids=[] masks the cause).
+        _raise_if_unreadable(hyp_read)
         valid_ids = [str(h.get("hypothesis_id")) for h in hyp_read.records
                      if HYPOTHESIS_ID_RE.match(str(h.get("hypothesis_id") or ""))]
         if hypothesis_id not in valid_ids:
@@ -893,6 +908,9 @@ def add_experiment(
         _validate_experiment(record, hypothesis_exists=True, hyp_id=hypothesis_id, hyp=hyp)
         exp_ledger = _ledger_path(workspace_dir, EXPERIMENTS_FILENAME)
         existing_exp = _read_ledger(exp_ledger)
+        # An unreadable experiments ledger must not silently look empty
+        # (duplicate experiments would be written).
+        _raise_if_unreadable(existing_exp)
         key = experiment_dedup_key(record)
         for prior in existing_exp.records:
             # A shape-invalid prior record is NOT a duplicate (same reasoning

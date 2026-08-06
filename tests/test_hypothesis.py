@@ -1108,6 +1108,52 @@ class TestScannerVerdictGate:
         finally:
             path.chmod(0o644)
 
+    def test_add_raises_on_unreadable_ledger(self, ws: Path) -> None:
+        """add_hypothesis must raise LedgerReadError on an unreadable ledger
+        instead of silently writing a duplicate (dedup sees an empty read)."""
+        add_hyp(ws)
+        path = ws / ".lab" / "hypotheses.jsonl"
+        path.chmod(0o000)
+        try:
+            with pytest.raises(H.LedgerReadError):
+                add_hyp(ws, invariant="dup", surface="/dup", mutation="m")
+        finally:
+            path.chmod(0o644)
+
+    def test_add_experiment_raises_on_unreadable_ledger(self, ws: Path) -> None:
+        """add_experiment must raise LedgerReadError on an unreadable
+        experiments ledger instead of silently writing a duplicate."""
+        hyp = add_hyp(ws)
+        add_exp(ws, hyp["hypothesis_id"], result="inconclusive")
+        path = ws / ".lab" / "experiments.jsonl"
+        path.chmod(0o000)
+        try:
+            with pytest.raises(H.LedgerReadError):
+                add_exp(ws, hyp["hypothesis_id"], result="inconclusive",
+                        action="probe-2")
+        finally:
+            path.chmod(0o644)
+
+    def test_experiment_provenance_extra_keys_rejected(self, ws: Path) -> None:
+        """A provenance dict with keys outside (actor, agent, tool,
+        replay_fixture) must be rejected, matching the schema's
+        additionalProperties: false."""
+        hyp = add_hyp(ws)
+        with pytest.raises(H.HypothesisValidationError):
+            H.add_experiment(
+                workspace_dir=ws,
+                hypothesis_id=hyp["hypothesis_id"],
+                workspace_id=None,
+                engagement="demo",
+                action="a",
+                observation="o",
+                expected_safe_observed=True,
+                violation_signal_observed=False,
+                result="inconclusive",
+                scope=_safe_scope(),
+                provenance={"actor": "agent", "agent": "opencode", "extra": "x"},
+            )
+
     def test_non_dict_provenance_raises_structured_error(self, ws: Path) -> None:
         """A non-dict provenance must surface as HypothesisValidationError,
         never a raw AttributeError/TypeError."""
