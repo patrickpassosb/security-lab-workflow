@@ -179,17 +179,28 @@ class Evidence:
     (tamper-resistance). `content` is an optional in-memory bytes payload;
     when present, the SHA-256 check runs against it instead of reading the
     file (used by tests to avoid touching the filesystem).
+
+    `inline` marks evidence the oracle synthesized from the caller's inline
+    values (e.g. the cross-actor response body, the post-action state read,
+    the canary retrieved value) rather than a file the caller captured. The
+    ref of inline evidence is a placeholder label (e.g. "<cross_actor_response>"),
+    NOT a filesystem path -- replay consumers must never attempt to resolve
+    it as a path. Serialized in to_dict so the distinction survives
+    serialization; the verification-result-v1 schema allows it.
     """
 
     ref: str
     kind: str
     sha256: str | None = None
     content: bytes | None = None
+    inline: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         out: dict[str, Any] = {"ref": self.ref, "kind": self.kind}
         if self.sha256 is not None:
             out["sha256"] = self.sha256
+        if self.inline:
+            out["inline"] = True
         return out
 
 
@@ -344,11 +355,19 @@ def _read_evidence_content(ev: Evidence) -> tuple[bytes | None, str]:
     (None, reason) -- the SHA-256 check cannot run and the outcome is
     insufficient_evidence.
 
+    Inline evidence (synthesized by the oracle from caller-supplied values)
+    carries a placeholder ref (e.g. "<cross_actor_response>") that is NOT a
+    filesystem path -- it is never resolved as one. When inline evidence has
+    no in-memory content, the check cannot run (the caller must supply
+    content to verify an inline entry).
+
     Never raises on read failures; the caller treats unreadable evidence as
     insufficient.
     """
     if ev.content is not None:
         return ev.content, ""
+    if ev.inline:
+        return None, f"inline evidence has no in-memory content to verify: {ev.ref}"
     p = Path(ev.ref)
     try:
         if not p.is_file():
@@ -684,15 +703,17 @@ def _ensure_authz_evidence(
             ref="<cross_actor_response>",
             kind="cross_actor_response",
             sha256=_sha256_text(cross_actor_response),
+            inline=True,
         ))
     if "control_response" not in have_kinds and _is_nonempty_str(control_response):
         evidence.append(Evidence(
             ref="<control_response>",
             kind="control_response",
             sha256=_sha256_text(control_response),
+            inline=True,
         ))
     if "victim_marker" not in have_kinds and _is_nonempty_str(victim_marker):
-        evidence.append(Evidence(ref="<victim_marker>", kind="victim_marker"))
+        evidence.append(Evidence(ref="<victim_marker>", kind="victim_marker", inline=True))
     if (
         ownership_verified
         and _is_nonempty_str(ownership_identity)
@@ -702,6 +723,7 @@ def _ensure_authz_evidence(
             ref="<ownership_identity>",
             kind="ownership_proof",
             sha256=_sha256_text(ownership_identity),
+            inline=True,
         ))
 
 
@@ -944,12 +966,14 @@ def _ensure_business_logic_evidence(
             ref="<post_action_state_read>",
             kind="post_action_state_read",
             sha256=_sha256_text(post_action_state_read),
+            inline=True,
         ))
     if "mutation_response" not in have_kinds and _is_nonempty_str(mutation_response):
         evidence.append(Evidence(
             ref="<mutation_response>",
             kind="mutation_response",
             sha256=_sha256_text(mutation_response),
+            inline=True,
         ))
 
 
@@ -960,35 +984,58 @@ def _state_read_confirms(
 ) -> tuple[bool, str]:
     """Check the post-action state read confirms the expected field=value.
 
-    When the read parses as a JSON object, the check is EXACT: the field
-    must exist with the expected value (by type-equality or string
-    equality), so a substring hit elsewhere in the document cannot pass a
-    JSON body. When the read is not JSON (e.g. plaintext "state=confirmed"
-    or key=value dumps), fall back to the substring checks
-    ("field=value", '"field": "value"', '"field":"value"').
+    When the read parses as a JSON object, the check is AUTHORITATIVE: the
+    expected field must exist in the top-level object holding the expected
+    value, compared with type-equality or string coercion (bool -> "true"/
+    "false", None -> "null", int/float -> str). A JSON body NEVER falls
+    through to substring matching -- a "state=confirmed" inside a note
+    field must not false-positive to verified. When the read is not JSON
+    (e.g. plaintext "state=confirmed" or key=value dumps), fall back to
+    the substring checks ("field=value", '"field": "value"',
+    '"field":"value"').
 
     Returns (confirmed, match_kind) where match_kind is "exact JSON match"
     or "substring match" so callers can surface how the check passed.
     """
     try:
         parsed = json.loads(post_action_state_read)
+        parsed_as_json = True
     except (ValueError, TypeError):
         parsed = None
-    if isinstance(parsed, dict):
-        if expected_state_field in parsed:
+        parsed_as_json = False
+    if parsed_as_json:
+        if isinstance(parsed, dict) and expected_state_field in parsed:
             actual = parsed[expected_state_field]
-            if actual == expected_state_value:
+            if _json_value_matches(actual, expected_state_value):
                 return True, "exact JSON match"
-    elif parsed is not None:
-        # The body parsed as JSON but is not an object (list, scalar) --
-        # no field to compare; fall through to substring fallback.
-        pass
+        # The body parsed as JSON (object, list, or scalar) but the exact
+        # field comparison failed -- authoritative: never fall through to
+        # substring matching against a JSON body.
+        return False, ""
     needle_kv = f"{expected_state_field}={expected_state_value}"
     needle_json = f'"{expected_state_field}": "{expected_state_value}"'
     needle_json_bare = f'"{expected_state_field}":"{expected_state_value}"'
     if any(n in post_action_state_read for n in (needle_kv, needle_json, needle_json_bare)):
         return True, "substring match"
     return False, ""
+
+
+def _json_value_matches(actual: Any, expected: str) -> bool:
+    """Compare a parsed JSON value against the expected string.
+
+    Type-equality first; then string coercion for the JSON scalar types
+    (bool -> "true"/"false", None -> "null", int/float -> str) so a caller
+    can assert e.g. state=true or retries=3 against a JSON body.
+    """
+    if actual == expected:
+        return True
+    if isinstance(actual, bool):
+        return expected == "true" if actual else expected == "false"
+    if actual is None:
+        return expected == "null"
+    if isinstance(actual, int | float):
+        return str(actual) == expected
+    return False
 
 
 # ─── SHA-256 canary oracle ────────────────────────────────────────────────────
@@ -1175,16 +1222,17 @@ def _ensure_canary_evidence(
     is recorded. Mutates `evidence` in place -- appends missing kinds."""
     have_kinds = {ev.kind for ev in evidence}
     if "canary_location" not in have_kinds and _is_nonempty_str(canary_location):
-        evidence.append(Evidence(ref=canary_location, kind="canary_location"))
+        evidence.append(Evidence(ref=canary_location, kind="canary_location", inline=True))
     if "canary_retrieved_value" not in have_kinds and _is_nonempty_str(retrieved_value):
         actual = _sha256_text(retrieved_value)
         evidence.append(Evidence(
             ref="<retrieved_value>",
             kind="canary_retrieved_value",
             sha256=actual,
+            inline=True,
         ))
     if "canary_expected_hash" not in have_kinds and _is_sha256(expected_sha256):
-        evidence.append(Evidence(ref="<expected_hash>", kind="canary_expected_hash"))
+        evidence.append(Evidence(ref="<expected_hash>", kind="canary_expected_hash", inline=True))
 
 
 # ─── OOB callback oracle ─────────────────────────────────────────────────────
@@ -1697,8 +1745,9 @@ def build_result(
 def _coerce_evidence(raw: Any) -> list[Evidence]:
     """Coerce a payload's `evidence` field into a list[Evidence].
 
-    Accepts a list of dicts (shape: {ref, kind, sha256?}) or a list of
-    Evidence. Returns [] for None. Raises VerificationInputError on bad shape.
+    Accepts a list of dicts (shape: {ref, kind, sha256?, inline?}) or a list
+    of Evidence. Returns [] for None. Raises VerificationInputError on bad
+    shape.
     """
     if raw is None:
         return []
@@ -1720,7 +1769,10 @@ def _coerce_evidence(raw: Any) -> list[Evidence]:
         sha = item.get("sha256")
         if sha is not None and not _is_sha256(sha):
             raise VerificationInputError(f"evidence[{i}].sha256 is not a valid SHA-256 hex digest")
-        out.append(Evidence(ref=ref, kind=kind, sha256=sha))
+        inline = item.get("inline", False)
+        if not isinstance(inline, bool):
+            raise VerificationInputError(f"evidence[{i}].inline must be a bool")
+        out.append(Evidence(ref=ref, kind=kind, sha256=sha, inline=inline))
     return out
 
 

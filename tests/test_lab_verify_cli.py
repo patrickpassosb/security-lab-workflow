@@ -90,7 +90,7 @@ class TestLabVerify:
         assert "sha256_canary" in out
         assert "oob_callback" in out
 
-    def test_missing_oracle_errors(self, capsys, cli_env, monkeypatch):
+    def test_no_args_prints_help_and_exits_0(self, capsys, cli_env, monkeypatch):
         # No args -> prints usage/help and exits 0 (help is a valid result).
         rc = _run(monkeypatch)
         assert rc == 0

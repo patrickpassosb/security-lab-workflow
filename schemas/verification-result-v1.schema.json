@@ -95,6 +95,11 @@
             "description": "Optional SHA-256 of the referenced evidence (hex, lowercase, 64 chars).\nWhen present, the verifier confirms it matches the actual evidence content.\nFor tamper-resistance: a mismatch between cited sha256 and actual content\nforces outcome=insufficient_evidence (never verified).",
             "pattern": "^[0-9a-f]{64}$",
             "examples": ["e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"]
+          },
+          "inline": {
+            "type": "boolean",
+            "description": "True when the evidence entry was synthesized by the oracle from the\ncaller's inline values (e.g. the cross-actor response body, the post-action\nstate read, the canary retrieved value) rather than captured to a file. The\nref of inline evidence is a placeholder label (e.g. \"<cross_actor_response>\"),\nNOT a filesystem path -- replay consumers must never attempt to resolve it\nas a path.",
+            "examples": [true]
           }
         }
       }

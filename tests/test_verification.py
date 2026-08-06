@@ -147,6 +147,14 @@ class TestAuthorizationOracle:
         )
         assert r.outcome == V.OUTCOME_VERIFIED
         assert V.validate_result(r) == []
+        # Synthesized evidence is marked inline so replay consumers never
+        # resolve the placeholder refs as filesystem paths.
+        inline_kinds = {e.kind for e in r.evidence if e.inline}
+        assert "cross_actor_response" in inline_kinds
+        assert "control_response" in inline_kinds
+        assert "victim_marker" in inline_kinds
+        assert "ownership_proof" in inline_kinds
+        assert all(e.inline for e in r.evidence)
         # A verified result cites evidence + disconfirming controls.
         assert any(e.kind == "cross_actor_response" for e in r.evidence)
         names = {c.name for c in r.disconfirming_controls}
@@ -296,8 +304,8 @@ class TestBusinessLogicOracle:
         assert r.outcome == V.OUTCOME_DISPROVED
 
     def test_json_state_read_exact_match_with_int_value(self):
-        """JSON exact match compares the field value exactly: a JSON int is
-        not equal to an expected string (no coercion)."""
+        """JSON exact match coerces scalar values to their string form: a
+        JSON int 3 matches the expected string "3"."""
         r = V.verify_business_logic(
             "bl-json-int",
             mutation_response="x",
@@ -306,7 +314,7 @@ class TestBusinessLogicOracle:
             expected_state_value="3",
             precondition_violated=True,
         )
-        assert r.outcome == V.OUTCOME_DISPROVED
+        assert r.outcome == V.OUTCOME_VERIFIED
 
     def test_non_json_state_read_uses_substring_fallback(self):
         """Plaintext state dumps (e.g. key=value) still pass via the
@@ -320,6 +328,43 @@ class TestBusinessLogicOracle:
             precondition_violated=True,
         )
         assert r.outcome == V.OUTCOME_VERIFIED
+
+    def test_json_state_read_never_falls_through_to_substring(self):
+        """A JSON body is AUTHORITATIVE: a 'state=confirmed' substring inside
+        a note field must NOT false-positive to verified when the state field
+        itself holds a different value."""
+        r = V.verify_business_logic(
+            "bl-json-note",
+            mutation_response="x",
+            post_action_state_read='{"state":"pending","log":"previous state=confirmed"}',
+            expected_state_field="state",
+            expected_state_value="confirmed",
+            precondition_violated=True,
+        )
+        assert r.outcome == V.OUTCOME_DISPROVED
+
+    def test_json_state_read_string_coercion(self):
+        """JSON scalar values coerce to their string form for comparison:
+        bool -> true/false, None -> null, int/float -> str."""
+        cases = [
+            ('{"state":true}', "state", "true", V.OUTCOME_VERIFIED),
+            ('{"state":false}', "state", "false", V.OUTCOME_VERIFIED),
+            ('{"state":null}', "state", "null", V.OUTCOME_VERIFIED),
+            ('{"retries":3}', "retries", "3", V.OUTCOME_VERIFIED),
+            ('{"retries":3.5}', "retries", "3.5", V.OUTCOME_VERIFIED),
+            ('{"state":true}', "state", "false", V.OUTCOME_DISPROVED),
+            ('{"retries":3}', "retries", "4", V.OUTCOME_DISPROVED),
+        ]
+        for body, field, value, expected in cases:
+            r = V.verify_business_logic(
+                f"bl-coerce-{field}-{value}",
+                mutation_response="x",
+                post_action_state_read=body,
+                expected_state_field=field,
+                expected_state_value=value,
+                precondition_violated=True,
+            )
+            assert r.outcome == expected, f"{body} {field}={value} -> {r.outcome}"
 
 
 # ─── SHA-256 canary oracle ───────────────────────────────────────────────────
@@ -427,15 +472,6 @@ class TestOOBCallbackOracle:
         assert r.outcome == V.OUTCOME_INSUFFICIENT
         assert V.validate_result(r) == []
 
-    def test_verified_with_collector_fields_matching_token(self):
-        r = V.verify_oob_callback(
-            "oob-collector-ok",
-            callback_record=self._record(),
-            expected_callback_identifier="abc123.oast.fun",
-        )
-        assert r.outcome == V.OUTCOME_VERIFIED
-        assert V.validate_result(r) == []
-
     def test_token_mismatch_is_disproved(self):
         """The record's token must equal the expected identifier exactly; a
         record that merely mentions the identifier in prose is not bound to
@@ -478,18 +514,6 @@ class TestOOBCallbackOracle:
         )
         assert r.outcome == V.OUTCOME_INSUFFICIENT
 
-    def test_unrelated_identifier_is_disproved(self):
-        """Record exists but lacks the expected identifier -> not our callback."""
-        rec = self._record()
-        rec["token"] = "otherhost.oast.fun"
-        rec["host"] = "otherhost.oast.fun"
-        r = V.verify_oob_callback(
-            "oob-unrelated",
-            callback_record=rec,
-            expected_callback_identifier="abc123.oast.fun",
-        )
-        assert r.outcome == V.OUTCOME_DISPROVED
-
     def test_record_without_interaction_is_insufficient(self):
         """Record has the identifier but no type/received/interactions -> not a
         real observed interaction."""
@@ -500,13 +524,35 @@ class TestOOBCallbackOracle:
         )
         assert r.outcome == V.OUTCOME_INSUFFICIENT
 
-    def test_received_true_accepts(self):
+    @pytest.mark.parametrize("overrides", [
+        {},  # canonical record -> verified
+        {"type": "", "received": True},  # received signal without type -> verified
+    ])
+    def test_verified_record_variants(self, overrides):
+        """A captured record with the expected identifier and a real
+        interaction signal is verified, whether the signal is the type field
+        or an explicit received:true."""
         r = V.verify_oob_callback(
-            "oob-received",
-            callback_record=self._record(type="", received=True),
+            f"oob-verified-{len(overrides)}",
+            callback_record=self._record(**overrides),
             expected_callback_identifier="abc123.oast.fun",
         )
         assert r.outcome == V.OUTCOME_VERIFIED
+        assert V.validate_result(r) == []
+
+    @pytest.mark.parametrize("overrides", [
+        {"token": "otherhost.oast.fun", "host": "otherhost.oast.fun"},
+        {"token": "otherhost.oast.fun", "host": "otherhost.oast.fun", "note": "abc123.oast.fun"},
+    ])
+    def test_unbound_identifier_is_disproved(self, overrides):
+        """A record whose token does not equal the expected identifier is
+        disproved, even when the identifier appears in prose elsewhere."""
+        r = V.verify_oob_callback(
+            f"oob-unbound-{len(overrides)}",
+            callback_record=self._record(**overrides),
+            expected_callback_identifier="abc123.oast.fun",
+        )
+        assert r.outcome == V.OUTCOME_DISPROVED
 
 
 # ─── False-positive resistance ───────────────────────────────────────────────
@@ -689,7 +735,7 @@ class TestScopeRefusal:
         )
         assert r.outcome == V.OUTCOME_VERIFIED
 
-    def test_empty_target_skips_scope_check(self):
+    def test_empty_target_skips_scope_check(self, lab_env):
         # No target supplied -> scope not consulted -> verification proceeds.
         r = V.verify_sha256_canary(
             "canary-nt",
@@ -791,9 +837,20 @@ class TestEvidenceCoercion:
         assert len(evs) == 1
         assert evs[0].ref == "a"
         assert evs[0].sha256 is None
+        assert evs[0].inline is False
+
+    def test_coerce_dicts_preserves_inline_flag(self):
+        evs = V._coerce_evidence([
+            {"ref": "<cross_actor_response>", "kind": "cross_actor_response", "inline": True},
+        ])
+        assert len(evs) == 1
+        assert evs[0].inline is True
+        assert evs[0].to_dict()["inline"] is True
 
     def test_coerce_invalid(self):
         with pytest.raises(V.VerificationInputError):
             V._coerce_evidence([{"ref": "", "kind": "x"}])
         with pytest.raises(V.VerificationInputError):
             V._coerce_evidence("not-a-list")
+        with pytest.raises(V.VerificationInputError):
+            V._coerce_evidence([{"ref": "a", "kind": "x", "inline": "yes"}])

@@ -70,12 +70,10 @@ def test_classify_callback_no_signal(lab_oob):
     assert lab_oob.classify_callback(line) == ("UNKNOWN", False)
 
 
-def _run_poll(lab_oob, monkeypatch, log_lines, url="abc123.oast.fun", tmp_path=None):
+def _run_poll(lab_oob, monkeypatch, log_lines, tmp_path, url="abc123.oast.fun"):
     """Drive poll_listener against a fake log file and return the saved state."""
     state_path = tmp_path / "oob-test-state.json"
     log_path = tmp_path / "oob-test-output.log"
-    if state_path.exists():
-        state_path.unlink()
     monkeypatch.setattr(lab_oob, "STATE_FILE", state_path)
     monkeypatch.setattr(lab_oob, "EVIDENCE_DIR", tmp_path / "oob-test-evidence")
     log_path.write_text("\n".join(log_lines) + "\n", encoding="utf-8")
@@ -95,10 +93,7 @@ def test_poll_emits_received_true_for_generic_line(lab_oob, monkeypatch, tmp_pat
     carrying received: true so the oob_callback oracle can verify it
     (type=UNKNOWN alone would stay insufficient_evidence forever)."""
     state = _run_poll(
-        lab_oob,
-        monkeypatch,
-        ["[15:00:01] Received interaction for abc123.oast.fun"],
-        tmp_path=tmp_path,
+        lab_oob, monkeypatch, ["[15:00:01] Received interaction for abc123.oast.fun"], tmp_path
     )
     exit_code = lab_oob.poll_listener(5)
     assert exit_code == 0
@@ -116,7 +111,7 @@ def test_poll_emits_received_true_for_ldap_line(lab_oob, monkeypatch, tmp_path):
         lab_oob,
         monkeypatch,
         ["[15:00:01] [LDAP] Received interaction for abc123.oast.fun"],
-        tmp_path=tmp_path,
+        tmp_path,
     )
     exit_code = lab_oob.poll_listener(5)
     assert exit_code == 0
@@ -128,10 +123,7 @@ def test_poll_emits_received_true_for_ldap_line(lab_oob, monkeypatch, tmp_path):
 def test_check_once_emits_received_true(lab_oob, monkeypatch, tmp_path):
     """check_once must record the same canonical shape as poll_listener."""
     state = _run_poll(
-        lab_oob,
-        monkeypatch,
-        ["[15:00:01] Received interaction for abc123.oast.fun"],
-        tmp_path=tmp_path,
+        lab_oob, monkeypatch, ["[15:00:01] Received interaction for abc123.oast.fun"], tmp_path
     )
     exit_code = lab_oob.check_once()
     assert exit_code == 0
@@ -142,7 +134,7 @@ def test_check_once_emits_received_true(lab_oob, monkeypatch, tmp_path):
 def test_poll_refuses_empty_url(lab_oob, monkeypatch, tmp_path):
     """A state file without a callback URL must be refused early — an empty
     url would make the poll loop compare against '' and never match."""
-    state = _run_poll(lab_oob, monkeypatch, ["anything"], url="", tmp_path=tmp_path)
+    state = _run_poll(lab_oob, monkeypatch, ["anything"], tmp_path, url="")
     exit_code = lab_oob.poll_listener(2)
     assert exit_code == 1
     assert state["callbacks"] == []
