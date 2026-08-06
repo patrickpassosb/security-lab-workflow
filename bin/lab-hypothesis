@@ -562,6 +562,17 @@ def cmd_validate(args: list[str]) -> int:
     ws_dir = _resolve_workspace(single)
     strict = single.get("--strict") == "true"
     report = H.validate_ledger(ws_dir)
+    # Symlinked ledgers: _read_ledger returns an empty read (skipped_lines=0),
+    # so the malformed-line guard below would never fire. Detect symlinks
+    # directly so strict validate fails on a symlinked ledger (defense
+    # posture consistent with _read_ledger/_append_or_raise).
+    symlinked = [
+        fname for fname in ("hypotheses.jsonl", "experiments.jsonl")
+        if (ws_dir / ".lab" / fname).is_symlink()
+    ]
+    if symlinked:
+        print(f"symlinked ledger: {', '.join(symlinked)} (refusing to read)",
+              file=sys.stderr)
     print(f"hypotheses: {report.hypotheses_count}")
     print(f"experiments: {report.experiments_count}")
     print(f"orphan experiments (bad hypothesis_id): {len(report.orphan_experiments)}")
@@ -586,6 +597,7 @@ def cmd_validate(args: list[str]) -> int:
         not report.orphan_experiments
         and not report.unsafe_scope_records
         and not report.shape_invalid_records
+        and not symlinked
     )
     if strict and (report.skipped_hypothesis_lines or report.skipped_experiment_lines):
         clean = False

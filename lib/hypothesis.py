@@ -1002,6 +1002,9 @@ _DEAD_END_STOPWORDS: frozenset[str] = frozenset({
     "code", "codes", "http", "https", "get", "post", "put", "delete",
     "against", "after", "before", "during", "within", "without", "using",
     "use", "used", "over", "under", "between", "into", "out",
+    "0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "10",
+    "11", "12", "13", "14", "15", "16", "17", "18", "19", "20",
+    "30", "40", "50", "60", "100", "200", "300", "400", "500",
 })
 
 
@@ -1189,7 +1192,8 @@ def rank(
 
 _MIN_CONF_QUAL_RE = re.compile(
     r"^(?:a minimum of|a min of|at least|no fewer than|at minimum|no less than|"
-    r"minimum of|min of|minimum|min|exactly|need|needs|requires?)\s+",
+    r"minimum of|min of|a minimum|minimum|min|exactly|need|needs|requires?|"
+    r"required)\s+",
     re.IGNORECASE,
 )
 _MIN_CONF_COUNT_RE = re.compile(

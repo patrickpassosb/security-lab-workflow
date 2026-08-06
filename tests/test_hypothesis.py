@@ -533,6 +533,18 @@ class TestRanking:
         assert ranked[0].dead_end_penalty == 0.0
         assert ranked[0].novelty == 1.0
 
+    def test_dead_end_digit_tokens_do_not_penalize(self, ws: Path) -> None:
+        """Numeric tokens in claims ('8 commands tried', '20 minutes') are
+        stop-words: a hypothesis sharing the surface and a digit in its
+        invariant must not trigger the dead-end penalty."""
+        add_hyp(ws, invariant="8-byte alignment in the parser",
+                surface="/api/users", mutation="m", tags=["authz"])
+        claims = ["/api/users no signal found, 8 commands tried, 20 minutes"]
+        ranked = H.rank(ws, dead_end_claims=claims)
+        assert len(ranked) == 1
+        assert ranked[0].dead_end_penalty == 0.0
+        assert ranked[0].novelty == 1.0
+
     def test_rank_drops_unsafe_scope_records(self, ws: Path) -> None:
         add_hyp(ws, scope=_safe_scope(), tags=["authz"])
         # The write-time gate rejects unsafe records, so simulate a ledger
@@ -790,6 +802,19 @@ class TestStatusDerivation:
             assert H.derive_hypothesis_status(
                 ws, hyp["hypothesis_id"]) == "confirmed", text
 
+    def test_required_and_a_minimum_qualifiers_do_not_fail_open(self, ws: Path) -> None:
+        """'required 2...' and 'a minimum 2...' (no 'of') parse as the stated
+        bar, never fail open to 1."""
+        for text in ("required 2 corroborating experiments",
+                     "a minimum 2 corroborating experiments"):
+            hyp = add_hyp(ws, minimum_confirmation=text,
+                          invariant=f"inv {text[:20]}", surface=f"/s{len(text)}",
+                          mutation=f"m{len(text)}")
+            add_exp(ws, hyp["hypothesis_id"], result="corroborating",
+                    action="probe")
+            assert H.derive_hypothesis_status(
+                ws, hyp["hypothesis_id"]) == "testing", text
+
     def test_bare_integer_field_is_the_bar(self, ws: Path) -> None:
         """A minimum_confirmation that is a bare integer is itself the bar."""
         hyp = add_hyp(ws, minimum_confirmation="3")
@@ -993,6 +1018,20 @@ class TestScannerVerdictGate:
         with pytest.raises(H.LedgerWriteError):
             add_hyp(ws)
         assert len(H.list_hypotheses(ws).records) == 0
+
+    def test_cli_validate_strict_fails_on_symlinked_ledger(self, ws: Path) -> None:
+        """validate --strict must fail (exit 2) on a symlinked ledger even
+        when the sibling ledger is clean - the symlink is a defense
+        violation, not a clean empty ledger."""
+        lab = ws / ".lab"
+        lab.mkdir(parents=True, exist_ok=True)
+        target = ws / "real-ledger.jsonl"
+        target.write_text("", encoding="utf-8")
+        (lab / "hypotheses.jsonl").symlink_to(target)
+        rc, out, err = _run_cli(["validate", "--workspace", str(ws), "--strict"],
+                                cwd=ws)
+        assert rc == 2
+        assert "symlinked ledger" in err
 
     def test_non_dict_provenance_raises_structured_error(self, ws: Path) -> None:
         """A non-dict provenance must surface as HypothesisValidationError,
