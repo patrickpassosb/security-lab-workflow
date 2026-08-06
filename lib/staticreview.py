@@ -24,6 +24,7 @@ The module is pure except for reading the source tree the caller points it at.
 
 from __future__ import annotations
 
+import os
 import re
 from pathlib import Path
 from typing import Any
@@ -214,7 +215,8 @@ def inventory(root: Path) -> dict[str, Any]:
     entry_points: list[dict[str, Any]] = []
     by_lang: dict[str, dict[str, int]] = {}
 
-    for dirpath, dirnames, filenames in root.walk():
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirpath = Path(dirpath)
         dirnames[:] = sorted(
             d for d in dirnames
             if d not in _SKIP_DIRS and not (dirpath / d).is_symlink()
@@ -286,7 +288,8 @@ def sink_grep(root: Path) -> list[dict[str, Any]]:
     """
     root = Path(root)
     hits: list[dict[str, Any]] = []
-    for dirpath, dirnames, filenames in root.walk():
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirpath = Path(dirpath)
         dirnames[:] = sorted(
             d for d in dirnames
             if d not in _SKIP_DIRS and not (dirpath / d).is_symlink()
