@@ -15,7 +15,7 @@ cd ~/security-lab
 
 - **Multi-engagement system:** parallel CTF, bounty, and CVE workspaces, each self-contained.
 - **Scope enforcement:** global denied list (gov/mil/edu) + per-engagement scope files.
-- **29 CLI scripts:** lab-new, lab-scope, lab-preflight, lab-hunt, lab-firstpass, lab-cai-run, lab-verify, lab-hypothesis, moa-run, and more.
+- **32 CLI scripts:** lab-new, lab-scope, lab-preflight, lab-hunt, lab-firstpass, lab-cai-run, lab-verify, lab-verify-findings, lab-hunt-end, lab-static-review, lab-hypothesis, moa-run, and more.
 - **15 skills:** ctf-workflow, scope, recon, web-attack, binary-attack, crack, stego-forensics, report-ctf, bounty-attack, gbrain, obsidian.
 - **Templates:** CTF, bounty, and CVE workspace scaffolding.
 - **Optional plugins:** gbrain (persistent memory), Obsidian (knowledge vault).

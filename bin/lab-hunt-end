@@ -1,0 +1,245 @@
+#!/usr/bin/env python3
+"""lab-hunt-end — hunt completion wrapper: auto-evaluates a completed hunt.
+
+Wires the automatic finding-evaluation loop into the hunt lifecycle. When a
+hunt completes, this wrapper runs the completed findings through the
+deterministic evaluation (bin/lab-verify-findings / lib/findingeval.py):
+
+  1. scope             — target in scope for the engagement
+  2. evidence_shape   — evidence the verification oracle needs is present
+  3. oracle           — the deterministic verification oracle returns verified
+  4. hypothesis_ledger— the hypothesis ledger derived status does not veto
+
+Findings that pass ALL gates are tagged `candidate` (they surface to the
+captain). Findings that fail any gate are tagged `noisy` with the failing
+gate and reason, and the reason is recorded into the program playbook
+(bin/lab-hunt-lesson) so the dead end is never re-found.
+
+Verdict files: findings/eval/<hunt-id>.json + .md. Only candidates surface
+to the captain.
+
+Usage:
+    lab-hunt-end <workspace> --engagement <name> [--hunt-id <id>]
+        [--findings <file.jsonl>] [--out <dir>] [--no-lesson]
+    lab-hunt-end --help
+
+Exit codes:
+    0 = evaluation ran; verdict file written.
+    1 = bad input (missing args, unreadable ledger, invalid engagement).
+    2 = invalid engagement name.
+
+Audit: every invocation writes one audit-log entry via labutil.audit
+(action=lab-hunt-end) carrying the hunt_id, engagement, and the
+candidate/noisy counts.
+"""
+
+from __future__ import annotations
+
+import os
+import sys
+from pathlib import Path
+
+# Import shared labutil helpers (sys.path hack -- E402-ignored per ruff.toml).
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib"))
+import findingeval as FE  # noqa: E402
+import labutil  # noqa: E402
+
+AUDIT_ACTION = "lab-hunt-end"
+
+
+def _usage() -> str:
+    return (
+        "usage: lab-hunt-end <workspace> --engagement <name> "
+        "[--hunt-id <id>] [--findings <file.jsonl>] [--out <dir>] [--no-lesson]\n"
+    )
+
+
+def _resolve_lab_root() -> Path:
+    """Resolve the lab root ($HACKING_LAB or ~/security-lab) and keep
+    labutil's audit log path in sync with it (mirrors lab-hunt-lesson)."""
+    lab_root = Path(os.environ.get("HACKING_LAB", os.path.expanduser("~/security-lab")))
+    labutil.AUDIT_LOG_PATH = lab_root / "findings" / ".agent-audit.jsonl"
+    return lab_root
+
+
+def main() -> int:
+    args = sys.argv[1:]
+    if not args or args[0] in ("-h", "--help"):
+        print(__doc__)
+        return 0
+
+    workspace = ""
+    engagement = ""
+    hunt_id = ""
+    findings_path: Path | None = None
+    out_dir: Path | None = None
+    record_lesson = True
+
+    i = 0
+    positional: list[str] = []
+    while i < len(args):
+        a = args[i]
+        if a == "--engagement" and i + 1 < len(args):
+            engagement = args[i + 1]
+            i += 2
+        elif a.startswith("--engagement="):
+            engagement = a.split("=", 1)[1]
+            i += 1
+        elif a == "--hunt-id" and i + 1 < len(args):
+            hunt_id = args[i + 1]
+            i += 2
+        elif a.startswith("--hunt-id="):
+            hunt_id = a.split("=", 1)[1]
+            i += 1
+        elif a == "--findings" and i + 1 < len(args):
+            findings_path = Path(args[i + 1])
+            i += 2
+        elif a.startswith("--findings="):
+            findings_path = Path(a.split("=", 1)[1])
+            i += 1
+        elif a == "--out" and i + 1 < len(args):
+            out_dir = Path(args[i + 1])
+            i += 2
+        elif a.startswith("--out="):
+            out_dir = Path(a.split("=", 1)[1])
+            i += 1
+        elif a == "--no-lesson":
+            record_lesson = False
+            i += 1
+        elif a.startswith("-") and a not in ("--",):
+            print(f"unknown option: {a}", file=sys.stderr)
+            print(_usage(), file=sys.stderr)
+            return 1
+        else:
+            positional.append(a)
+            i += 1
+
+    if positional:
+        workspace = positional[0]
+
+    if not workspace:
+        print("error: a workspace directory is required", file=sys.stderr)
+        print(_usage(), file=sys.stderr)
+        return 1
+    if not engagement:
+        print("error: --engagement <name> is required", file=sys.stderr)
+        print(_usage(), file=sys.stderr)
+        return 1
+
+    # Validate the engagement name before it is used in any filesystem path
+    # downstream (defense against argument injection via --engagement).
+    if not labutil.validate_name(engagement):
+        print(
+            f"error: invalid engagement name {engagement!r} -- use only "
+            f"letters, numbers, dots, hyphens, underscores (no '..', '/', '\\')",
+            file=sys.stderr,
+        )
+        labutil.audit(
+            AUDIT_ACTION,
+            engagement=engagement,
+            exit_code=2,
+            detail=f"invalid engagement name: {engagement!r}",
+        )
+        return 2
+
+    lab_root = _resolve_lab_root()
+    workspace_dir = Path(workspace)
+    if not workspace_dir.is_dir():
+        print(f"error: workspace directory not found: {workspace_dir}", file=sys.stderr)
+        labutil.audit(
+            AUDIT_ACTION,
+            engagement=engagement,
+            exit_code=1,
+            detail=f"workspace not found: {workspace_dir}",
+        )
+        return 1
+
+    # Resolve the findings ledger: explicit --findings wins; else the
+    # workspace's findings.jsonl (the labcai convention).
+    ledger = findings_path or (workspace_dir / FE.FINDINGS_LEDGER_FILENAME)
+    findings = FE.read_findings_ledger(ledger)
+    if not findings:
+        print(
+            f"error: no finding-candidates found in {ledger}",
+            file=sys.stderr,
+        )
+        labutil.audit(
+            AUDIT_ACTION,
+            engagement=engagement,
+            exit_code=1,
+            detail=f"empty findings ledger: {ledger}",
+        )
+        return 1
+
+    # hunt_id defaults to the workspace name (safe path component by
+    # construction — the workspace dir name is a single component).
+    if not hunt_id:
+        hunt_id = workspace_dir.name
+
+    try:
+        eval_dict = FE.evaluate_hunt(
+            findings,
+            hunt_id=hunt_id,
+            workspace=str(workspace_dir),
+            engagement=engagement,
+            lab_root=lab_root,
+            playbooks_dir=lab_root / "playbooks",
+            record_lesson=record_lesson,
+        )
+    except FE.FindingEvalInputError as e:
+        print(f"error: {e}", file=sys.stderr)
+        labutil.audit(
+            AUDIT_ACTION,
+            engagement=engagement,
+            exit_code=1,
+            detail=f"evaluation input error: {e}",
+        )
+        return 1
+
+    # Write the verdict files under findings/eval/ (or --out).
+    out_dir = out_dir or (lab_root / "findings" / "eval")
+    try:
+        json_path, md_path = FE.write_eval(eval_dict, out_dir)
+    except FE.FindingEvalError as e:
+        print(f"error: refusing to write verdict: {e}", file=sys.stderr)
+        labutil.audit(
+            AUDIT_ACTION,
+            engagement=engagement,
+            exit_code=1,
+            detail=f"verdict write refused: {e}",
+        )
+        return 1
+
+    summary = eval_dict["summary"]
+    print(f"=== HUNT END: {hunt_id} (engagement: {engagement}) ===")
+    print(f"evaluation written: {json_path}")
+    print(f"  markdown: {md_path}")
+    print(
+        f"  findings: {summary['total']} | candidates: {summary['candidates']} "
+        f"| noisy: {summary['noisy']}"
+    )
+    for v in eval_dict["findings"]:
+        mark = "CANDIDATE" if v["verdict"] == FE.VERDICT_CANDIDATE else "noisy"
+        print(f"  [{mark}] {v['finding_id']} ({v['vuln_class']}): {v['reason']}")
+    if summary["candidates"]:
+        print("")
+        print("Candidates surface to the captain:")
+        for v in eval_dict["findings"]:
+            if v["verdict"] == FE.VERDICT_CANDIDATE:
+                print(f"  - {v['finding_id']} ({v['vuln_class']} on {v['target']})")
+
+    labutil.audit(
+        AUDIT_ACTION,
+        engagement=engagement,
+        exit_code=0,
+        detail=(
+            f"hunt={hunt_id} total={summary['total']} "
+            f"candidates={summary['candidates']} noisy={summary['noisy']}"
+        ),
+        hunt_id=hunt_id,
+    )
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -204,6 +204,9 @@ Global, shared scripts that implement the workflow. All read env vars (`$HACKING
 | `lab-dashboard` | CTF challenge tracking dashboard |
 | `lab-oob` | OOB confirmation via interactsh (emits canonical collector records: collector_id/token/timestamp) |
 | `lab-verify` | Deterministic, non-AI verification gate (authorization / business_logic / sha256_canary / oob_callback oracles; see `lib/verification.py`) |
+| `lab-verify-findings` | Automatic finding-evaluation loop — runs a hunt's completed findings through the deterministic gates (scope / evidence shape / oracle / hypothesis ledger) and tags each `candidate` or `noisy` (dead-end lesson recorded); verdict files `findings/eval/<hunt-id>.json` + `.md` (see `lib/findingeval.py`) |
+| `lab-hunt-end` | Hunt-completion wrapper — auto-runs the finding evaluation when a hunt completes |
+| `lab-static-review` | Source-review scaffold: inventory -> sink grep -> reachability -> report (see `lib/staticreview.py`) |
 | `lab-wordlist` | Custom wordlist generator |
 | `ctf-new` | Backward-compatible wrapper around `lab-new ctf` |
 | `ctf-evidence` | Capture command output + metadata under `evidence/` |

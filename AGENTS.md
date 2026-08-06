@@ -210,6 +210,35 @@ falsifiable tests instead of unstructured scanner output. Library:
   gitignored). Library `lib/moa.py`; `chat_completions` is the single network
   seam (mocked in tests).
 
+## Automatic finding evaluation (lab-verify-findings / lab-hunt-end)
+
+Every completed hunt is evaluated BEFORE any finding reaches the captain.
+`lab-verify-findings <workspace> --engagement <name>` (and the hunt-completion
+wrapper `lab-hunt-end`) runs the hunt's completed findings (the
+`findings.jsonl` ledger of finding-candidates, schema
+`security-lab/finding-candidate/v1`) through four deterministic gates:
+
+1. `scope` — target in scope for the engagement (shared labutil scope
+   primitives; the finding must attest `scope_checked=true`).
+2. `evidence_shape` — the finding carries the evidence the verification
+   oracle needs (request/response pairs, callback records, canary values —
+   the payload contracts from `lib/verification.py`).
+3. `oracle` — the deterministic verification oracle itself returns
+   `outcome=verified` (never model prose).
+4. `hypothesis_ledger` — the hypothesis ledger (`lib/hypothesis.py`) derived
+   status does not veto (`disconfirmed`/`contradictory` veto).
+
+Findings that pass ALL gates are tagged `candidate` (they surface to the
+captain). Findings that fail any gate are tagged `noisy` with the failing
+gate and reason, and the reason is recorded into the program playbook
+(`bin/lab-hunt-lesson`, category `dead_end`) so the dead end is never
+re-found. Verdict files: `findings/eval/<hunt-id>.json` + `.md` (schema
+`schemas/finding-eval-v1.schema.json`). Library: `lib/findingeval.py` (sole
+owner of the gate logic). The `lab-static-review` scaffold
+(`bin/lab-static-review`, `lib/staticreview.py`) is the source-review first
+pass: inventory -> sink grep -> reachability -> report; sink hits are
+hypotheses, never verdicts.
+
 ## Never
 
 1. **Never exfiltrate outside the lab.** No outbound to public hosts except: Voyage API (embeddings), Supabase (if you opt in later), Caido (proxy only). For bounty engagements, you operate under the program's safe harbor — but still no data exfiltration beyond what proves the bug.
@@ -238,6 +267,9 @@ falsifiable tests instead of unstructured scanner output. Library:
 - `~/security-lab/bin/ctf-health web|crypto|pwn|forensics|all [--install]` checks category-specific readiness. With `--install`, agents may install missing local tools automatically when useful, preferring user-space/local paths and logging installs in `solve_log.md`.
 - `~/security-lab/bin/lab-scope <target> --engagement <name>` checks if a target is in scope for an engagement. `lab-scope --list` lists all engagements.
 - `~/security-lab/bin/lab-verify <oracle> --payload <file.json> [--out <result.json>] [--target <url>] [--engagement <name>]` is the **deterministic, non-AI verification gate** (per sl-competitor-methods-v1 agent/validator split + canary SHA-256 separation + OOB callback, and sl-efficacy-gap-v1 empty-differential/state-verification fixes). Four oracles — `authorization` (cross-actor differential + controlled victim marker + verified ownership), `business_logic` (separate post-action state read, never the mutation response), `sha256_canary` (agent got only location + expected hash), `oob_callback` (accepted only from a captured callback record). Model prose can NEVER produce `outcome=verified`. Results conform to `schemas/verification-result-v1.schema.json`; refuses out-of-scope targets via the shared labutil scope primitives; never contacts live targets. `--target`/`--engagement` override the payload's `target`/`engagement` keys (flag wins; payload-only runs resolve both from the payload so the audit entry matches what the scope gate enforced). See `lib/verification.py` for the oracle contracts.
+- `~/security-lab/bin/lab-verify-findings <workspace> --engagement <name> [--hunt-id <id>] [--findings <file.jsonl>] [--out <dir>] [--no-lesson]` is the **automatic finding-evaluation loop** — runs a hunt's completed findings through the deterministic gates (scope, evidence shape, verification oracle, hypothesis ledger) and tags each `candidate` (surfaces to the captain) or `noisy` (dead-end lesson recorded via `lab-hunt-lesson`). Verdict files: `findings/eval/<hunt-id>.json` + `.md` (schema `schemas/finding-eval-v1.schema.json`). See `lib/findingeval.py` for the gate logic.
+- `~/security-lab/bin/lab-hunt-end <workspace> --engagement <name>` is the hunt-completion wrapper — auto-runs the evaluation when a hunt completes (same gates as `lab-verify-findings`).
+- `~/security-lab/bin/lab-static-review <dir> [--out <report.md>]` is the source-review scaffold: inventory -> sink grep -> reachability -> report. Sink hits are hypotheses, never verdicts. See `lib/staticreview.py`.
 - `~/security-lab/bin/lab-active` shows the engagement dashboard (all engagements + workspace counts + last activity).
 - `~/security-lab/templates/ctf/exploit.py` is the default file-based exploit template for payload-bearing HTTP flows. Inline `curl` is only for simple read-only recon.
 - `~/security-lab/templates/ctf/endpoint_siblings.txt` is the capped contextual route-family list for hidden endpoint probing.
