@@ -97,7 +97,11 @@ class TestMoaRunCli:
         out = capsys.readouterr().out
         assert rc == 0
         assert out.strip() == "VERDICT TEXT"
-        assert [c["model"] for c in fake_route] == ["mock/advisor-a", "mock/advisor-b", "mock/aggregator"]
+        assert [c["model"] for c in fake_route] == [
+            "mock/advisor-a",
+            "mock/advisor-b",
+            "mock/aggregator",
+        ]
 
     def test_out_file_written_with_verdict_shape(self, tmp_path, monkeypatch, fake_route, cli_env):
         out_path = tmp_path / "verdict.json"

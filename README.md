@@ -49,8 +49,8 @@ verdict — the Hermes `captain-test` MOA preset, runnable locally via Aperture
 aggregator transcripts are written to `traces/` for audit.
 
 ```bash
-~/security-lab/bin/moa-run "Is this exploit chain plausible? ..." \
-    --file task.md --out verdict.json
+~/security-lab/bin/moa-run "Is this exploit chain plausible? ..." --out verdict.json
+# or from a file: ~/security-lab/bin/moa-run --file task.md --out verdict.json
 # see CHEATSHEET.md → MoA — Multi-Model Verdicts, and bin/moa-run --help
 ```
 
