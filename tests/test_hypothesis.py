@@ -963,6 +963,24 @@ class TestScannerVerdictGate:
         path.write_text(json.dumps(rec) + "\n", encoding="utf-8")
         assert H.derive_hypothesis_status(ws, hyp["hypothesis_id"]) == "unverified"
 
+    def test_non_dict_provenance_verdict_does_not_drive_status(self, ws: Path) -> None:
+        """A corrupt/hand-edited verdict line with non-dict provenance (or a
+        missing actor) is treated as tool-like: it must not drive the derived
+        status to a terminal state."""
+        hyp = add_hyp(ws, minimum_confirmation="1")
+        TestStatusDerivation._append_raw_exp(ws, hyp["hypothesis_id"],
+                                             result="disconfirming",
+                                             action="probe",
+                                             disconfirming_controls_checked="")
+        path = ws / ".lab" / "experiments.jsonl"
+        rec = json.loads(path.read_text(encoding="utf-8").strip())
+        rec["provenance"] = "not-a-dict"
+        path.write_text(json.dumps(rec) + "\n", encoding="utf-8")
+        assert H.derive_hypothesis_status(ws, hyp["hypothesis_id"]) == "unverified"
+        rec["provenance"] = {"agent": "opencode"}  # missing actor
+        path.write_text(json.dumps(rec) + "\n", encoding="utf-8")
+        assert H.derive_hypothesis_status(ws, hyp["hypothesis_id"]) == "unverified"
+
     def test_symlink_ledger_raises_on_append(self, ws: Path) -> None:
         """A symlinked ledger path must raise LedgerWriteError instead of
         returning a phantom record (silent data loss in an append-only

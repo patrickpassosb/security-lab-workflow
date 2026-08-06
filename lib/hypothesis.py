@@ -1285,8 +1285,14 @@ def _derive_status_from(hyp: dict[str, Any], exps: list[dict[str, Any]]) -> str:
             if e.get("result") not in (RESULT_CORROBORATING, RESULT_DISCONFIRMING):
                 continue
             prov = e.get("provenance")
-            actor = str(prov.get("actor") or "").strip().lower() if isinstance(prov, dict) else ""
-            if actor == "tool":
+            # Non-dict provenance (or a missing/empty actor) is treated as
+            # tool-like: a corrupt/hand-edited line must never drive the
+            # derived status to a terminal state. Validate surfaces such
+            # records as shape-invalid; derivation treats them as absent.
+            if not isinstance(prov, dict):
+                continue
+            actor = str(prov.get("actor") or "").strip().lower()
+            if not actor or actor == "tool":
                 continue
             yield e
 

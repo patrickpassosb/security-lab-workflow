@@ -303,6 +303,13 @@ def cmd_add(args: list[str]) -> int:
         _audit(AUDIT_ACTION_ADD, single.get("--target", ""), VALIDATION_ERR,
                detail=f"write failed: {e}")
         return VALIDATION_ERR
+    except OSError as e:
+        # Read-only workspace, permission denied, disk full - the record was
+        # not written; surface a structured error instead of a raw traceback.
+        print(f"ERROR (write): {e}", file=sys.stderr)
+        _audit(AUDIT_ACTION_ADD, single.get("--target", ""), VALIDATION_ERR,
+               detail=f"write failed: {e}")
+        return VALIDATION_ERR
     if not record.get("hypothesis_id"):
         print("ERROR: add returned a record without hypothesis_id (corrupt ledger?)",
               file=sys.stderr)
@@ -401,6 +408,13 @@ def cmd_experiment(args: list[str]) -> int:
                detail=f"validation: {e}")
         return VALIDATION_ERR
     except H.LedgerWriteError as e:
+        print(f"ERROR (write): {e}", file=sys.stderr)
+        _audit(AUDIT_ACTION_EXP, single.get("--target", ""), VALIDATION_ERR,
+               detail=f"write failed: {e}")
+        return VALIDATION_ERR
+    except OSError as e:
+        # Read-only workspace, permission denied, disk full - the record was
+        # not written; surface a structured error instead of a raw traceback.
         print(f"ERROR (write): {e}", file=sys.stderr)
         _audit(AUDIT_ACTION_EXP, single.get("--target", ""), VALIDATION_ERR,
                detail=f"write failed: {e}")
@@ -602,6 +616,12 @@ def _malformed_lines(ws_dir: Path) -> list[dict[str, str]]:
                         ("experiments.jsonl", "experiment")):
         path = ws_dir / ".lab" / fname
         if not path.is_file():
+            continue
+        if path.is_symlink():
+            # Defense-in-depth: refuse to follow a symlinked ledger, matching
+            # _read_ledger / _append_or_raise posture.
+            out.append({"kind": kind, "line": "?", "path": fname,
+                        "error": "ledger path is a symlink, refusing to read"})
             continue
         try:
             lines = path.read_text(encoding="utf-8").splitlines()
