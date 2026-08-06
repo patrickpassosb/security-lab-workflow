@@ -174,6 +174,27 @@ to hunting: **rejected submission → dead-end lesson → next hunt avoids it.**
 
 Schema: `schemas/hunt-lesson-v1.schema.json`. Library: `lib/huntlesson.py` (sole owner of the markdown renderer).
 
+## Hypothesis & experiment ledger
+
+`lab-hypothesis` is the typed hypothesis-and-experiment ledger — ranked,
+falsifiable tests instead of unstructured scanner output. Library:
+`lib/hypothesis.py` (sole owner of the ledger invariants); CLI:
+`bin/lab-hypothesis` (add|experiment|rank|list|show|validate); schemas:
+`schemas/hypothesis-v1.schema.json`, `schemas/experiment-v1.schema.json`.
+
+- Append-only JSONL per workspace: `.lab/hypotheses.jsonl` +
+  `.lab/experiments.jsonl`. Experiments pin to `hyp-*` IDs; a hallucinated ID
+  raises a structured retryable `HypothesisNotFoundError` listing valid IDs.
+- Default-deny scope gate: target-bearing records require a successful scope
+  check; scanner/tool findings enter only as `unverified` hypotheses (never
+  verdicts). Status is derived from the experiment ledger, never mutated.
+- `rank` scores by primitive leverage × scope safety × impact × novelty ×
+  (1 − dead-end penalty); contradictory evidence is surfaced first. Exported
+  dead-end claims are passed via `--dead-ends-file` (one claim per line); the
+  huntlesson playbooks (`playbooks/<program>.jsonl`) are their source.
+- Tests: `tests/test_hypothesis.py` (referential integrity, dedup, ranking,
+  contradictory evidence, unsafe scope, malformed-JSONL recovery).
+
 ## Never
 
 1. **Never exfiltrate outside the lab.** No outbound to public hosts except: Voyage API (embeddings), Supabase (if you opt in later), Caido (proxy only). For bounty engagements, you operate under the program's safe harbor — but still no data exfiltration beyond what proves the bug.

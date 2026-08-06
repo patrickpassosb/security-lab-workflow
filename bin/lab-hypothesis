@@ -1,0 +1,719 @@
+#!/usr/bin/env python3
+"""lab-hypothesis - typed hypothesis-and-experiment ledger CLI.
+
+Security Lab works ranked, falsifiable tests rather than unstructured scanner
+output. This CLI is the agent worklist surface for the ledger owned by
+lib/hypothesis.py:
+
+    hypothesis (invariant + mutation + expected-safe + violation-signal)
+      -> experiment (tests the hypothesis; corroborating/disconfirming/...)
+      -> derived status + ranked worklist
+
+Storage (append-only JSONL, two ledgers per workspace):
+
+    <workspace>/.lab/hypotheses.jsonl   one hypothesis per line
+    <workspace>/.lab/experiments.jsonl  one experiment per line
+
+Invariants enforced by the library (this CLI never bypasses them):
+  - Referential integrity (.refine() pin): an experiment's --hypothesis-id
+    MUST exist in hypotheses.jsonl. A hallucinated id is rejected with a
+    structured retryable error listing the valid ids.
+  - Scope safety (default-deny): a record with a --target MUST pass --scope-ok;
+    target-bearing records without a passing scope check are rejected.
+  - Scanner findings are hypotheses, never verdicts: --source != "manual" is
+    forced to status=unverified; only `experiment` records (actor=agent or
+    replay-harness) can corroborate or disconfirm.
+
+Subcommands:
+    add          append a hypothesis (manual or scanner/tool-sourced)
+    experiment   append an experiment referencing an existing hypothesis
+    rank         print the ranked worklist (markdown)
+    list         list hypotheses (optionally by status)
+    show         show one hypothesis + its experiments
+    validate     integrity check (referential + scope + malformed-line report)
+    worklist     alias for rank
+
+Usage:
+    lab-hypothesis add --engagement <e> --invariant "<text>" \
+        --surface "<text>" --mutation "<text>" --expected-safe "<text>" \
+        --violation-signal "<text>" --minimum-confirmation "<text>" \
+        --primitive-leverage <state_changing|read_only|theoretical> \
+        --precondition-actor "<text>" [--precondition-target-resource "<text>"] \
+        [--precondition-auth-state "<text>"] [--precondition-environment "<text>"] \
+        [--disconfirming-controls "<text>"] [--source <manual|tool-name>] \
+        [--target <url>] [--scope-ok] [--engagement-scope-ref <path>] \
+        [--workspace <dir>] [--workspace-id <uuid>] [--tag <tag>]... \
+        [--evidence-ref <path>]...
+    lab-hypothesis experiment --hypothesis-id <hyp-uuid> \
+        --engagement <e> --action "<text>" --observation "<text>" \
+        --result <corroborating|disconfirming|inconclusive|contradictory> \
+        --expected-safe-observed <bool> --violation-signal-observed <bool> \
+        [--actor <agent|replay-harness|fuzz-harness|tool>] \
+        [--tool <name>] [--replay-fixture <path>] \
+        [--target <url>] [--scope-ok] [--engagement-scope-ref <path>] \
+        [--workspace <dir>] [--workspace-id <uuid>] \
+        [--disconfirming-controls-checked "<text>"] [--evidence-ref <path>]...
+    lab-hypothesis rank [--workspace <dir>] [--include-disconfirmed] \
+        [--dead-ends-file <path>]
+    lab-hypothesis list [--workspace <dir>] [--status <status>]
+    lab-hypothesis show <hypothesis-id> [--workspace <dir>]
+    lab-hypothesis validate [--workspace <dir>] [--strict]
+
+Exit codes:
+    0 success; 1 usage error; 2 validation error; 3 unsafe scope; 4 not found
+    (the .refine() retryable error); 5 scanner-verdict attempt (rejected).
+
+This CLI is a thin wrapper over lib/hypothesis.py. Audit events go to
+$HACKING_LAB/findings/.agent-audit.jsonl via labutil.audit (canonical schema,
+JSON-safe). No network calls; scope is the caller's responsibility (this CLI
+trusts --scope-ok only when --target is supplied, per the lab's safe-harbor
+contract for bounty and the default-deny gate for everything else).
+"""
+
+from __future__ import annotations
+
+import os
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib"))
+import hypothesis as H  # noqa: E402
+import labutil  # noqa: E402
+
+AUDIT_ACTION_ADD = "hypothesis-add"
+AUDIT_ACTION_EXP = "hypothesis-experiment"
+AUDIT_ACTION_RANK = "hypothesis-rank"
+AUDIT_ACTION_LIST = "hypothesis-list"
+AUDIT_ACTION_SHOW = "hypothesis-show"
+AUDIT_ACTION_VALIDATE = "hypothesis-validate"
+
+OK = 0
+USAGE_ERR = 1
+VALIDATION_ERR = 2
+UNSAFE_SCOPE = 3
+NOT_FOUND = 4
+SCANNER_VERDICT = 5
+
+# Flags whose value must be a boolean (used by the parser to reject a
+# swallowed non-boolean token instead of silently recording a wrong value).
+_BOOL_FLAGS = frozenset({"--expected-safe-observed", "--violation-signal-observed"})
+_BOOL_VALUES = frozenset({"true", "false", "1", "0", "yes", "no"})
+
+
+def usage() -> None:
+    print(__doc__)
+
+
+def _audit(action: str, target: str, exit_code: int, *, detail: str = "") -> None:
+    labutil.audit(action, target=target, exit_code=exit_code, detail=detail)
+
+
+# --- arg parsing helpers ------------------------------------------------------
+
+
+def _parse_flags(
+    args: list[str],
+    value_flags: tuple[str, ...],
+    multi_flags: tuple[str, ...] = (),
+) -> tuple[dict[str, str], dict[str, list[str]], int]:
+    """Generic flag parser. Returns (single-value flags, multi-value flags,
+    exit). Supports `--flag value` and `--flag=value`. Multi-flags accumulate
+    into a dict of lists under their flag name; single flags keep the last
+    value.
+
+    Known behavior (documented, no change): the bare boolean flags
+    (--scope-ok, --strict, --include-disconfirmed) are only handled as bare
+    tokens - `--scope-ok=true` / `--strict=true` are rejected as unknown
+    flags (usage error). Use the space-separated form: `--scope-ok`."""
+    single: dict[str, str] = {}
+    multi: dict[str, list[str]] = {}
+    i = 0
+    all_value = set(value_flags) | set(multi_flags)
+    while i < len(args):
+        a = args[i]
+        if a.startswith("--") and "=" in a:
+            name, _, value = a.partition("=")
+            if name in all_value:
+                if name in _BOOL_FLAGS and value.lower() not in _BOOL_VALUES:
+                    print(f"flag {name} requires a boolean value "
+                          f"(true/false/1/0/yes/no), got {value!r}", file=sys.stderr)
+                    return {}, {}, USAGE_ERR
+                if name in multi_flags:
+                    multi.setdefault(name, []).append(value)
+                else:
+                    single[name] = value
+                i += 1
+                continue
+            print(f"unknown flag: {a}", file=sys.stderr)
+            return {}, {}, USAGE_ERR
+        if a in all_value:
+            if i + 1 >= len(args):
+                print(f"flag {a} requires a value", file=sys.stderr)
+                return {}, {}, USAGE_ERR
+            nxt = args[i + 1]
+            # A missing value must not silently swallow the next flag (or a
+            # non-boolean token for boolean flags) as the value - in an
+            # append-only evidence ledger a silently wrong value is durable
+            # wrong data with no error signal.
+            if nxt.startswith("--"):
+                print(f"flag {a} requires a value (got flag {nxt!r})", file=sys.stderr)
+                return {}, {}, USAGE_ERR
+            if a in _BOOL_FLAGS and nxt.lower() not in _BOOL_VALUES:
+                print(f"flag {a} requires a boolean value (true/false/1/0/yes/no), "
+                      f"got {nxt!r}", file=sys.stderr)
+                return {}, {}, USAGE_ERR
+            if a in multi_flags:
+                multi.setdefault(a, []).append(nxt)
+            else:
+                single[a] = nxt
+            i += 2
+            continue
+        if a in ("--scope-ok", "--strict"):
+            single[a] = "true"
+            i += 1
+            continue
+        if a.startswith("-"):
+            print(f"unknown flag: {a}", file=sys.stderr)
+            return {}, {}, USAGE_ERR
+        # Positional (used by `show <id>`).
+        single.setdefault("__pos__", []).append(a)
+        i += 1
+    return single, multi, 0
+
+
+def _resolve_workspace(flags: dict[str, str]) -> Path:
+    """Resolve the workspace dir. --workspace overrides; default is cwd."""
+    return Path(flags.get("--workspace", os.getcwd()))
+
+
+def _resolve_workspace_id(flags: dict[str, str]) -> str | None:
+    wid = flags.get("--workspace-id")
+    if not wid:
+        return None
+    return wid
+
+
+def _build_scope(flags: dict[str, str]) -> dict[str, object]:
+    """Build the scope block from --target / --scope-ok / --engagement-scope-ref.
+
+    Known behavior (documented, no change): when a target is borne and
+    --engagement-scope-ref is omitted, the ref falls back to the placeholder
+    'engagements/engagement.yaml' - an unverifiable provenance pointer for
+    the self-attested scope block. Pass --engagement-scope-ref (or 'none')
+    explicitly for verifiable provenance; the placeholder is a documented
+    convention, not a real file reference."""
+    target = flags.get("--target", "")
+    scope_checked = flags.get("--scope-ok") == "true" and bool(target)
+    ref = (
+        flags.get("--engagement-scope-ref")
+        or ("none" if not target else "engagements/engagement.yaml")
+    )
+    return {
+        "scope_checked": scope_checked,
+        "target": target,
+        "engagement_scope_ref": ref,
+    }
+
+
+def _bool_flag(v: str | None) -> bool:
+    if v is None:
+        return False
+    return v.lower() in ("true", "1", "yes", "t")
+
+
+# --- commands -----------------------------------------------------------------
+
+
+def cmd_add(args: list[str]) -> int:
+    """Add a hypothesis. Manual by default; --source=<tool> records a scanner
+    finding (forced to status=unverified)."""
+    value_flags = (
+        "--engagement", "--invariant", "--surface", "--mutation",
+        "--expected-safe", "--violation-signal", "--minimum-confirmation",
+        "--disconfirming-controls", "--primitive-leverage",
+        "--precondition-actor", "--precondition-target-resource",
+        "--precondition-auth-state", "--precondition-environment",
+        "--source", "--target", "--engagement-scope-ref",
+        "--workspace", "--workspace-id",
+    )
+    multi_flags = ("--tag", "--evidence-ref")
+    single, multi, rc = _parse_flags(args, value_flags, multi_flags)
+    if rc != 0:
+        return rc
+    required = (
+        "--engagement", "--invariant", "--surface", "--mutation",
+        "--expected-safe", "--violation-signal", "--minimum-confirmation",
+        "--primitive-leverage", "--precondition-actor",
+    )
+    for r in required:
+        if r not in single:
+            print(f"add requires {r}", file=sys.stderr)
+            return USAGE_ERR
+    ws_dir = _resolve_workspace(single)
+    ws_id = _resolve_workspace_id(single)
+    preconditions: dict[str, object] = {"actor": single["--precondition-actor"]}
+    for k, flag in (
+        ("target_resource", "--precondition-target-resource"),
+        ("auth_state", "--precondition-auth-state"),
+        ("environment", "--precondition-environment"),
+    ):
+        if single.get(flag):
+            preconditions[k] = single[flag]
+    src = single.get("--source", "manual")
+    agent = os.environ.get("USER", os.environ.get("LOGNAME", "agent"))
+    provenance: dict[str, object] = {"source": src, "agent": agent}
+    if single.get("--source") and src != "manual":
+        provenance["agent"] = src
+    provenance["tool_rule_id"] = None
+    provenance["raw_ref"] = (
+        multi.get("--evidence-ref", [None])[0] if multi.get("--evidence-ref") else None
+    )
+    scope = _build_scope(single)
+    try:
+        record = H.add_hypothesis(
+            workspace_dir=ws_dir,
+            workspace_id=ws_id,
+            engagement=single["--engagement"],
+            invariant=single["--invariant"],
+            surface=single["--surface"],
+            preconditions=preconditions,
+            mutation=single["--mutation"],
+            expected_safe=single["--expected-safe"],
+            violation_signal=single["--violation-signal"],
+            minimum_confirmation=single["--minimum-confirmation"],
+            disconfirming_controls=single.get("--disconfirming-controls", ""),
+            primitive_leverage=single["--primitive-leverage"],
+            scope=scope,
+            provenance=provenance,
+            evidence_refs=multi.get("--evidence-ref", []),
+            tags=multi.get("--tag", []),
+        )
+    except H.UnsafeScopeError as e:
+        print(f"ERROR (unsafe scope): {e}", file=sys.stderr)
+        _audit(AUDIT_ACTION_ADD, single.get("--target", ""), UNSAFE_SCOPE,
+               detail=f"unsafe scope: {e}")
+        return UNSAFE_SCOPE
+    except H.HypothesisValidationError as e:
+        print(f"ERROR (validation): {e}", file=sys.stderr)
+        _audit(AUDIT_ACTION_ADD, single.get("--target", ""), VALIDATION_ERR,
+               detail=f"validation: {e}")
+        return VALIDATION_ERR
+    except H.LedgerWriteError as e:
+        print(f"ERROR (write): {e}", file=sys.stderr)
+        _audit(AUDIT_ACTION_ADD, single.get("--target", ""), VALIDATION_ERR,
+               detail=f"write failed: {e}")
+        return VALIDATION_ERR
+    except H.LedgerReadError as e:
+        print(f"ERROR (read): {e}", file=sys.stderr)
+        _audit(AUDIT_ACTION_ADD, single.get("--target", ""), VALIDATION_ERR,
+               detail=f"read failed: {e}")
+        return VALIDATION_ERR
+    except OSError as e:
+        # Read-only workspace, permission denied, disk full - the record was
+        # not written; surface a structured error instead of a raw traceback.
+        print(f"ERROR (write): {e}", file=sys.stderr)
+        _audit(AUDIT_ACTION_ADD, single.get("--target", ""), VALIDATION_ERR,
+               detail=f"write failed: {e}")
+        return VALIDATION_ERR
+    if not record.get("hypothesis_id"):
+        print("ERROR: add returned a record without hypothesis_id (corrupt ledger?)",
+              file=sys.stderr)
+        _audit(AUDIT_ACTION_ADD, single.get("--target", ""), VALIDATION_ERR,
+               detail="missing hypothesis_id in returned record")
+        return VALIDATION_ERR
+    print(f"ADDED: {record['hypothesis_id']}")
+    print(f"STATUS: {record['status']}")
+    print(f"ENGAGEMENT: {record['engagement']}")
+    print(f"SURFACE: {record['surface']}")
+    if record.get("scope", {}).get("target"):
+        print(f"TARGET: {record['scope']['target']}")
+    _audit(
+        AUDIT_ACTION_ADD, record.get("scope", {}).get("target", ""),
+        OK, detail=f"hypothesis_id={record['hypothesis_id']} engagement={record['engagement']}",
+    )
+    return OK
+
+
+def cmd_experiment(args: list[str]) -> int:
+    """Add an experiment referencing an existing hypothesis."""
+    value_flags = (
+        "--hypothesis-id", "--engagement", "--action", "--observation",
+        "--result", "--expected-safe-observed", "--violation-signal-observed",
+        "--actor", "--tool", "--replay-fixture",
+        "--target", "--engagement-scope-ref",
+        "--workspace", "--workspace-id",
+        "--disconfirming-controls-checked",
+    )
+    multi_flags = ("--evidence-ref",)
+    single, multi, rc = _parse_flags(args, value_flags, multi_flags)
+    if rc != 0:
+        return rc
+    required = (
+        "--hypothesis-id", "--engagement", "--action", "--observation",
+        "--result", "--expected-safe-observed", "--violation-signal-observed",
+    )
+    for r in required:
+        if r not in single:
+            print(f"experiment requires {r}", file=sys.stderr)
+            return USAGE_ERR
+    result = single["--result"]
+    if result not in H.EXPERIMENT_RESULTS:
+        print(f"--result must be one of {sorted(H.EXPERIMENT_RESULTS)}, got {result!r}",
+              file=sys.stderr)
+        return USAGE_ERR
+    ws_dir = _resolve_workspace(single)
+    ws_id = _resolve_workspace_id(single)
+    actor = single.get("--actor", "agent")
+    agent = single.get("--tool") or os.environ.get(
+        "USER", os.environ.get("LOGNAME", "agent")
+    )
+    provenance: dict[str, object] = {
+        "actor": actor,
+        "agent": agent,
+        "tool": single.get("--tool"),
+        "replay_fixture": single.get("--replay-fixture"),
+    }
+    scope = _build_scope(single)
+    try:
+        record = H.add_experiment(
+            workspace_dir=ws_dir,
+            hypothesis_id=single["--hypothesis-id"],
+            workspace_id=ws_id,
+            engagement=single["--engagement"],
+            action=single["--action"],
+            observation=single["--observation"],
+            expected_safe_observed=_bool_flag(single["--expected-safe-observed"]),
+            violation_signal_observed=_bool_flag(single["--violation-signal-observed"]),
+            result=result,
+            scope=scope,
+            provenance=provenance,
+            evidence_refs=multi.get("--evidence-ref", []),
+            disconfirming_controls_checked=single.get("--disconfirming-controls-checked", ""),
+        )
+    except H.HypothesisNotFoundError as e:
+        # Structured retryable error (.refine() gate) - the caller can retry.
+        print(f"ERROR (.refine() gate): {e}", file=sys.stderr)
+        print("Retry with one of the valid hypothesis IDs listed above.", file=sys.stderr)
+        _audit(AUDIT_ACTION_EXP, single.get("--target", ""), NOT_FOUND,
+               detail=f"hallucinated id: {single['--hypothesis-id']}")
+        return NOT_FOUND
+    except H.ScannerVerdictError as e:
+        print(f"ERROR (scanner-verdict rejected): {e}", file=sys.stderr)
+        _audit(AUDIT_ACTION_EXP, single.get("--target", ""), SCANNER_VERDICT,
+               detail=f"scanner verdict attempt: {e}")
+        return SCANNER_VERDICT
+    except H.UnsafeScopeError as e:
+        print(f"ERROR (unsafe scope): {e}", file=sys.stderr)
+        _audit(AUDIT_ACTION_EXP, single.get("--target", ""), UNSAFE_SCOPE,
+               detail=f"unsafe scope: {e}")
+        return UNSAFE_SCOPE
+    except H.HypothesisValidationError as e:
+        print(f"ERROR (validation): {e}", file=sys.stderr)
+        _audit(AUDIT_ACTION_EXP, single.get("--target", ""), VALIDATION_ERR,
+               detail=f"validation: {e}")
+        return VALIDATION_ERR
+    except H.LedgerWriteError as e:
+        print(f"ERROR (write): {e}", file=sys.stderr)
+        _audit(AUDIT_ACTION_EXP, single.get("--target", ""), VALIDATION_ERR,
+               detail=f"write failed: {e}")
+        return VALIDATION_ERR
+    except H.LedgerReadError as e:
+        print(f"ERROR (read): {e}", file=sys.stderr)
+        _audit(AUDIT_ACTION_EXP, single.get("--target", ""), VALIDATION_ERR,
+               detail=f"read failed: {e}")
+        return VALIDATION_ERR
+    except OSError as e:
+        # Read-only workspace, permission denied, disk full - the record was
+        # not written; surface a structured error instead of a raw traceback.
+        print(f"ERROR (write): {e}", file=sys.stderr)
+        _audit(AUDIT_ACTION_EXP, single.get("--target", ""), VALIDATION_ERR,
+               detail=f"write failed: {e}")
+        return VALIDATION_ERR
+    print(f"ADDED: {record['experiment_id']}")
+    print(f"HYPOTHESIS: {record['hypothesis_id']}")
+    print(f"RESULT: {record['result']}")
+    _audit(
+        AUDIT_ACTION_EXP, record.get("scope", {}).get("target", ""),
+        OK,
+        detail=(
+            f"experiment_id={record['experiment_id']} "
+            f"hypothesis_id={record['hypothesis_id']} result={record['result']}"
+        ),
+    )
+    return OK
+
+
+def cmd_rank(args: list[str]) -> int:
+    """Print the ranked worklist (markdown). Optionally read dead-end claims
+    from a file (one per line) to apply the novelty/dead-end penalty."""
+    value_flags = ("--workspace", "--dead-ends-file")
+    has_include = "--include-disconfirmed" in args
+    clean_args = [a for a in args if a != "--include-disconfirmed"]
+    single, _multi, rc = _parse_flags(clean_args, value_flags)
+    if rc != 0:
+        return rc
+    ws_dir = _resolve_workspace(single)
+    dead_end_claims: list[str] = []
+    dead_path = single.get("--dead-ends-file")
+    if dead_path:
+        if not Path(dead_path).is_file():
+            print(f"WARNING: --dead-ends-file {dead_path!r} not found - "
+                  f"dead-end penalty not applied", file=sys.stderr)
+        else:
+            try:
+                dead_end_claims = [
+                    line.strip()
+                    for line in Path(dead_path).read_text(encoding="utf-8").splitlines()
+                    if line.strip()
+                ]
+            except OSError as e:
+                print(f"WARNING: could not read --dead-ends-file {dead_path!r}: {e}",
+                      file=sys.stderr)
+    try:
+        md = H.render_worklist(
+            ws_dir,
+            dead_end_claims=dead_end_claims or None,
+            include_disconfirmed=has_include,
+        )
+    except H.LedgerReadError as e:
+        print(f"ERROR (read): {e}", file=sys.stderr)
+        _audit(AUDIT_ACTION_RANK, "", VALIDATION_ERR, detail=f"unreadable ledger: {e}")
+        return VALIDATION_ERR
+    sys.stdout.write(md)
+    _audit(AUDIT_ACTION_RANK, "", OK, detail="rendered worklist")
+    return OK
+
+
+def _read_error_guard(read: H.LedgerRead) -> int | None:
+    """Print a structured read error for an unreadable ledger and return the
+    error exit code (None when the ledger read was fine)."""
+    if read.read_error:
+        print(f"ERROR (read): {read.read_error}", file=sys.stderr)
+        return VALIDATION_ERR
+    return None
+
+
+def cmd_list(args: list[str]) -> int:
+    """List hypotheses (optionally filter by DERIVED status)."""
+    value_flags = ("--workspace", "--status")
+    single, _multi, rc = _parse_flags(args, value_flags)
+    if rc != 0:
+        return rc
+    ws_dir = _resolve_workspace(single)
+    read = H.list_hypotheses(ws_dir)
+    rc_read = _read_error_guard(read)
+    if rc_read is not None:
+        _audit(AUDIT_ACTION_LIST, "", VALIDATION_ERR, detail="unreadable ledger")
+        return rc_read
+    derived_statuses = {
+        H.DERIVED_UNVERIFIED, H.DERIVED_TESTING, H.DERIVED_CONFIRMED,
+        H.DERIVED_DISCONFIRMED, H.DERIVED_CONTRADICTORY, H.DERIVED_SUPERSEDED,
+    }
+    status_filter = single.get("--status")
+    if status_filter and status_filter not in derived_statuses:
+        print(f"--status must be one of {sorted(derived_statuses)}, "
+              f"got {status_filter!r}", file=sys.stderr)
+        return USAGE_ERR
+    rows = []
+    for r in read.records:
+        hid = str(r.get("hypothesis_id") or "")
+        if not H.HYPOTHESIS_ID_RE.match(hid):
+            continue
+        derived = H.derive_hypothesis_status(ws_dir, hid)
+        if status_filter and derived != status_filter:
+            continue
+        rows.append((hid, derived, r))
+    if not rows:
+        print("(no hypotheses)")
+        _audit(AUDIT_ACTION_LIST, "", OK, detail="no hypotheses")
+        return OK
+    print(f"{'ID':40}{'STATUS':14}{'PRIM':16}SURFACE")
+    for hid, derived, r in rows:
+        print(
+            f"{str(hid)[:40]:40}"
+            f"{str(derived)[:14]:14}"
+            f"{str(r.get('primitive_leverage'))[:16]:16}"
+            f"{str(r.get('surface'))}"
+        )
+    if read.skipped_lines:
+        print(f"WARNING: skipped {read.skipped_lines} malformed line(s) in hypotheses.jsonl",
+              file=sys.stderr)
+    _audit(AUDIT_ACTION_LIST, "", OK, detail=f"listed {len(rows)} hypotheses")
+    return OK
+
+
+def cmd_show(args: list[str]) -> int:
+    """Show one hypothesis + its experiments."""
+    value_flags = ("--workspace",)
+    single, _multi, rc = _parse_flags(args, value_flags)
+    if rc != 0:
+        return rc
+    pos = single.get("__pos__") or []
+    if not pos:
+        print("show requires a <hypothesis-id> argument", file=sys.stderr)
+        return USAGE_ERR
+    hid = pos[0]
+    ws_dir = _resolve_workspace(single)
+    hyp = H.get_hypothesis(ws_dir, hid)
+    if hyp is None:
+        print(f"hypothesis not found: {hid}", file=sys.stderr)
+        _audit(AUDIT_ACTION_SHOW, "", NOT_FOUND, detail=f"id={hid}")
+        return NOT_FOUND
+    import json
+    print(json.dumps(hyp, indent=2, sort_keys=True))
+    derived = H.derive_hypothesis_status(ws_dir, hid)
+    print(f"\nDERIVED STATUS: {derived}")
+    exps = H.experiments_for(ws_dir, hid)
+    if exps:
+        print(f"\nEXPERIMENTS ({len(exps)}):")
+        for e in exps:
+            prov = e.get("provenance")
+            actor = prov.get("actor") if isinstance(prov, dict) else "<invalid>"
+            print(
+                f"  {e.get('experiment_id')}: result={e.get('result')} "
+                f"actor={actor} ts={e.get('ts')}"
+            )
+    else:
+        print("\nEXPERIMENTS: (none)")
+    _audit(AUDIT_ACTION_SHOW, "", OK, detail=f"show id={hid} derived={derived}")
+    return OK
+
+
+def cmd_validate(args: list[str]) -> int:
+    """Integrity check: referential integrity + scope safety + shape
+    validation + malformed-line report. Read-only. Exit 0 when clean; 2 when
+    orphans, unsafe-scope, or shape-invalid records are found. Malformed
+    JSONL lines alone exit 0 with a warning (they do not break the ledger
+    read - the parser skips them) unless --strict is given: with --strict,
+    any malformed line fails the check (exit 2) and is listed."""
+    value_flags = ("--workspace",)
+    single, _multi, rc = _parse_flags(args, value_flags)
+    if rc != 0:
+        return rc
+    ws_dir = _resolve_workspace(single)
+    strict = single.get("--strict") == "true"
+    report = H.validate_ledger(ws_dir)
+    # Symlinked ledgers: _read_ledger returns an empty read (skipped_lines=0),
+    # so the malformed-line guard below would never fire. Detect symlinks
+    # directly so strict validate fails on a symlinked ledger (defense
+    # posture consistent with _read_ledger/_append_or_raise).
+    symlinked = [
+        fname for fname in ("hypotheses.jsonl", "experiments.jsonl")
+        if (ws_dir / ".lab" / fname).is_symlink()
+    ]
+    if symlinked:
+        print(f"symlinked ledger: {', '.join(symlinked)} (refusing to read)",
+              file=sys.stderr)
+    for rerr in report.read_errors:
+        print(f"ERROR (read): {rerr}", file=sys.stderr)
+    print(f"hypotheses: {report.hypotheses_count}")
+    print(f"experiments: {report.experiments_count}")
+    print(f"orphan experiments (bad hypothesis_id): {len(report.orphan_experiments)}")
+    for oid in report.orphan_experiments:
+        print(f"  ORPHAN: {oid}")
+    print(f"unsafe-scope records: {len(report.unsafe_scope_records)}")
+    for u in report.unsafe_scope_records:
+        print(f"  UNSAFE ({u.get('kind')}): id={u.get('id')} target={u.get('target')}")
+    print(f"shape-invalid records: {len(report.shape_invalid_records)}")
+    for s in report.shape_invalid_records:
+        print(f"  SHAPE-INVALID ({s.get('kind')}): id={s.get('id')} error={s.get('error')}")
+    if report.skipped_hypothesis_lines or report.skipped_experiment_lines:
+        print(
+            f"malformed JSONL: hypotheses={report.skipped_hypothesis_lines} "
+            f"experiments={report.skipped_experiment_lines}"
+        )
+        if strict:
+            for bad in _malformed_lines(ws_dir):
+                print(f"  MALFORMED ({bad.get('kind')}): line={bad.get('line')} "
+                      f"file={bad.get('path')} error={bad.get('error')}")
+    clean = (
+        not report.orphan_experiments
+        and not report.unsafe_scope_records
+        and not report.shape_invalid_records
+        and not symlinked
+        and not report.read_errors
+    )
+    if strict and (report.skipped_hypothesis_lines or report.skipped_experiment_lines):
+        clean = False
+    if not strict and (report.skipped_hypothesis_lines or report.skipped_experiment_lines):
+        # Malformed lines alone do not fail non-strict validate; warn instead.
+        print("warning: malformed lines present (use --strict to fail on them)")
+    _audit(
+        AUDIT_ACTION_VALIDATE, "",
+        OK if clean else VALIDATION_ERR,
+        detail=(
+            f"hyps={report.hypotheses_count} exps={report.experiments_count} "
+            f"orphans={len(report.orphan_experiments)} "
+            f"unsafe={len(report.unsafe_scope_records)} "
+            f"shape={len(report.shape_invalid_records)} "
+            f"strict={strict}"
+        ),
+    )
+    return OK if clean else VALIDATION_ERR
+
+
+def _malformed_lines(ws_dir: Path) -> list[dict[str, str]]:
+    """Re-read both ledgers line by line and report each line that does not
+    parse to a dict (strict mode listing)."""
+    import json
+
+    out: list[dict[str, str]] = []
+    for fname, kind in (("hypotheses.jsonl", "hypothesis"),
+                        ("experiments.jsonl", "experiment")):
+        path = ws_dir / ".lab" / fname
+        if not path.is_file():
+            continue
+        if path.is_symlink():
+            # Defense-in-depth: refuse to follow a symlinked ledger, matching
+            # _read_ledger / _append_or_raise posture.
+            out.append({"kind": kind, "line": "?", "path": fname,
+                        "error": "ledger path is a symlink, refusing to read"})
+            continue
+        try:
+            lines = path.read_text(encoding="utf-8").splitlines()
+        except OSError:
+            continue
+        for i, s in enumerate(lines, 1):
+            if not s.strip():
+                continue
+            try:
+                obj = json.loads(s)
+            except ValueError as e:
+                out.append({"kind": kind, "line": str(i), "path": fname,
+                            "error": str(e)})
+                continue
+            if not isinstance(obj, dict):
+                out.append({"kind": kind, "line": str(i), "path": fname,
+                            "error": "not a JSON object"})
+    return out
+
+
+# --- dispatch -----------------------------------------------------------------
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = list(argv if argv is not None else sys.argv[1:])
+    if not args or args[0] in ("-h", "--help"):
+        usage()
+        return OK
+    cmd = args[0]
+    rest = args[1:]
+    if cmd == "add":
+        return cmd_add(rest)
+    if cmd == "experiment":
+        return cmd_experiment(rest)
+    if cmd in ("rank", "worklist"):
+        return cmd_rank(rest)
+    if cmd == "list":
+        return cmd_list(rest)
+    if cmd == "show":
+        return cmd_show(rest)
+    if cmd == "validate":
+        return cmd_validate(rest)
+    print(f"Unknown command: {cmd}", file=sys.stderr)
+    usage()
+    return USAGE_ERR
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

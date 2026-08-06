@@ -1,0 +1,217 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://security-lab/schemas/experiment-v1.schema.json",
+  "title": "Experiment / Finding v1",
+  "description": "An experiment or finding record in the hypothesis-and-experiment ledger\n(lib/hypothesis.py). One JSON object per line in\n<workspace>/.lab/experiments.jsonl. The ledger is append-only.\n\nThe CRITICAL integrity gate (Shannon's .refine()-pinned referential IDs,\nreimplemented):\n  - experiment_id.hypothesis_id MUST reference an existing hypothesis_id in\n    hypotheses.jsonl. The library (`lib.hypothesis.add_experiment`) rejects\n    a hallucinated or duplicate id with a structured retryable error listing\n    the valid ids. The schema cannot enforce referential integrity by itself\n    (JSON Schema has no cross-document refs); the library is the sole owner.\n\nScanner/tool findings enter ONLY as unverified hypotheses\n(hypothesis-v1.schema.json, provenance.source = tool name, status =\n'unverified'). A scanner MUST NOT produce an experiment record with\nresult='corroborating' directly — that would bypass the agent/validator\nsplit. The lab's evidence gate (an experiment authored by the agent or a\ndeterministic replay harness) is the only thing that can corroborate.\n\nThe experiment record captures the FOUR proof-ladder levels (XBOW's pattern):\n  - result='corroborating': the violation_signal fired AND the\n    minimum_confirmation bar was met. Advances the hypothesis to confirmed.\n  - result='disconfirming': the expected_safe outcome fired OR a\n    disconfirming control matched. Advances the hypothesis to disconfirmed.\n  - result='inconclusive': the experiment ran but neither signal fired; the\n    hypothesis stays testing/unverified.\n  - result='contradictory': two experiments disagree; the ranker surfaces\n    the conflict rather than suppressing it (render-detect-contradictions).\n\nRequired: schema, experiment_id, hypothesis_id, workspace_id, engagement,\naction, observation, expected_safe_observed, violation_signal_observed,\nresult, scope, provenance, ts.\n\nDeduplication: the library dedupes experiments by\n(hypothesis_id, action, tool, actor, result, disconfirming_controls_checked).\nA re-run of the same hypothesis_id + action by the same tool and actor with\nthe same result and same disconfirming-controls state is a no-op (returns the\nexisting record) — it does not fragment the ledger. A re-test whose outcome\ndiffers, a different tool/actor, or a remediation re-record (disconfirming\ncontrols now ruled out) records a NEW experiment so higher-confidence\ncorroboration is never silently swallowed by a weaker prior record.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "experiment_id",
+    "hypothesis_id",
+    "workspace_id",
+    "engagement",
+    "action",
+    "observation",
+    "expected_safe_observed",
+    "violation_signal_observed",
+    "result",
+    "scope",
+    "provenance",
+    "ts"
+  ],
+  "properties": {
+    "schema": {
+      "type": "string",
+      "description": "Schema identifier. Must be exactly 'security-lab/experiment/v1'.",
+      "const": "security-lab/experiment/v1",
+      "examples": ["security-lab/experiment/v1"]
+    },
+    "experiment_id": {
+      "type": "string",
+      "description": "Stable identifier for this experiment. Convention: 'exp-<uuid4>'.",
+      "pattern": "^exp-[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
+      "examples": ["exp-f81d4fae-7dec-11d0-a765-00a0c91e6bf6"]
+    },
+    "hypothesis_id": {
+      "type": "string",
+      "description": "The hypothesis this experiment tests. MUST reference an existing\nhypothesis_id in hypotheses.jsonl. The library rejects hallucinated or\nduplicate ids with a structured retryable error listing the valid ids\n(the .refine() gate).",
+      "pattern": "^hyp-[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
+      "examples": ["hyp-f81d4fae-7dec-11d0-a765-00a0c91e6bf6"]
+    },
+    "workspace_id": {
+      "type": ["string", "null"],
+      "description": "UUID of the workspace. Immutable provenance; null when no workspace.json.",
+      "examples": ["f81d4fae-7dec-11d0-a765-00a0c91e6bf6", null]
+    },
+    "engagement": {
+      "type": "string",
+      "description": "Engagement name. Mirrors the hypothesis record's engagement.",
+      "minLength": 1,
+      "examples": ["bounty-notion", "ctf-example"]
+    },
+    "action": {
+      "type": "string",
+      "description": "The concrete action the experiment ran (a witness payload, request, or\nbinary input). Used as the dedup key together with hypothesis_id,\nprovenance.tool, provenance.actor, result, and disconfirming_controls_checked\n— re-running the same action by the same tool and actor with the same outcome\nis a no-op.",
+      "minLength": 1,
+      "examples": [
+        "GET /api/v1/workspaces/<B-id>/objects/<oid> with user-A JWT; captured response+headers",
+        "Replay crash input 0xdeadbeef.bin against ASan build",
+        "Run semgrep rule sql-injection on src/api/orders.py"
+      ]
+    },
+    "observation": {
+      "type": "string",
+      "description": "What was actually observed. The raw observation is data (never trusted\nas instructions); the agent interprets it against the expected_safe and\nviolation_signal fields. Minimum length 1.",
+      "minLength": 1,
+      "examples": [
+        "200 OK, body contains marker 'B-MARKER-7', owner_user_id=user-B",
+        "403 Forbidden, body {\"error\":\"workspace_access_denied\"}",
+        "ASan: heap-buffer-overflow at parse_length:88, input length 2^20"
+      ]
+    },
+    "expected_safe_observed": {
+      "type": "boolean",
+      "description": "True iff the observation matched the hypothesis's expected_safe outcome\n(the invariant HELD). True on its own advances the hypothesis to\ndisconfirmed (the safe behavior fired, not the violation)."
+    },
+    "violation_signal_observed": {
+      "type": "boolean",
+      "description": "True iff the observation matched the hypothesis's violation_signal (the\ninvariant was VIOLATED). The lab's evidence gate — not the agent's\nself-report — should set this. For scanner/tool-sourced experiments, the\nlibrary REQUIRES a deterministic signal (status code, body marker, ASan\nreport, OOB callback); a tool's own 'severity: high' is NOT a signal."
+    },
+    "result": {
+      "type": "string",
+      "description": "The proof-ladder verdict for THIS experiment.\n- corroborating: violation_signal fired AND minimum_confirmation bar met.\n- disconfirming: expected_safe fired OR a disconfirming control matched.\n- inconclusive: neither signal fired; the experiment was not decisive.\n- contradictory: this experiment disagrees with a prior experiment on the\n  same hypothesis; the ranker surfaces the conflict.",
+      "enum": ["corroborating", "disconfirming", "inconclusive", "contradictory"],
+      "examples": ["corroborating", "disconfirming", "inconclusive"]
+    },
+    "scope": {
+      "type": "object",
+      "description": "Immutable scope/workspace provenance. The library REJECTS records where a\ntarget is involved (scope.target non-empty) and scope_checked is not true.\nThis preserves the lab's default-deny scope gate (AGENTS.md) — a finding\nagainst an out-of-scope target cannot be recorded.",
+      "additionalProperties": false,
+      "required": ["scope_checked", "target", "engagement_scope_ref"],
+      "properties": {
+        "scope_checked": {
+          "type": "boolean",
+          "description": "True iff lab-scope was run against scope.target and returned 0 (in-scope)."
+        },
+        "target": {
+          "type": "string",
+          "description": "The target URL/host/path the experiment ran against. Empty string when\nthe experiment is source-only or local (e.g. a fuzz harness run against a\nlocal binary).",
+          "default": "",
+          "examples": ["https://api.example.com", ""]
+        },
+        "engagement_scope_ref": {
+          "type": "string",
+          "description": "Reference to the scope snapshot used. 'none' for source-only/local.",
+          "examples": ["engagements/bounty-notion.yaml", "none"]
+        }
+      }
+    },
+    "provenance": {
+      "type": "object",
+      "description": "Who/what ran the experiment.",
+      "additionalProperties": false,
+      "required": ["actor", "agent"],
+      "properties": {
+        "actor": {
+          "type": "string",
+          "description": "The kind of actor that ran the experiment. 'agent' for an LLM agent,\n'replay-harness' for a deterministic replay fixture, 'fuzz-harness' for a\nfuzzer, 'tool' for a direct tool execution. Distinguishes the proof ladder\nlevel the experiment represents.",
+          "minLength": 1,
+          "examples": ["agent", "replay-harness", "fuzz-harness", "tool"]
+        },
+        "agent": {
+          "type": "string",
+          "description": "Agent name or tool name that ran the experiment.",
+          "minLength": 1,
+          "examples": ["opencode", "claude", "lab-replay", "aflpp"]
+        },
+        "tool": {
+          "type": ["string", "null"],
+          "description": "When the experiment was run via a specific tool (curl, lab-replay, AFL++),\nthe tool name; null for an agent-authored pure-reasoning experiment. Used as\npart of the dedup key (hypothesis_id, action, tool, actor, result,\ndisconfirming_controls_checked).",
+          "examples": ["curl", "lab-replay", "aflpp", null]
+        },
+        "replay_fixture": {
+          "type": ["string", "null"],
+          "description": "For replay-harness experiments: path to the deterministic replay fixture\n(e.g. 'evidence/replay-<id>.json'). null for non-replay experiments.",
+          "examples": ["evidence/replay-hyp-1234.json", null]
+        }
+      }
+    },
+    "ts": {
+      "type": "string",
+      "description": "ISO 8601 UTC timestamp the experiment was recorded.",
+      "format": "date-time",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(Z|[+-]\\d{2}:\\d{2})$",
+      "examples": ["2026-08-03T12:10:00Z"]
+    },
+    "evidence_refs": {
+      "type": "array",
+      "description": "Evidence file references captured by this experiment (paths under\n<workspace>/evidence/). For an HTTP experiment this would be the\n3-file bundle (.bin/.b64.txt/.json) from http_probe.save_response.",
+      "items": {"type": "string", "minLength": 1},
+      "default": [],
+      "examples": [["evidence/20260803/idor-replay-1.json"]]
+    },
+    "disconfirming_controls_checked": {
+      "type": "string",
+      "description": "For corroborating results: which disconfirming controls from the hypothesis\nwere checked and ruled out (the XP-proof ladder disconfirmation gate).\nEmpty string for inconclusive/disconfirming results. The library requires\nthis to be non-empty when result='corroborating' AND the hypothesis has a\nnon-empty disconfirming_controls field — the agent cannot claim a hit\nwithout addressing the false-positive controls.",
+      "default": "",
+      "examples": [
+        "Cache-Control: no-store confirmed (not cached); user-A and user-B verified distinct via /me."
+      ]
+    }
+  },
+  "examples": [
+    {
+      "schema": "security-lab/experiment/v1",
+      "experiment_id": "exp-f81d4fae-7dec-11d0-a765-00a0c91e6bf6",
+      "hypothesis_id": "hyp-f81d4fae-7dec-11d0-a765-00a0c91e6bf6",
+      "workspace_id": "a1b2c3d4-0000-0000-0000-000000000001",
+      "engagement": "bounty-notion",
+      "action": "GET /api/v1/workspaces/<B-id>/objects/<oid> with user-A JWT; captured response+headers",
+      "observation": "200 OK, body contains marker 'B-MARKER-7', owner_user_id=user-B",
+      "expected_safe_observed": false,
+      "violation_signal_observed": true,
+      "result": "corroborating",
+      "scope": {
+        "scope_checked": true,
+        "target": "https://api.example.com",
+        "engagement_scope_ref": "engagements/bounty-notion.yaml"
+      },
+      "provenance": {
+        "actor": "agent",
+        "agent": "opencode",
+        "tool": "curl",
+        "replay_fixture": null
+      },
+      "ts": "2026-08-03T12:10:00Z",
+      "evidence_refs": ["evidence/20260803/idor-replay-1.json"],
+      "disconfirming_controls_checked": "Cache-Control: no-store confirmed (not cached); user-A and user-B verified distinct via /me."
+    },
+    {
+      "schema": "security-lab/experiment/v1",
+      "experiment_id": "exp-12345678-1234-1234-1234-1234567890ab",
+      "hypothesis_id": "hyp-12345678-1234-1234-1234-123456789012",
+      "workspace_id": null,
+      "engagement": "cve-log4j",
+      "action": "Replay crash input 0xdeadbeef.bin against ASan build",
+      "observation": "403 Forbidden, body {\"error\":\"parse_length assertion failed\"}",
+      "expected_safe_observed": true,
+      "violation_signal_observed": false,
+      "result": "disconfirming",
+      "scope": {
+        "scope_checked": false,
+        "target": "",
+        "engagement_scope_ref": "none"
+      },
+      "provenance": {
+        "actor": "replay-harness",
+        "agent": "lab-replay",
+        "tool": "lab-replay",
+        "replay_fixture": "evidence/replay-hyp-1234.json"
+      },
+      "ts": "2026-08-03T12:15:00Z",
+      "evidence_refs": ["evidence/20260803/replay-disconfirm.json"],
+      "disconfirming_controls_checked": ""
+    }
+  ]
+}

@@ -1,0 +1,297 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://security-lab/schemas/hypothesis-v1.schema.json",
+  "title": "Hypothesis v1",
+  "description": "A typed, falsifiable security hypothesis in the hypothesis-and-experiment\nledger (lib/hypothesis.py). One JSON object per line in\n<workspace>/.lab/hypotheses.jsonl. The ledger is append-only; the status\nfield advances via status-transition experiments (see experiment-v1), never\nby mutating an existing line.\n\nDesign lineage (transferable mechanisms, reimplemented not copied):\n  - Shannon's `.refine()`-pinned referential IDs: every experiment/finding\n    MUST reference an existing hypothesis_id; a hallucinated or duplicate id\n    is rejected with a retryable structured error listing the valid ids.\n  - Shannon's exploitation_queue taxonomy: falsifiable, sink-aware format\n    forcing the author to name the sink, the mutation, the expected-safe\n    result, the violating signal, and the minimum confirmation that would\n    DISCONFIRM the hypothesis. Scanner output enters only as an unverified\n    hypothesis, never a verdict.\n  - PentestAgent's decomposed exploitability rubric feeds the deterministic\n    ranking (primitive_leverage x scope_safety x novelty x impact_potential\n    x (1 - known_dead_end_penalty)); see lib/hypothesis.rank().\n  - XBOW's agent/validator split: a hypothesis is a CLAIM; the lab's\n    evidence gate (not the authoring agent) decides whether it is confirmed.\n\nRequired fields (the falsifiable core):\n  schema, hypothesis_id, workspace_id, engagement, invariant, surface,\n  preconditions, mutation, expected_safe, violation_signal, minimum_confirmation,\n  disconfirming_controls, primitive_leverage, status, scope, provenance, ts.\n\nstatus transitions (ranker/agent reads; the ledger never deletes):\n  unverified -> testing -> confirmed | disconfirmed | superseded\n  A scanner/tool finding always enters as unverified. The ranker will not\n  surface a confirmed hypothesis unless at least one experiment/finding record\n  (experiment-v1.schema.json) references it with a corroborating result.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "hypothesis_id",
+    "workspace_id",
+    "engagement",
+    "invariant",
+    "surface",
+    "preconditions",
+    "mutation",
+    "expected_safe",
+    "violation_signal",
+    "minimum_confirmation",
+    "disconfirming_controls",
+    "primitive_leverage",
+    "status",
+    "scope",
+    "provenance",
+    "ts"
+  ],
+  "properties": {
+    "schema": {
+      "type": "string",
+      "description": "Schema identifier. Must be exactly 'security-lab/hypothesis/v1'.",
+      "const": "security-lab/hypothesis/v1",
+      "examples": ["security-lab/hypothesis/v1"]
+    },
+    "hypothesis_id": {
+      "type": "string",
+      "description": "Stable identifier. Convention: 'hyp-<uuid4>'. This is the referential key\nexperiments/finding records pin to (the .refine() gate).",
+      "pattern": "^hyp-[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
+      "examples": ["hyp-f81d4fae-7dec-11d0-a765-00a0c91e6bf6"]
+    },
+    "workspace_id": {
+      "type": ["string", "null"],
+      "description": "UUID of the workspace from <workspace>/.lab/workspace.json, or null when\nthe workspace has no workspace.json. Immutable provenance — once written,\nthe ledger never changes this field.",
+      "examples": ["f81d4fae-7dec-11d0-a765-00a0c91e6bf6", null]
+    },
+    "engagement": {
+      "type": "string",
+      "description": "Engagement name (e.g. 'bounty-notion', 'ctf-example', 'cve-log4j').\nImmutable provenance; ties the hypothesis to a scope file.",
+      "minLength": 1,
+      "examples": ["bounty-notion", "ctf-example", "cve-log4j"]
+    },
+    "invariant": {
+      "type": "string",
+      "description": "The security invariant the hypothesis claims is violated. One falsifiable\nsentence naming what SHOULD hold (the expected-safe property), so the\nexperiment can disconfirm it. Example: 'A user may only read objects owned\nby their workspace.'",
+      "minLength": 1,
+      "examples": ["A user may only read objects owned by their workspace."]
+    },
+    "surface": {
+      "type": "string",
+      "description": "The attack surface / component under test. Concrete enough to dedupe\nagainst: endpoint, file:line, function, parameter, binary, etc.",
+      "minLength": 1,
+      "examples": ["GET /api/v1/workspaces/<id>/objects/<oid>", "src/auth/jwt.go:142 VerifyToken"]
+    },
+    "preconditions": {
+      "type": "object",
+      "description": "Actor/resource preconditions that must hold before the mutation. Captures\nthe multi-account / stateful setup that IDOR and business-logic bugs require\n(the gap the competitor report flags for the whole field).",
+      "additionalProperties": false,
+      "required": ["actor"],
+      "properties": {
+        "actor": {
+          "type": "string",
+          "description": "The actor performing the mutation (e.g. 'user-A (low-priv)', 'attacker\nunauthenticated', 'fuzz harness').",
+          "minLength": 1,
+          "examples": ["user-A (low-priv)", "attacker unauthenticated"]
+        },
+        "target_resource": {
+          "type": ["string", "null"],
+          "description": "The resource being acted on (e.g. 'object owned by user-B', 'endpoint\nrequiring admin'). null when the mutation does not target a specific\nresource.",
+          "examples": ["object owned by user-B", null]
+        },
+        "auth_state": {
+          "type": ["string", "null"],
+          "description": "Required auth/session state (e.g. 'valid JWT for user-A', 'no session').\nnull when auth is not relevant.",
+          "examples": ["valid JWT for user-A", null]
+        },
+        "environment": {
+          "type": ["string", "null"],
+          "description": "Environment preconditions (e.g. 'target on localhost:8080', 'Docker\nsandbox with --network none'). null when not applicable.",
+          "examples": ["target on localhost:8080", null]
+        }
+      }
+    },
+    "mutation": {
+      "type": "string",
+      "description": "The mutation/test action the hypothesis says will violate the invariant.\nConcrete enough that an experiment can replay it (a witness payload or\nrequest shape). Names the sink where applicable.",
+      "minLength": 1,
+      "examples": [
+        "GET /api/v1/workspaces/<B-id>/objects/<oid> with user-A's JWT (cross-workspace read)",
+        "Submit order confirm step skipping the payment step"
+      ]
+    },
+    "expected_safe": {
+      "type": "string",
+      "description": "What the system should return/do when the invariant HOLDS (the control\noutcome). The experiment compares the observed result to this.",
+      "minLength": 1,
+      "examples": [
+        "403 Forbidden with body {\"error\":\"workspace_access_denied\"}",
+        "Order remains in 'awaiting_payment' state; confirm endpoint rejects"
+      ]
+    },
+    "violation_signal": {
+      "type": "string",
+      "description": "The observable signal that would indicate the invariant is VIOLATED. Must\nbe machine-checkable where possible (status code, body marker, state diff,\nOOB callback, crash). This is the oracle — the agent's self-report is not\nsufficient; the experiment must capture this signal independently.",
+      "minLength": 1,
+      "examples": [
+        "200 OK with body containing user-B's marker AND owner_user_id == user-B",
+        "GET /api/v1/orders/<id> returns state=confirmed with confirmed_at set",
+        "interactsh callback observed within 30s of payload"
+      ]
+    },
+    "minimum_confirmation": {
+      "type": "string",
+      "description": "The minimum evidence that would CONFIRM the violation (the bar to move\nstatus to 'confirmed'). Names the independent signal — never 'the agent\nsaid so'. Mirrors XBOW's deterministic validator + canary SHA256 + OOB\ncallback proof ladder.",
+      "minLength": 1,
+      "examples": [
+        "Cross-session request returns user-B's controlled marker AND owner_user_id verified as user-B's (not just a 200).",
+        "Replay against a fresh instance produces the same state transition; pre/post hashes match the fixture."
+      ]
+    },
+    "disconfirming_controls": {
+      "type": "string",
+      "description": "Controls or alternative explanations the experiment must rule out before\nclaiming confirmation (the disconfirmation gate). Forces the author to\nname what would make a positive signal a false positive (cached response,\nWAF rewrite, shared account, test fixture). Empty string when none apply.",
+      "default": "",
+      "examples": [
+        "Response is not cached (Cache-Control: no-store); user-A and user-B are distinct accounts, not the same session.",
+        ""
+      ]
+    },
+    "primitive_leverage": {
+      "type": "string",
+      "description": "Coarse leverage category feeding the deterministic ranker\n(lib.hypothesis.rank). Maps to PentestAgent's impact ladder.\n- state_changing: 1.0 (writes/creates/deletes/escalates)\n- read_only: 0.5 (reads data but does not change state)\n- theoretical: 0.1 (no demonstrated primitive yet)",
+      "enum": ["state_changing", "read_only", "theoretical"],
+      "examples": ["state_changing", "read_only"]
+    },
+    "status": {
+      "type": "string",
+      "description": "Lifecycle status. Scanner/tool findings always enter as 'unverified'.\nTransitions: unverified -> testing -> confirmed | disconfirmed | superseded.\nA hypothesis is 'confirmed' ONLY when an experiment record\n(experiment-v1.schema.json) references it with result='corroborating' and\nthe minimum_confirmation bar is met. The ledger never deletes; superseded\nkeeps the line for audit.",
+      "enum": ["unverified", "testing", "confirmed", "disconfirmed", "superseded"],
+      "examples": ["unverified", "testing", "confirmed"]
+    },
+    "scope": {
+      "type": "object",
+      "description": "Immutable scope/workspace provenance. The ranker REJECTS records where a\ntarget is involved and scope_checked is not true — preserving the lab's\ndefault-deny scope gate (AGENTS.md). A target is 'involved' when\nscope.target is a non-empty URL/host (source-only review may set target\nto '' and scope_checked to false).",
+      "additionalProperties": false,
+      "required": ["scope_checked", "target", "engagement_scope_ref"],
+      "properties": {
+        "scope_checked": {
+          "type": "boolean",
+          "description": "True iff lab-scope was run against scope.target and returned 0 (in-scope).\nThe ranker rejects target-bearing records with scope_checked=false."
+        },
+        "target": {
+          "type": "string",
+          "description": "The target URL/host/path the hypothesis is about. Empty string when the\nhypothesis is source-only or abstract (no live target).",
+          "default": "",
+          "examples": ["https://api.example.com", "src/auth/jwt.go", ""]
+        },
+        "engagement_scope_ref": {
+          "type": "string",
+          "description": "Reference to the scope snapshot used (engagement file path, or 'none' for\nsource-only). Immutable provenance — ties the record to the scope file it\nwas validated against.",
+          "examples": ["engagements/bounty-notion.yaml", "none"]
+        }
+      }
+    },
+    "provenance": {
+      "type": "object",
+      "description": "Who/what produced this hypothesis. Scanner/tool findings enter as\nunverified hypotheses with provenance.source = the tool name; the lab never\ntreats a tool finding as a verdict.",
+      "additionalProperties": false,
+      "required": ["source", "agent"],
+      "properties": {
+        "source": {
+          "type": "string",
+          "description": "Origin of the hypothesis. 'manual' for agent-authored; a tool name\n('semgrep','nuclei','httpx','browser','fuzz','strix') for scanner/tool\nfindings. Tool-sourced records always enter as status='unverified'.",
+          "minLength": 1,
+          "examples": ["manual", "semgrep", "nuclei", "strix"]
+        },
+        "agent": {
+          "type": "string",
+          "description": "Agent name (e.g. 'opencode', 'claude') or the tool name when the tool\nproduced the record directly.",
+          "minLength": 1,
+          "examples": ["opencode", "semgrep"]
+        },
+        "tool_rule_id": {
+          "type": ["string", "null"],
+          "description": "For tool-sourced records: the rule id (semgrep check_id, nuclei template\nid). null for manual hypotheses.",
+          "examples": ["python.django.security.injection.sql-injection", null]
+        },
+        "raw_ref": {
+          "type": ["string", "null"],
+          "description": "Path to the raw tool finding kept for provenance (e.g.\n'evidence/recon/semgrep.sarif'). The raw payload is never trusted; it is\nkept so a reviewer can re-inspect. null for manual hypotheses.",
+          "examples": ["evidence/recon/semgrep.sarif", null]
+        }
+      }
+    },
+    "ts": {
+      "type": "string",
+      "description": "ISO 8601 UTC timestamp the hypothesis was recorded.",
+      "format": "date-time",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(Z|[+-]\\d{2}:\\d{2})$",
+      "examples": ["2026-08-03T12:00:00Z"]
+    },
+    "evidence_refs": {
+      "type": "array",
+      "description": "Evidence file references that support the hypothesis (paths under\n<workspace>/evidence/). Empty for a fresh unverified hypothesis; grows as\nexperiments are recorded.",
+      "items": {"type": "string", "minLength": 1},
+      "default": [],
+      "examples": [["evidence/20260803/idor-replay-1.json"]]
+    },
+    "tags": {
+      "type": "array",
+      "description": "Free-form tags for query filtering (e.g. ['idor','authz','business-logic']).\nNot used for ranking.",
+      "items": {"type": "string", "minLength": 1},
+      "default": [],
+      "examples": [["idor", "authz"]]
+    }
+  },
+  "examples": [
+    {
+      "schema": "security-lab/hypothesis/v1",
+      "hypothesis_id": "hyp-f81d4fae-7dec-11d0-a765-00a0c91e6bf6",
+      "workspace_id": "a1b2c3d4-0000-0000-0000-000000000001",
+      "engagement": "bounty-notion",
+      "invariant": "A user may only read objects owned by their workspace.",
+      "surface": "GET /api/v1/workspaces/<id>/objects/<oid>",
+      "preconditions": {
+        "actor": "user-A (low-priv)",
+        "target_resource": "object owned by user-B",
+        "auth_state": "valid JWT for user-A",
+        "environment": "target on https://api.example.com (in-scope)"
+      },
+      "mutation": "GET /api/v1/workspaces/<B-id>/objects/<oid> with user-A's JWT (cross-workspace read)",
+      "expected_safe": "403 Forbidden with body {\"error\":\"workspace_access_denied\"}",
+      "violation_signal": "200 OK with body containing user-B's marker AND owner_user_id == user-B",
+      "minimum_confirmation": "Cross-session request returns user-B's controlled marker AND owner_user_id verified as user-B's (not just a 200).",
+      "disconfirming_controls": "Response is not cached (Cache-Control: no-store); user-A and user-B are distinct accounts, not the same session.",
+      "primitive_leverage": "read_only",
+      "status": "unverified",
+      "scope": {
+        "scope_checked": true,
+        "target": "https://api.example.com",
+        "engagement_scope_ref": "engagements/bounty-notion.yaml"
+      },
+      "provenance": {
+        "source": "manual",
+        "agent": "opencode",
+        "tool_rule_id": null,
+        "raw_ref": null
+      },
+      "ts": "2026-08-03T12:00:00Z",
+      "evidence_refs": [],
+      "tags": ["idor", "authz"]
+    },
+    {
+      "schema": "security-lab/hypothesis/v1",
+      "hypothesis_id": "hyp-12345678-1234-1234-1234-123456789012",
+      "workspace_id": null,
+      "engagement": "cve-log4j",
+      "invariant": "The parser rejects inputs larger than the configured max length.",
+      "surface": "src/parser/decode.c:88 parse_length",
+      "preconditions": {
+        "actor": "fuzz harness",
+        "target_resource": null,
+        "auth_state": null,
+        "environment": "Docker sandbox with --network none, ASan build"
+      },
+      "mutation": "Feed an input of length 2^20 with a length prefix claiming 2^16.",
+      "expected_safe": "parse_length returns -1; no allocation occurs.",
+      "violation_signal": "Heap buffer overflow reported by ASan (crash with stack trace at parse_length:88).",
+      "minimum_confirmation": "Replay of the crash input against a fresh ASan build reproduces the ASan report at the same source location.",
+      "disconfirming_controls": "",
+      "primitive_leverage": "state_changing",
+      "status": "unverified",
+      "scope": {
+        "scope_checked": false,
+        "target": "",
+        "engagement_scope_ref": "none"
+      },
+      "provenance": {
+        "source": "semgrep",
+        "agent": "semgrep",
+        "tool_rule_id": "c.lang.buffer.overflow.fixed-length-buffer",
+        "raw_ref": "evidence/recon/semgrep.sarif"
+      },
+      "ts": "2026-08-03T12:05:00Z",
+      "evidence_refs": [],
+      "tags": ["memory-corruption", "parser"]
+    }
+  ]
+}
