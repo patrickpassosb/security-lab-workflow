@@ -333,6 +333,30 @@ def _ledger_lock(workspace_dir: Path | str):
                 fcntl.flock(f.fileno(), fcntl.LOCK_UN)
 
 
+class LedgerWriteError(RuntimeError):
+    """Raised when an append to a ledger file did not persist (e.g. the
+    ledger path is a symlink and the write was refused). The record was NOT
+    durably recorded - callers must surface this instead of reporting a
+    successful add."""
+
+
+def _append_or_raise(path: Path, record: dict[str, Any]) -> None:
+    """Append `record` to the ledger, raising `LedgerWriteError` when the
+    append did not occur (labutil.atomic_append_jsonl silently refuses
+    symlinked paths - an append-only evidence ledger must never report a
+    phantom record as persisted)."""
+    if path.is_symlink():
+        raise LedgerWriteError(
+            f"ledger path is a symlink, refusing to write: {path} "
+            "(record NOT persisted)"
+        )
+    labutil.atomic_append_jsonl(path, record)
+    if not path.is_file() or path.is_symlink():
+        raise LedgerWriteError(
+            f"ledger append did not persist: {path} (record NOT written)"
+        )
+
+
 def _read_ledger(path: Path) -> LedgerRead:
     """Parse a JSONL ledger, returning valid dicts and a skipped-line count.
 
@@ -381,7 +405,14 @@ def hypothesis_dedup_key(record: dict[str, Any]) -> str:
     """The deterministic dedup key for a hypothesis:
     (workspace_id|none, engagement, surface, invariant, mutation).
     Two hypotheses with the same key are the same test - the second add is a
-    no-op that returns the existing record."""
+    no-op that returns the existing record.
+
+    Known behavior (documented, no change): the key excludes `status`, so
+    re-adding a SUPERSEDED hypothesis returns the superseded record - the
+    add path cannot re-open a superseded lifecycle. Re-testing a superseded
+    hypothesis requires a new hypothesis (different invariant/mutation
+    wording) or an explicit supersede-reversal flow, neither of which the
+    append-only ledger supports by design."""
     ws = str(record.get("workspace_id") or "none")
     eng = str(record.get("engagement") or "")
     surface = str(record.get("surface") or "")
@@ -722,7 +753,7 @@ def add_hypothesis(
             if hypothesis_dedup_key(prior) == key:
                 # Idempotent no-op - return the existing hypothesis.
                 return prior
-        labutil.atomic_append_jsonl(ledger, record)
+        _append_or_raise(ledger, record)
     return record
 
 
@@ -842,7 +873,7 @@ def add_experiment(
                         f"(same action + tool)"
                     )
                 return prior
-        labutil.atomic_append_jsonl(exp_ledger, record)
+        _append_or_raise(exp_ledger, record)
     return record
 
 
@@ -901,6 +932,13 @@ def derive_hypothesis_status(
         (superseded is the only status the author sets directly, e.g. when a
         later hypothesis replaces this one; it survives derivation.)
 
+    Scanner-verdict exclusion (module invariant #3): experiment records with
+    provenance.actor="tool" and a verdict result (corroborating/disconfirming)
+    are excluded from derivation - a legacy/hand-edited tool verdict never
+    drives the status to a terminal state (validate surfaces such records as
+    SHAPE-INVALID). If only tool verdicts exist, the status falls back to
+    "unverified" (or "testing" if inconclusive records exist).
+
     The function never edits the ledger. It only reads.
     """
     hyp = get_hypothesis(workspace_dir, hypothesis_id)
@@ -917,7 +955,13 @@ def _impact_score(record: dict[str, Any]) -> float:
     """Coarse impact-potential heuristic by tag / keyword (no LLM call).
 
     A schema-constrained LLM triage could replace this; for now we use the
-    tag set + surface invariant keywords. Falls back to _DEFAULT_IMPACT."""
+    tag set + surface invariant keywords. Falls back to _DEFAULT_IMPACT.
+
+    Known behavior (documented, no change): the FIRST matching tag in list
+    order wins, so ['low','critical'] scores lower than ['critical','low'].
+    Tags are author-ordered free text; rank determinism holds per identical
+    record, not across differently-tagged duplicates of the same finding.
+    """
     tags = record.get("tags") or []
     if isinstance(tags, list):
         for t in tags:
@@ -1151,16 +1195,16 @@ _MIN_CONF_QUAL_RE = re.compile(
 _MIN_CONF_COUNT_RE = re.compile(
     r"^(\d+)\s+(?:\S+\s+){0,2}(?:corroborat\w*|confirm\w*|experiment\w*|"
     r"replic\w*|times?|repeats?|hits?|sessions?|runs?|callbacks?|"
-    r"observations?|probes?|replays?|requests?|attempts?|samples?|markers?|"
-    r"tests?|checks?|signals?|witnesses?|proofs?|verifications?)\b",
+    r"observations?|probes?|replays?|requests?|responses?|attempts?|samples?|"
+    r"markers?|tests?|checks?|signals?|witness(?:es)?|proofs?|verifications?)\b",
     re.IGNORECASE,
 )
 _MIN_CONF_WORD_HEAD_RE = re.compile(
     r"^(one|two|three|four|five|six|seven|eight|nine|ten)\s+"
     r"(?:\S+\s+){0,2}(?:corroborat\w*|confirm\w*|experiment\w*|replic\w*|"
     r"times?|repeats?|hits?|sessions?|runs?|callbacks?|observations?|probes?|"
-    r"replays?|requests?|attempts?|samples?|markers?|tests?|checks?|signals?|"
-    r"witnesses?|proofs?|verifications?)\b",
+    r"replays?|requests?|responses?|attempts?|samples?|markers?|tests?|checks?|"
+    r"signals?|witness(?:es)?|proofs?|verifications?)\b",
     re.IGNORECASE,
 )
 _MIN_CONF_WORD_COUNTS: dict[str, int] = {
@@ -1231,11 +1275,33 @@ def _derive_status_from(hyp: dict[str, Any], exps: list[dict[str, Any]]) -> str:
         return DERIVED_SUPERSEDED
     if not exps:
         return DERIVED_UNVERIFIED
-    has_c = any(e.get("result") == RESULT_CORROBORATING for e in exps)
-    has_d = any(e.get("result") == RESULT_DISCONFIRMING for e in exps)
+    # Scanner-verdict exclusion (module invariant #3): a legacy/hand-edited
+    # record with actor='tool' and a verdict result must NOT drive the derived
+    # status (or ranking) to a terminal state - a tool can never kill a
+    # hypothesis with a single flaky record. Validate surfaces such records
+    # as SHAPE-INVALID; derivation treats them as if absent.
+    def _verdict_records():
+        for e in exps:
+            if e.get("result") not in (RESULT_CORROBORATING, RESULT_DISCONFIRMING):
+                continue
+            prov = e.get("provenance")
+            actor = str(prov.get("actor") or "").strip().lower() if isinstance(prov, dict) else ""
+            if actor == "tool":
+                continue
+            yield e
+
+    verdicts = list(_verdict_records())
+    if not verdicts:
+        # Only tool verdicts (or inconclusive-only) present: nothing drove a
+        # state change. Inconclusive experiments keep the hypothesis testing.
+        inconclusive = [e for e in exps
+                        if e.get("result") == RESULT_INCONCLUSIVE]
+        return DERIVED_TESTING if inconclusive else DERIVED_UNVERIFIED
+    has_c = any(e.get("result") == RESULT_CORROBORATING for e in verdicts)
+    has_d = any(e.get("result") == RESULT_DISCONFIRMING for e in verdicts)
     if has_c and has_d:
         return DERIVED_CONTRADICTORY
-    if has_c and _corroborations_meet_bar(hyp, exps):
+    if has_c and _corroborations_meet_bar(hyp, verdicts):
         return DERIVED_CONFIRMED
     if has_c:
         return DERIVED_TESTING
@@ -1475,6 +1541,7 @@ __all__ = [
     "ScannerVerdictError",
     "HypothesisNotFoundError",
     "DuplicateExperimentError",
+    "LedgerWriteError",
     "LedgerRead",
     "RankedHypothesis",
     "LedgerIntegrityReport",

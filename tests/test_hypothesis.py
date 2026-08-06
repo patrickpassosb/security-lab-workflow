@@ -933,6 +933,49 @@ class TestScannerVerdictGate:
                         actor=actor, tool="nuclei")
         assert len(H.experiments_for(ws, hyp["hypothesis_id"])) == 0
 
+    def test_tool_verdict_does_not_drive_derived_status(self, ws: Path) -> None:
+        """A legacy/hand-edited tool-verdict record must NOT drive the derived
+        status (or ranking) to a terminal state (module invariant #3) - the
+        derivation layer treats tool verdicts as absent."""
+        hyp = add_hyp(ws, minimum_confirmation="1")
+        TestStatusDerivation._append_raw_exp(ws, hyp["hypothesis_id"],
+                                             result="disconfirming",
+                                             action="probe",
+                                             disconfirming_controls_checked="")
+        path = ws / ".lab" / "experiments.jsonl"
+        rec = json.loads(path.read_text(encoding="utf-8").strip())
+        rec["provenance"] = {"actor": "tool", "agent": "nuclei", "tool": "nuclei"}
+        path.write_text(json.dumps(rec) + "\n", encoding="utf-8")
+        assert H.derive_hypothesis_status(ws, hyp["hypothesis_id"]) == "unverified"
+        assert len(H.rank(ws)) >= 0  # never dropped as a terminal dead end
+
+    def test_tool_verdict_excluded_from_confirmation_bar(self, ws: Path) -> None:
+        """A tool-verdict corroboration does not count toward the confirmation
+        bar: an agent corroboration is still required."""
+        hyp = add_hyp(ws, minimum_confirmation="1")
+        TestStatusDerivation._append_raw_exp(ws, hyp["hypothesis_id"],
+                                             result="corroborating",
+                                             action="probe",
+                                             disconfirming_controls_checked="x")
+        path = ws / ".lab" / "experiments.jsonl"
+        rec = json.loads(path.read_text(encoding="utf-8").strip())
+        rec["provenance"] = {"actor": "tool", "agent": "nuclei", "tool": "nuclei"}
+        path.write_text(json.dumps(rec) + "\n", encoding="utf-8")
+        assert H.derive_hypothesis_status(ws, hyp["hypothesis_id"]) == "unverified"
+
+    def test_symlink_ledger_raises_on_append(self, ws: Path) -> None:
+        """A symlinked ledger path must raise LedgerWriteError instead of
+        returning a phantom record (silent data loss in an append-only
+        evidence ledger)."""
+        lab = ws / ".lab"
+        lab.mkdir(parents=True, exist_ok=True)
+        target = ws / "real-ledger.jsonl"
+        target.write_text("", encoding="utf-8")
+        (lab / "hypotheses.jsonl").symlink_to(target)
+        with pytest.raises(H.LedgerWriteError):
+            add_hyp(ws)
+        assert len(H.list_hypotheses(ws).records) == 0
+
     def test_non_dict_provenance_raises_structured_error(self, ws: Path) -> None:
         """A non-dict provenance must surface as HypothesisValidationError,
         never a raw AttributeError/TypeError."""

@@ -119,7 +119,12 @@ def _parse_flags(
     """Generic flag parser. Returns (single-value flags, multi-value flags,
     exit). Supports `--flag value` and `--flag=value`. Multi-flags accumulate
     into a dict of lists under their flag name; single flags keep the last
-    value."""
+    value.
+
+    Known behavior (documented, no change): the bare boolean flags
+    (--scope-ok, --strict, --include-disconfirmed) are only handled as bare
+    tokens - `--scope-ok=true` / `--strict=true` are rejected as unknown
+    flags (usage error). Use the space-separated form: `--scope-ok`."""
     single: dict[str, str] = {}
     multi: dict[str, list[str]] = {}
     i = 0
@@ -189,7 +194,14 @@ def _resolve_workspace_id(flags: dict[str, str]) -> str | None:
 
 
 def _build_scope(flags: dict[str, str]) -> dict[str, object]:
-    """Build the scope block from --target / --scope-ok / --engagement-scope-ref."""
+    """Build the scope block from --target / --scope-ok / --engagement-scope-ref.
+
+    Known behavior (documented, no change): when a target is borne and
+    --engagement-scope-ref is omitted, the ref falls back to the placeholder
+    'engagements/engagement.yaml' - an unverifiable provenance pointer for
+    the self-attested scope block. Pass --engagement-scope-ref (or 'none')
+    explicitly for verifiable provenance; the placeholder is a documented
+    convention, not a real file reference."""
     target = flags.get("--target", "")
     scope_checked = flags.get("--scope-ok") == "true" and bool(target)
     ref = (
@@ -285,6 +297,11 @@ def cmd_add(args: list[str]) -> int:
         print(f"ERROR (validation): {e}", file=sys.stderr)
         _audit(AUDIT_ACTION_ADD, single.get("--target", ""), VALIDATION_ERR,
                detail=f"validation: {e}")
+        return VALIDATION_ERR
+    except H.LedgerWriteError as e:
+        print(f"ERROR (write): {e}", file=sys.stderr)
+        _audit(AUDIT_ACTION_ADD, single.get("--target", ""), VALIDATION_ERR,
+               detail=f"write failed: {e}")
         return VALIDATION_ERR
     if not record.get("hypothesis_id"):
         print("ERROR: add returned a record without hypothesis_id (corrupt ledger?)",
@@ -382,6 +399,11 @@ def cmd_experiment(args: list[str]) -> int:
         print(f"ERROR (validation): {e}", file=sys.stderr)
         _audit(AUDIT_ACTION_EXP, single.get("--target", ""), VALIDATION_ERR,
                detail=f"validation: {e}")
+        return VALIDATION_ERR
+    except H.LedgerWriteError as e:
+        print(f"ERROR (write): {e}", file=sys.stderr)
+        _audit(AUDIT_ACTION_EXP, single.get("--target", ""), VALIDATION_ERR,
+               detail=f"write failed: {e}")
         return VALIDATION_ERR
     print(f"ADDED: {record['experiment_id']}")
     print(f"HYPOTHESIS: {record['hypothesis_id']}")
