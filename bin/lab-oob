@@ -25,14 +25,16 @@ terminal sessions can access it.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
 import signal
+import socket
 import subprocess
 import sys
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -42,6 +44,49 @@ LAB = Path(os.environ.get("HACKING_LAB", os.path.expanduser("~/security-lab")))
 STATE_FILE = LAB / ".oob-state.json"
 OUTPUT_LOG = LAB / ".oob-output.log"
 EVIDENCE_DIR = Path.cwd() / "evidence"
+
+
+def collector_id() -> str:
+    """Stable per-listener collector id: deterministic hash of hostname+pid.
+
+    The id hashes the hostname so evidence shared across machines (or with
+    a validator) never embeds the collector hostname, and includes the pid
+    so parallel listeners on the same host stay distinct. The hash is
+    truncated to 16 hex chars and prefixed with "collector-" so the field
+    is clearly a collector id, not a hostname.
+    """
+    raw = f"{socket.gethostname()}-{os.getpid()}"
+    return "collector-" + hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
+
+
+_CALLBACK_PROTOCOL_TOKENS = ("DNS", "HTTP", "SMTP", "LDAP")
+_CALLBACK_KEYWORDS = ("Interaction", "Received", "Received interaction")
+
+
+def classify_callback(line: str) -> tuple[str, bool]:
+    """Classify an interactsh log line into (cb_type, received).
+
+    cb_type is the protocol token printed by the interactsh client (DNS,
+    HTTP, SMTP, LDAP) or "UNKNOWN" when no protocol token is present.
+    received is True when the line carries a generic interaction keyword
+    (e.g. "[LDAP] Received interaction for <url>") even if the protocol
+    token is absent. Mirrors the oracle contract in
+    lib/verification.py:verify_oob_callback (accepted types HTTP/DNS/SMTP/
+    LDAP, or an explicit received signal).
+
+    Protocol tokens are only recognized in interactsh's bracketed form
+    ("[DNS]", "[HTTP]", ...) so a bare substring (e.g. "dns" inside a
+    URL or "HTTP" in an unrelated log line) is never mistaken for a
+    callback. The generic received signal requires the full
+    "Received interaction" phrase -- "Received" or "Interaction" alone
+    is not a captured callback.
+    """
+    for proto in _CALLBACK_PROTOCOL_TOKENS:
+        if f"[{proto}]" in line:
+            return proto, True
+    if "Received interaction" in line:
+        return "UNKNOWN", True
+    return "UNKNOWN", False
 
 
 def log(msg: str) -> None:
@@ -138,6 +183,7 @@ def start_listener() -> int:
         "url": url,
         "full_url": f"http://{url}",
         "dns_url": url,
+        "collector_id": collector_id(),
         "started_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "log_file": str(log_file),
         "callbacks": [],
@@ -167,6 +213,10 @@ def poll_listener(timeout: int = 60) -> int:
 
     log_file = Path(state.get("log_file", "/tmp/lab-oob-output.log"))
     url = state.get("url", "")
+    if not url:
+        log("No callback URL in state. Run 'lab-oob start' first.")
+        return 1
+    cid = state.get("collector_id") or collector_id()
     log(f"Polling for callbacks (timeout: {timeout}s)...")
     log(f"Listening for: {url}")
     log("")
@@ -189,49 +239,53 @@ def poll_listener(timeout: int = 60) -> int:
             for line in content.splitlines():
                 if url in line and line not in seen_callbacks:
                     # Extract the callback info
-                    if "DNS" in line or "HTTP" in line or "Interaction" in line or "Received" in line:
-                        seen_callbacks.add(line)
-                        # Determine type
-                        cb_type = "UNKNOWN"
-                        if "DNS" in line:
-                            cb_type = "DNS"
-                        elif "HTTP" in line:
-                            cb_type = "HTTP"
-                        elif "SMTP" in line:
-                            cb_type = "SMTP"
+                    cb_type, received = classify_callback(line)
+                    if not received:
+                        continue
+                    seen_callbacks.add(line)
 
-                        log(f"╔══════════════════════════════════════════╗")
-                        log(f"║  OOB CALLBACK RECEIVED!                  ║")
-                        log(f"╠══════════════════════════════════════════╣")
-                        log(f"║  Type: {cb_type:<34}║")
-                        log(f"║  URL: {url:<37}║")
-                        log(f"║  Time: {datetime.now().strftime('%H:%M:%S'):<36}║")
-                        log(f"╚══════════════════════════════════════════╝")
-                        log(f"")
-                        log(f"VULNERABILITY CONFIRMED via OOB callback!")
-                        log(f"Raw: {line[:200]}")
+                    log(f"╔══════════════════════════════════════════╗")
+                    log(f"║  OOB CALLBACK RECEIVED!                  ║")
+                    log(f"╠══════════════════════════════════════════╣")
+                    log(f"║  Type: {cb_type:<34}║")
+                    log(f"║  URL: {url:<37}║")
+                    log(f"║  Time: {datetime.now().strftime('%H:%M:%S'):<36}║")
+                    log(f"╚══════════════════════════════════════════╝")
+                    log(f"")
+                    log(f"VULNERABILITY CONFIRMED via OOB callback!")
+                    log(f"Raw: {line[:200]}")
 
-                        # Save evidence
-                        EVIDENCE_DIR.mkdir(parents=True, exist_ok=True)
-                        ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-                        ev_path = EVIDENCE_DIR / f"{ts}-oob-callback.txt"
-                        ev_path.write_text(
-                            f"OOB Callback Confirmed\n"
-                            f"Time: {datetime.now(timezone.utc).isoformat()}\n"
-                            f"Type: {cb_type}\n"
-                            f"Callback URL: {url}\n"
-                            f"Raw: {line}\n",
-                            encoding="utf-8",
-                        )
-                        log(f"Evidence saved: {ev_path}")
+                    # Save evidence
+                    EVIDENCE_DIR.mkdir(parents=True, exist_ok=True)
+                    ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+                    ev_path = EVIDENCE_DIR / f"{ts}-oob-callback.txt"
+                    ev_path.write_text(
+                        f"OOB Callback Confirmed\n"
+                        f"Time: {datetime.now(timezone.utc).isoformat()}\n"
+                        f"Type: {cb_type}\n"
+                        f"Callback URL: {url}\n"
+                        f"Raw: {line}\n",
+                        encoding="utf-8",
+                    )
+                    log(f"Evidence saved: {ev_path}")
 
-                        # Update state
-                        callbacks = state.get("callbacks", [])
-                        callbacks.append({"type": cb_type, "time": datetime.now(timezone.utc).isoformat(), "raw": line[:500]})
-                        state["callbacks"] = callbacks
-                        save_state(state)
+                    # Update state (canonical collector record:
+                    # collector_id/timestamp/token plus existing fields).
+                    record_ts = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+                    callbacks = state.get("callbacks", [])
+                    callbacks.append({
+                        "collector_id": cid,
+                        "token": url,
+                        "timestamp": record_ts,
+                        "type": cb_type,
+                        "received": True,
+                        "time": datetime.now(UTC).isoformat(),
+                        "raw": line[:500],
+                    })
+                    state["callbacks"] = callbacks
+                    save_state(state)
 
-                        return 0
+                    return 0
 
         time.sleep(2)
         elapsed = int(time.time() - start)
@@ -252,12 +306,34 @@ def check_once() -> int:
         return 1
     log_file = Path(state.get("log_file", str(OUTPUT_LOG)))
     url = state.get("url", "")
+    if not url:
+        print("No callback URL in state")
+        return 1
+    cid = state.get("collector_id") or collector_id()
     if log_file.exists():
         content = log_file.read_text()
         for line in content.splitlines():
-            if url in line and ("DNS" in line or "HTTP" in line or "Interaction" in line or "Received" in line):
-                print(f"CALLBACK RECEIVED: {line[:100]}")
-                return 0
+            cb_type, received = classify_callback(line)
+            if not received or url not in line:
+                continue
+            print(f"CALLBACK RECEIVED: {line[:100]}")
+            # Record the collector record so check_once emits the same
+            # canonical shape as poll_listener (collector_id/token/timestamp).
+            callbacks = state.get("callbacks", [])
+            existing = {c.get("raw") for c in callbacks}
+            if line[:500] not in existing:
+                callbacks.append({
+                    "collector_id": cid,
+                    "token": url,
+                    "timestamp": datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                    "type": cb_type,
+                    "received": True,
+                    "time": datetime.now(UTC).isoformat(),
+                    "raw": line[:500],
+                })
+                state["callbacks"] = callbacks
+                save_state(state)
+            return 0
     print("No callback received")
     return 1
 

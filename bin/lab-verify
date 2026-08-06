@@ -1,0 +1,353 @@
+#!/usr/bin/env python3
+"""lab-verify - deterministic, non-AI vulnerability verification gate.
+
+Per sl-competitor-methods-v1 (the agent/validator split) and sl-efficacy-gap-v1
+(the empty-data differential / no-state-verification failure modes), this CLI
+gates a candidate finding before it can be marked confirmed. Model-authored
+prose can NEVER mark a finding confirmed -- only a deterministic oracle can
+produce outcome=verified.
+
+Four oracle types (see lib/verification.py for the full contracts):
+  - authorization  : cross-actor response differential + controlled victim
+                     marker + verified ownership/workspace identity.
+  - business_logic : separate post-action state read (the mutation response
+                     alone is NOT trusted).
+  - sha256_canary  : agent received only location + expected SHA-256; the
+                     value it retrieved must hash to that digest.
+  - oob_callback   : result accepted only from a captured callback record.
+
+The verifier never contacts live targets. It operates on evidence the caller
+supplies (captured request/response pairs, captured callback records, canary
+location + expected hash + retrieved value). It refuses out-of-scope targets
+via the shared labutil scope primitives.
+
+Usage:
+    lab-verify <oracle> --payload <file.json> [--out <result.json>]
+                                                            [--target <url>]
+                                                            [--engagement <name>]
+    lab-verify --list-oracles
+    lab-verify --help
+
+The payload file is a JSON object whose keys are the oracle function's
+keyword arguments (minus finding_id/target/engagement, which may live in the
+payload or be supplied via the flags). See lib/verification.py docstrings for
+the per-oracle payload schemas.
+
+Exit codes:
+    0 = result written; outcome is verified, disproved, OR insufficient_evidence
+        (all three are valid deterministic verdicts the caller needs to see).
+    1 = bad input / oracle error (payload missing required keys, unknown
+        oracle, result failed schema validation).
+    2 = scope refusal or invalid name (the --engagement flag failed
+        validation, or the payload's target was out of scope -- the
+        result is still written with outcome=insufficient_evidence so the
+        caller sees the refusal reason).
+
+Audit: every invocation writes one audit-log entry via labutil.audit()
+(action=lab-verify), carrying the oracle name, the outcome, the finding_id,
+and the engagement/target when supplied.
+"""
+
+from __future__ import annotations
+
+import json
+import sys
+from pathlib import Path
+from typing import Any
+
+# Import shared labutil helpers (sys.path hack -- E402-ignored per ruff.toml).
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib"))
+import labutil  # noqa: E402
+import verification as V  # noqa: E402
+
+_ORACLE_NAMES = (
+    V.ORACLE_AUTHORIZATION,
+    V.ORACLE_BUSINESS_LOGIC,
+    V.ORACLE_SHA256_CANARY,
+    V.ORACLE_OOB_CALLBACK,
+)
+
+
+def _usage() -> str:
+    return (
+        "usage: lab-verify <oracle> --payload <file.json> "
+        "[--out <result.json>] [--target <url>] [--engagement <name>]\n"
+        "       lab-verify --list-oracles\n"
+        "\n"
+        "oracles: " + ", ".join(_ORACLE_NAMES) + "\n"
+    )
+
+
+def _list_oracles() -> int:
+    print("deterministic, non-AI verification oracles:\n")
+    for name in _ORACLE_NAMES:
+        doc = {
+            V.ORACLE_AUTHORIZATION:
+                "cross-actor response differential + controlled victim marker "
+                "+ verified ownership/workspace identity + no-credential control",
+            V.ORACLE_BUSINESS_LOGIC:
+                "separate post-action state read (the mutation response alone "
+                "is NOT trusted)",
+            V.ORACLE_SHA256_CANARY:
+                "agent received only location + expected SHA-256; the retrieved "
+                "value must hash to that digest",
+            V.ORACLE_OOB_CALLBACK:
+                "result accepted only from a captured callback record (not an "
+                "agent assertion)",
+        }.get(name, "")
+        print(f"  {name:<16} {doc}")
+    print(
+        "\nModel-authored prose can never mark a finding confirmed -- only a "
+        "deterministic oracle can produce outcome=verified."
+    )
+    print("\npayload schemas: see lib/verification.py docstrings for each oracle.")
+    return 0
+
+
+def _load_payload(path: Path) -> dict[str, Any]:
+    if not path.is_file():
+        raise V.VerificationInputError(f"payload file not found: {path}")
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, ValueError) as e:
+        raise V.VerificationInputError(f"could not parse payload JSON {path}: {e}") from e
+    if not isinstance(data, dict):
+        raise V.VerificationInputError(f"payload {path} must be a JSON object")
+    return data
+
+
+def main() -> int:
+    args = sys.argv[1:]
+    if not args or args[0] in ("-h", "--help"):
+        print(__doc__)
+        return 0
+    if args[0] == "--list-oracles":
+        return _list_oracles()
+
+    oracle = ""
+    payload_path: Path | None = None
+    out_path: Path | None = None
+    target = ""
+    engagement = ""
+
+    i = 0
+    positional: list[str] = []
+    while i < len(args):
+        a = args[i]
+        if a == "--payload" and i + 1 < len(args):
+            payload_path = Path(args[i + 1])
+            i += 2
+        elif a.startswith("--payload="):
+            payload_path = Path(a.split("=", 1)[1])
+            i += 1
+        elif a == "--out" and i + 1 < len(args):
+            out_path = Path(args[i + 1])
+            i += 2
+        elif a.startswith("--out="):
+            out_path = Path(a.split("=", 1)[1])
+            i += 1
+        elif a == "--target" and i + 1 < len(args):
+            target = args[i + 1]
+            i += 2
+        elif a.startswith("--target="):
+            target = a.split("=", 1)[1]
+            i += 1
+        elif a == "--engagement" and i + 1 < len(args):
+            engagement = args[i + 1]
+            i += 2
+        elif a.startswith("--engagement="):
+            engagement = a.split("=", 1)[1]
+            i += 1
+        elif a.startswith("-") and a not in ("--",):
+            print(f"unknown option: {a}", file=sys.stderr)
+            print(_usage(), file=sys.stderr)
+            return 1
+        else:
+            positional.append(a)
+            i += 1
+
+    if positional:
+        oracle = positional[0]
+
+    if not oracle:
+        print("error: an oracle name is required", file=sys.stderr)
+        print(_usage(), file=sys.stderr)
+        return 1
+    if oracle not in _ORACLE_NAMES:
+        print(
+            f"error: unknown oracle {oracle!r}; expected one of {list(_ORACLE_NAMES)}",
+            file=sys.stderr,
+        )
+        return 1
+    if payload_path is None:
+        print("error: --payload <file.json> is required", file=sys.stderr)
+        print(_usage(), file=sys.stderr)
+        return 1
+
+    # Validate the engagement name before it is used in any filesystem path
+    # downstream (defense against argument injection via --engagement).
+    if engagement and not labutil.validate_name(engagement):
+        print(
+            f"error: invalid engagement name {engagement!r} -- use only "
+            f"letters, numbers, dots, hyphens, underscores (no '..', '/', '\\')",
+            file=sys.stderr,
+        )
+        labutil.audit(
+            "lab-verify",
+            target=target,
+            engagement=engagement,
+            exit_code=2,
+            detail=f"invalid engagement name: {engagement!r}",
+            oracle=oracle,
+        )
+        return 2
+
+    try:
+        payload = _load_payload(payload_path)
+    except V.VerificationInputError as e:
+        print(f"error: {e}", file=sys.stderr)
+        labutil.audit(
+            "lab-verify",
+            target=target,
+            engagement=engagement,
+            exit_code=1,
+            detail=f"payload load error: {e}",
+            oracle=oracle,
+        )
+        return 1
+
+    if not engagement and isinstance(payload.get("engagement"), str):
+        engagement = payload["engagement"]
+
+    # Reject a non-string payload target explicitly, with an audit entry,
+    # before any oracle call -- a malformed target must never be resolved
+    # silently (mirrors the non-string engagement guard in build_result).
+    payload_target = payload.get("target")
+    if (
+        not target
+        and "target" in payload
+        and payload_target is not None
+        and not isinstance(payload_target, str)
+    ):
+        print(
+            f"error: payload target must be a string, got {type(payload_target).__name__}",
+            file=sys.stderr,
+        )
+        labutil.audit(
+            "lab-verify",
+            target=target,
+            engagement=engagement,
+            exit_code=1,
+            detail=(
+                f"payload target must be a string, got {type(payload_target).__name__}"
+            ),
+            oracle=oracle,
+        )
+        return 1
+
+    # Symmetric resolution for the target: when --target is absent, resolve
+    # it from the payload before the oracle call so the audit entry records
+    # the SAME target the scope gate actually enforced (an asymmetry here
+    # would let a payload-only run audit with an empty target while the
+    # oracle already refused/verified against the payload's target).
+    if not target and isinstance(payload.get("target"), str):
+        target = payload["target"]
+
+    # Run the oracle.
+    try:
+        result = V.build_result(
+            oracle,
+            payload,
+            target=target,
+            engagement=engagement,
+        )
+    except V.VerificationInputError as e:
+        print(f"error: oracle {oracle} rejected the payload: {e}", file=sys.stderr)
+        labutil.audit(
+            "lab-verify",
+            target=target,
+            engagement=engagement,
+            exit_code=1,
+            detail=f"oracle input error: {e}",
+            oracle=oracle,
+        )
+        return 1
+
+    # Validate the result against the schema before writing.
+    errs = V.validate_result(result)
+    if errs:
+        print(
+            "error: produced result failed schema validation:\n  - "
+            + "\n  - ".join(errs),
+            file=sys.stderr,
+        )
+        labutil.audit(
+            "lab-verify",
+            target=target,
+            engagement=engagement,
+            exit_code=1,
+            detail=f"result schema validation failed: {errs[0]}",
+            oracle=oracle,
+        )
+        return 1
+
+    # Write the result if --out was supplied; else print to stdout.
+    out_json = result.to_json(indent=2)
+    if out_path is not None:
+        try:
+            V.write_result(result, out_path)
+        except V.VerificationError as e:
+            print(f"error: refusing to write result: {e}", file=sys.stderr)
+            labutil.audit(
+                "lab-verify",
+                target=target,
+                engagement=engagement,
+                exit_code=1,
+                detail=f"write refused: {e}",
+                oracle=oracle,
+            )
+            return 1
+        print(f"verification result written: {out_path}", file=sys.stderr)
+    else:
+        print(out_json)
+
+    # Audit the run. The outcome is the load-bearing detail the supervisor
+    # needs to see -- a verified/disproved/insufficient verdict, plus the
+    # oracle and finding_id. A scope refusal exits 2, so the audit entry
+    # must record the FINAL exit code (and the refusal reason) -- the audit
+    # log is the supervisor's attribution source and its exit field must
+    # match the documented contract (2 = scope refusal).
+    final_exit = 2 if (
+        result.outcome == V.OUTCOME_INSUFFICIENT and result.reason.startswith("refused:")
+    ) else 0
+    audit_detail = f"oracle={oracle} outcome={result.outcome} finding={result.finding_id}"
+    if final_exit == 2:
+        audit_detail += (
+            f" refused={result.reason[len('refused:'):].strip()}"
+        )
+    labutil.audit(
+        "lab-verify",
+        target=target,
+        engagement=engagement,
+        exit_code=final_exit,
+        detail=audit_detail,
+        oracle=oracle,
+        outcome=result.outcome,
+        finding_id=result.finding_id,
+    )
+
+    # A scope refusal produces outcome=insufficient_evidence with a reason
+    # starting "refused:". Surface that as exit code 2 so the caller can
+    # distinguish "verdict reached" (0) from "refused on scope" (2).
+    if final_exit == 2:
+        print(
+            f"refused: {result.reason[len('refused:'):].strip()}",
+            file=sys.stderr,
+        )
+        return 2
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
