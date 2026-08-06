@@ -344,6 +344,19 @@ class LedgerWriteError(RuntimeError):
     successful add."""
 
 
+class LedgerReadError(HypothesisError):
+    """Raised when a ledger cannot be read at all (permission denied, disk
+    error). An unreadable ledger must never be treated as a clean empty one -
+    it masks data loss in the append-only evidence ledger."""
+
+
+def _raise_if_unreadable(*reads: LedgerRead) -> None:
+    """Fail closed on any ledger read that reported an error."""
+    for read in reads:
+        if read.read_error:
+            raise LedgerReadError(f"cannot read ledger {read.path}: {read.read_error}")
+
+
 def _append_or_raise(path: Path, record: dict[str, Any]) -> None:
     """Append `record` to the ledger, raising `LedgerWriteError` when the
     append did not occur (labutil.atomic_append_jsonl silently refuses
@@ -556,6 +569,17 @@ def _validate_hypothesis(record: dict[str, Any]) -> None:
     if not isinstance(pre, dict) or not _is_non_empty_str(pre.get("actor")):
         raise HypothesisValidationError(
             "preconditions must be a dict with a non-empty 'actor'"
+        )
+    # Schema alignment (hypothesis-v1 declares additionalProperties: false):
+    # only actor/target_resource/auth_state/environment are valid keys - an
+    # extra key passes the runtime gate but fails schema validation (the
+    # library/schema drift class closed for ts in round 11).
+    allowed_precondition_keys = {"actor", "target_resource", "auth_state", "environment"}
+    extra = set(pre) - allowed_precondition_keys
+    if extra:
+        raise HypothesisValidationError(
+            f"preconditions has unsupported key(s): {sorted(extra)} "
+            "(allowed: actor, target_resource, auth_state, environment)"
         )
     if not _is_iso_ts(record["ts"]):
         raise HypothesisValidationError("ts must be an ISO 8601 timestamp")
@@ -1139,9 +1163,16 @@ def rank(
     Determinism: the score is a pure function of the record + dead_end_claims.
     Ties are broken by (score desc, surface asc, hypothesis_id asc) so two
     agents ranking the same ledger produce the same worklist.
+
+    Raises:
+        LedgerReadError: when a ledger cannot be read at all (permission
+        denied, disk error) - an unreadable ledger must never rank as a
+        clean empty one (the agent's primary worklist surface must not mask
+        data loss).
     """
     hyp_read = list_hypotheses(workspace_dir)
     exp_read = list_experiments(workspace_dir)
+    _raise_if_unreadable(hyp_read, exp_read)
     # Index experiments by hypothesis_id for the derived status + count.
     exps_by_hyp: dict[str, list[dict[str, Any]]] = {}
     for e in exp_read.records:
@@ -1585,6 +1616,7 @@ __all__ = [
     "HypothesisNotFoundError",
     "DuplicateExperimentError",
     "LedgerWriteError",
+    "LedgerReadError",
     "LedgerRead",
     "RankedHypothesis",
     "LedgerIntegrityReport",

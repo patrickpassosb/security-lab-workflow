@@ -459,14 +459,28 @@ def cmd_rank(args: list[str]) -> int:
             except OSError as e:
                 print(f"WARNING: could not read --dead-ends-file {dead_path!r}: {e}",
                       file=sys.stderr)
-    md = H.render_worklist(
-        ws_dir,
-        dead_end_claims=dead_end_claims or None,
-        include_disconfirmed=has_include,
-    )
+    try:
+        md = H.render_worklist(
+            ws_dir,
+            dead_end_claims=dead_end_claims or None,
+            include_disconfirmed=has_include,
+        )
+    except H.LedgerReadError as e:
+        print(f"ERROR (read): {e}", file=sys.stderr)
+        _audit(AUDIT_ACTION_RANK, "", VALIDATION_ERR, detail=f"unreadable ledger: {e}")
+        return VALIDATION_ERR
     sys.stdout.write(md)
     _audit(AUDIT_ACTION_RANK, "", OK, detail="rendered worklist")
     return OK
+
+
+def _read_error_guard(read: H.LedgerRead) -> int | None:
+    """Print a structured read error for an unreadable ledger and return the
+    error exit code (None when the ledger read was fine)."""
+    if read.read_error:
+        print(f"ERROR (read): {read.read_error}", file=sys.stderr)
+        return VALIDATION_ERR
+    return None
 
 
 def cmd_list(args: list[str]) -> int:
@@ -477,6 +491,10 @@ def cmd_list(args: list[str]) -> int:
         return rc
     ws_dir = _resolve_workspace(single)
     read = H.list_hypotheses(ws_dir)
+    rc_read = _read_error_guard(read)
+    if rc_read is not None:
+        _audit(AUDIT_ACTION_LIST, "", VALIDATION_ERR, detail="unreadable ledger")
+        return rc_read
     derived_statuses = {
         H.DERIVED_UNVERIFIED, H.DERIVED_TESTING, H.DERIVED_CONFIRMED,
         H.DERIVED_DISCONFIRMED, H.DERIVED_CONTRADICTORY, H.DERIVED_SUPERSEDED,
