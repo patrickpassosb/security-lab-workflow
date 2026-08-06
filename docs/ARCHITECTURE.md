@@ -199,6 +199,7 @@ Global, shared scripts that implement the workflow. All read env vars (`$HACKING
 | `lab-handoff` | Capture session context before pivoting or stopping |
 | `lab-pivot-watch` | Monitor solve_logs for pivot rule violations |
 | `lab-hunt` | One-command CTF hunt (scope + workspace + gbrain + firstpass + wordlist) |
+| `lab-hypothesis` | Typed hypothesis-and-experiment ledger — ranked, falsifiable tests (see `lib/hypothesis.py`) |
 | `lab-firstpass` | AppSec first-pass on a web target |
 | `lab-dashboard` | CTF challenge tracking dashboard |
 | `lab-oob` | OOB confirmation via interactsh (emits canonical collector records: collector_id/token/timestamp) |
