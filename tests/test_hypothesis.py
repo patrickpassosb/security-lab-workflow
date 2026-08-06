@@ -944,6 +944,19 @@ class TestStatusDerivation:
             assert H.derive_hypothesis_status(
                 ws, hyp["hypothesis_id"]) == "confirmed", text
 
+    def test_word_form_counts_above_ten_are_the_bar(self, ws: Path) -> None:
+        """'eleven confirmations' / 'twelve probes' / 'twenty independent
+        confirmations' parse as the stated bar, never fail open to 1."""
+        for text in ("eleven confirmations", "twelve probes",
+                     "twenty independent confirmations"):
+            hyp = add_hyp(ws, minimum_confirmation=text,
+                          invariant=f"inv {text[:20]}", surface=f"/s{len(text)}",
+                          mutation=f"m{len(text)}")
+            add_exp(ws, hyp["hypothesis_id"], result="corroborating",
+                    action="probe")
+            assert H.derive_hypothesis_status(
+                ws, hyp["hypothesis_id"]) == "testing", text
+
     def test_unknown_hypothesis_id_raises(self, ws: Path) -> None:
         with pytest.raises(H.HypothesisNotFoundError):
             H.derive_hypothesis_status(ws, "hyp-00000000-0000-0000-0000-000000000000")

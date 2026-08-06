@@ -1252,7 +1252,8 @@ _MIN_CONF_COUNT_RE = re.compile(
     re.IGNORECASE,
 )
 _MIN_CONF_WORD_HEAD_RE = re.compile(
-    r"^(one|two|three|four|five|six|seven|eight|nine|ten)\s+"
+    r"^(one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|"
+    r"fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty)\s+"
     r"(?:\S+\s+){0,2}(?:corroborat\w*|confirm\w*|experiment\w*|replic\w*|"
     r"times?|repeats?|hits?|sessions?|runs?|callbacks?|observations?|probes?|"
     r"replays?|requests?|responses?|attempts?|samples?|markers?|tests?|checks?|"
@@ -1262,6 +1263,9 @@ _MIN_CONF_WORD_HEAD_RE = re.compile(
 _MIN_CONF_WORD_COUNTS: dict[str, int] = {
     "one": 1, "two": 2, "three": 3, "four": 4, "five": 5,
     "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10,
+    "eleven": 11, "twelve": 12, "thirteen": 13, "fourteen": 14,
+    "fifteen": 15, "sixteen": 16, "seventeen": 17, "eighteen": 18,
+    "nineteen": 19, "twenty": 20,
 }
 
 
@@ -1294,10 +1298,13 @@ def _min_confirmation_bar(minimum_confirmation: str | None) -> int:
     m = _MIN_CONF_WORD_HEAD_RE.match(head)
     if m:
         return max(1, _MIN_CONF_WORD_COUNTS[m.group(1).lower()])
-    # Bare word-form counts ('two', 'minimum two', 'at least two') are the
-    # bar, mirroring the bare-integer rule - never fail open to 1.
-    m = re.fullmatch(r"(one|two|three|four|five|six|seven|eight|nine|ten)",
-                     head, re.IGNORECASE)
+    # Bare word-form counts ('two', 'minimum two', 'at least two',
+    # 'eleven') are the bar, mirroring the bare-integer rule - never fail
+    # open to 1.
+    m = re.fullmatch(
+        r"(one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|"
+        r"thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty)",
+        head, re.IGNORECASE)
     if m:
         return max(1, _MIN_CONF_WORD_COUNTS[m.group(1).lower()])
     if re.fullmatch(r"-?\d+", head):
