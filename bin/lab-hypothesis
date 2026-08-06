@@ -516,14 +516,15 @@ def cmd_list(args: list[str]) -> int:
 
 def cmd_show(args: list[str]) -> int:
     """Show one hypothesis + its experiments."""
-    if not args:
-        print("show requires a <hypothesis-id> argument", file=sys.stderr)
-        return USAGE_ERR
-    hid = args[0]
     value_flags = ("--workspace",)
-    single, _multi, rc = _parse_flags(args[1:], value_flags)
+    single, _multi, rc = _parse_flags(args, value_flags)
     if rc != 0:
         return rc
+    pos = single.get("__pos__") or []
+    if not pos:
+        print("show requires a <hypothesis-id> argument", file=sys.stderr)
+        return USAGE_ERR
+    hid = pos[0]
     ws_dir = _resolve_workspace(single)
     hyp = H.get_hypothesis(ws_dir, hid)
     if hyp is None:
