@@ -475,6 +475,17 @@ class TestRanking:
         assert ranked["/up"].impact_potential == H._IMPACT_BY_TAG["rce"]
         assert ranked["/up2"].impact_potential == H._IMPACT_BY_TAG["critical"]
 
+    def test_impact_compound_phrases_do_not_match_severity(self, ws: Path) -> None:
+        """'low-priv' / 'high-priv' are compound phrases, not standalone
+        severity words: they must not drag the impact score down/up."""
+        add_hyp(ws, invariant="low-priv user cannot read admin data",
+                surface="/api/x", mutation="m", tags=[])
+        add_hyp(ws, invariant="high-priv user can read admin data",
+                surface="/api/y", mutation="m", tags=[])
+        ranked = {r.record["surface"]: r for r in H.rank(ws)}
+        assert ranked["/api/x"].impact_potential == H._DEFAULT_IMPACT
+        assert ranked["/api/y"].impact_potential == H._DEFAULT_IMPACT
+
     def test_rank_orders_by_leverage_and_impact(self, ws: Path) -> None:
         ids = self._add_ranked_hyps(ws)
         ranked = H.rank(ws)
@@ -904,6 +915,35 @@ class TestStatusDerivation:
                 action="probe-2", tool="curl")
         assert H.derive_hypothesis_status(ws, hyp["hypothesis_id"]) == "contradictory"
 
+    def test_per_experiment_contradictory_result_surfaces_conflict(self, ws: Path) -> None:
+        """A schema-documented result='contradictory' record surfaces the
+        conflict in the derived status - it is never silently inert."""
+        hyp = add_hyp(ws, minimum_confirmation="1")
+        add_exp(ws, hyp["hypothesis_id"], result="corroborating", tool="curl")
+        add_exp(ws, hyp["hypothesis_id"], result="contradictory",
+                action="probe-2", tool="curl")
+        assert H.derive_hypothesis_status(ws, hyp["hypothesis_id"]) == "contradictory"
+        hyp2 = add_hyp(ws, invariant="only contradictory", surface="/c2",
+                       mutation="m2", minimum_confirmation="1")
+        add_exp(ws, hyp2["hypothesis_id"], result="contradictory", tool="curl")
+        assert H.derive_hypothesis_status(ws, hyp2["hypothesis_id"]) == "contradictory"
+
+    def test_bare_word_form_count_is_the_bar(self, ws: Path) -> None:
+        """Bare word-form counts ('two', 'minimum two', 'at least two') are
+        the bar, mirroring the bare-integer rule - never fail open to 1."""
+        for text in ("two", "minimum two", "at least two"):
+            hyp = add_hyp(ws, minimum_confirmation=text,
+                          invariant=f"inv {text[:20]}", surface=f"/s{len(text)}",
+                          mutation=f"m{len(text)}")
+            add_exp(ws, hyp["hypothesis_id"], result="corroborating",
+                    action="probe")
+            assert H.derive_hypothesis_status(
+                ws, hyp["hypothesis_id"]) == "testing", text
+            add_exp(ws, hyp["hypothesis_id"], result="corroborating",
+                    action="probe-2")
+            assert H.derive_hypothesis_status(
+                ws, hyp["hypothesis_id"]) == "confirmed", text
+
     def test_unknown_hypothesis_id_raises(self, ws: Path) -> None:
         with pytest.raises(H.HypothesisNotFoundError):
             H.derive_hypothesis_status(ws, "hyp-00000000-0000-0000-0000-000000000000")
@@ -1109,6 +1149,13 @@ class TestScopeSafety:
         with pytest.raises(H.UnsafeScopeError):
             add_exp(ws, hyp["hypothesis_id"], scope=_scope(target="http://oos",
                                                            checked=False))
+
+    def test_experiment_engagement_name_gate(self, ws: Path) -> None:
+        """add_experiment enforces the same engagement name rule as
+        add_hypothesis (path-traversal guard)."""
+        hyp = add_hyp(ws)
+        with pytest.raises(H.HypothesisValidationError):
+            add_exp(ws, hyp["hypothesis_id"], engagement="a/b")
 
     def test_scope_must_be_dict(self, ws: Path) -> None:
         with pytest.raises(H.HypothesisValidationError):

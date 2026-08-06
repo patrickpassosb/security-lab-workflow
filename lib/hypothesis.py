@@ -798,6 +798,13 @@ def add_experiment(
         HypothesisValidationError: any shape/schema failure.
         DuplicateExperimentError: strict mode + duplicate dedup key.
     """
+    # Engagement name gate: same rule as add_hypothesis (path-traversal
+    # guard) - the two add paths must enforce the same name rule.
+    if not labutil.validate_name(engagement):
+        raise HypothesisValidationError(
+            f"engagement must be a safe single path component [A-Za-z0-9._-], "
+            f"got {engagement!r}"
+        )
     # Scanner-verdict guard: a bare tool cannot record a verdict in either
     # direction. Scanner findings enter as unverified hypotheses only; verdicts
     # (corroborating OR disconfirming) are the agent/replay-harness's job - a
@@ -970,12 +977,14 @@ def _impact_score(record: dict[str, Any]) -> float:
                 return _IMPACT_BY_TAG[key]
     # Keyword fallback on surface/invariant. Word-boundary matching so short
     # keys like 'low'/'high'/'medium'/'rce' do not substring-match inside
-    # unrelated words (workflow, enforcement, glossary, highlight).
+    # unrelated words (workflow, enforcement, glossary, highlight) or
+    # compound forms ('low-priv', 'high-priv' - a hyphenated compound is not
+    # a standalone severity word).
     haystack = (
         str(record.get("surface") or "") + " " + str(record.get("invariant") or "")
     ).lower()
     for key, score in _IMPACT_BY_TAG.items():
-        if re.search(rf"\b{re.escape(key)}\b", haystack):
+        if re.search(rf"(?<![\w-])\b{re.escape(key)}\b(?![\w-])", haystack):
             return score
     return _DEFAULT_IMPACT
 
@@ -1246,6 +1255,12 @@ def _min_confirmation_bar(minimum_confirmation: str | None) -> int:
     m = _MIN_CONF_WORD_HEAD_RE.match(head)
     if m:
         return max(1, _MIN_CONF_WORD_COUNTS[m.group(1).lower()])
+    # Bare word-form counts ('two', 'minimum two', 'at least two') are the
+    # bar, mirroring the bare-integer rule - never fail open to 1.
+    m = re.fullmatch(r"(one|two|three|four|five|six|seven|eight|nine|ten)",
+                     head, re.IGNORECASE)
+    if m:
+        return max(1, _MIN_CONF_WORD_COUNTS[m.group(1).lower()])
     if re.fullmatch(r"-?\d+", head):
         # Applied to the qualifier-stripped head so 'minimum 2' / 'min 2'
         # parse as bar=2, never fail open to 1. The clamp neutralizes
@@ -1286,7 +1301,8 @@ def _derive_status_from(hyp: dict[str, Any], exps: list[dict[str, Any]]) -> str:
     # as SHAPE-INVALID; derivation treats them as if absent.
     def _verdict_records():
         for e in exps:
-            if e.get("result") not in (RESULT_CORROBORATING, RESULT_DISCONFIRMING):
+            if e.get("result") not in (RESULT_CORROBORATING, RESULT_DISCONFIRMING,
+                                       RESULT_CONTRADICTORY):
                 continue
             prov = e.get("provenance")
             # Non-dict provenance (or a missing/empty actor) is treated as
@@ -1307,6 +1323,12 @@ def _derive_status_from(hyp: dict[str, Any], exps: list[dict[str, Any]]) -> str:
         inconclusive = [e for e in exps
                         if e.get("result") == RESULT_INCONCLUSIVE]
         return DERIVED_TESTING if inconclusive else DERIVED_UNVERIFIED
+    # A per-experiment result='contradictory' record (schema-documented:
+    # 'this experiment disagrees with a prior experiment on the same
+    # hypothesis; the ranker surfaces the conflict') surfaces the conflict
+    # in the derived status - it is never silently inert.
+    if any(e.get("result") == RESULT_CONTRADICTORY for e in verdicts):
+        return DERIVED_CONTRADICTORY
     has_c = any(e.get("result") == RESULT_CORROBORATING for e in verdicts)
     has_d = any(e.get("result") == RESULT_DISCONFIRMING for e in verdicts)
     if has_c and has_d:
