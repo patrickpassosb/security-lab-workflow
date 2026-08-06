@@ -985,6 +985,15 @@ class TestScannerVerdictGate:
                     tool="nuclei")
         assert len(H.experiments_for(ws, hyp["hypothesis_id"])) == 0
 
+    def test_tool_origin_cannot_record_contradictory(self, ws: Path) -> None:
+        """A tool-originated result='contradictory' record is rejected at
+        write time, symmetric with the other verdict results."""
+        hyp = add_hyp(ws)
+        with pytest.raises(H.ScannerVerdictError):
+            add_exp(ws, hyp["hypothesis_id"], result="contradictory", actor="tool",
+                    tool="nuclei")
+        assert len(H.experiments_for(ws, hyp["hypothesis_id"])) == 0
+
     def test_tool_actor_normalization_cannot_bypass_guard(self, ws: Path) -> None:
         """The actor comparison is case/whitespace-normalized: 'Tool', 'TOOL'
         and ' tool ' cannot bypass the scanner-verdict gate."""
@@ -1072,6 +1081,19 @@ class TestScannerVerdictGate:
                                 cwd=ws)
         assert rc == 2
         assert "symlinked ledger" in err
+
+    def test_cli_validate_fails_on_unreadable_ledger(self, ws: Path) -> None:
+        """An unreadable ledger (permission denied) must fail validate, never
+        validate as a clean empty one (silent data-loss masking)."""
+        add_hyp(ws)
+        path = ws / ".lab" / "hypotheses.jsonl"
+        path.chmod(0o000)
+        try:
+            rc, out, err = _run_cli(["validate", "--workspace", str(ws)], cwd=ws)
+            assert rc == 2
+            assert "ERROR (read)" in err
+        finally:
+            path.chmod(0o644)
 
     def test_non_dict_provenance_raises_structured_error(self, ws: Path) -> None:
         """A non-dict provenance must surface as HypothesisValidationError,

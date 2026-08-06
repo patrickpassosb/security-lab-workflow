@@ -249,11 +249,15 @@ class DuplicateExperimentError(HypothesisError):
 class LedgerRead:
     """Result of reading a ledger: the valid records and the count of skipped
     (malformed) lines. Skipped-line reporting is the malformed-JSONL recovery
-    surface - the CLI reports it; the library never crashes on corruption."""
+    surface - the CLI reports it; the library never crashes on corruption.
+    `read_error` is non-empty when the ledger could not be read at all
+    (permission denied, disk error, not a regular file) - an unreadable
+    ledger must never validate as a clean empty one."""
 
     records: list[dict[str, Any]]
     skipped_lines: int
     path: str
+    read_error: str = ""
 
 
 # --- Helpers -------------------------------------------------------------------
@@ -373,8 +377,11 @@ def _read_ledger(path: Path) -> LedgerRead:
         return LedgerRead(records=[], skipped_lines=0, path=str(p))
     try:
         text = p.read_text(encoding="utf-8")
-    except OSError:
-        return LedgerRead(records=[], skipped_lines=0, path=str(p))
+    except OSError as e:
+        # An unreadable ledger (permission denied, disk error) must never
+        # validate as a clean empty one - surface the read failure.
+        return LedgerRead(records=[], skipped_lines=0, path=str(p),
+                          read_error=str(e))
 
     records: list[dict[str, Any]] = []
     skipped = 0
@@ -819,7 +826,8 @@ def add_experiment(
             f"provenance must be a dict, got {type(provenance).__name__}"
         )
     actor = str(provenance.get("actor") or "").strip().lower()
-    if actor == "tool" and result in (RESULT_CORROBORATING, RESULT_DISCONFIRMING):
+    if actor == "tool" and result in (RESULT_CORROBORATING, RESULT_DISCONFIRMING,
+                                      RESULT_CONTRADICTORY):
         raise ScannerVerdictError(
             f"A tool-originated experiment cannot record result={result!r} "
             "directly. Scanner findings enter as unverified hypotheses only. "
@@ -1480,6 +1488,7 @@ class LedgerIntegrityReport:
     shape_invalid_records: list[dict[str, Any]]  # records that failed shape validation
     skipped_hypothesis_lines: int
     skipped_experiment_lines: int
+    read_errors: list[str]  # ledgers that could not be read at all (unreadable)
 
 
 def validate_ledger(workspace_dir: Path | str) -> LedgerIntegrityReport:
@@ -1542,7 +1551,8 @@ def validate_ledger(workspace_dir: Path | str) -> LedgerIntegrityReport:
         # silently drive the derived status to a terminal state.
         prov = e.get("provenance")
         actor = str(prov.get("actor") or "").strip().lower() if isinstance(prov, dict) else ""
-        if actor == "tool" and e.get("result") in (RESULT_CORROBORATING, RESULT_DISCONFIRMING):
+        if actor == "tool" and e.get("result") in (RESULT_CORROBORATING, RESULT_DISCONFIRMING,
+                                                   RESULT_CONTRADICTORY):
             shape_invalid.append({
                 "kind": "experiment",
                 "id": e.get("experiment_id"),
@@ -1558,6 +1568,7 @@ def validate_ledger(workspace_dir: Path | str) -> LedgerIntegrityReport:
         shape_invalid_records=shape_invalid,
         skipped_hypothesis_lines=hyp_read.skipped_lines,
         skipped_experiment_lines=exp_read.skipped_lines,
+        read_errors=[e for e in (hyp_read.read_error, exp_read.read_error) if e],
     )
 
 

@@ -573,6 +573,8 @@ def cmd_validate(args: list[str]) -> int:
     if symlinked:
         print(f"symlinked ledger: {', '.join(symlinked)} (refusing to read)",
               file=sys.stderr)
+    for rerr in report.read_errors:
+        print(f"ERROR (read): {rerr}", file=sys.stderr)
     print(f"hypotheses: {report.hypotheses_count}")
     print(f"experiments: {report.experiments_count}")
     print(f"orphan experiments (bad hypothesis_id): {len(report.orphan_experiments)}")
@@ -598,6 +600,7 @@ def cmd_validate(args: list[str]) -> int:
         and not report.unsafe_scope_records
         and not report.shape_invalid_records
         and not symlinked
+        and not report.read_errors
     )
     if strict and (report.skipped_hypothesis_lines or report.skipped_experiment_lines):
         clean = False
