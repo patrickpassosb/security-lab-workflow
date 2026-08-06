@@ -38,6 +38,7 @@ LIB = HERE.parent / "lib"
 sys.path.insert(0, str(LIB))
 
 import findingeval as FE  # noqa: E402
+import labutil  # noqa: E402
 
 FIXTURES = HERE / "fixtures" / "f2-notion"
 
@@ -46,8 +47,16 @@ FIXTURES = HERE / "fixtures" / "f2-notion"
 
 
 @pytest.fixture
-def lab_root(tmp_path: Path) -> Path:
-    """Isolated lab: global scope + an engagement with notion.com in scope."""
+def lab_root(tmp_path: Path, monkeypatch) -> Path:
+    """Isolated lab: global scope + an engagement with notion.com in scope.
+
+    monkeypatch.setattr labutil.LAB to tmp_path so the oracle gate's scope
+    check (V.build_result -> verify_authorization -> _check_scope) reads the
+    isolated scope files instead of the module-global ~/security-lab default.
+    The CLI and verification test suites already do this; the finding-eval
+    fixture must too, or CI environments without ~/security-lab/engagements/
+    default-deny the target and the oracle returns insufficient_evidence.
+    """
     eng_dir = tmp_path / "engagements"
     eng_dir.mkdir(parents=True, exist_ok=True)
     (tmp_path / "scope.yaml").write_text("denied: []\n", encoding="utf-8")
@@ -61,6 +70,7 @@ def lab_root(tmp_path: Path) -> Path:
         encoding="utf-8",
     )
     (tmp_path / "playbooks").mkdir()
+    monkeypatch.setattr(labutil, "LAB", tmp_path)
     return tmp_path
 
 

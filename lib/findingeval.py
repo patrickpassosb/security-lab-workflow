@@ -566,7 +566,7 @@ def _record_dead_end_lesson(
             playbooks_dir=playbooks_dir,
         )
         return True
-    except huntlesson.HuntLessonValidationError:
+    except (huntlesson.HuntLessonValidationError, OSError):
         return False
 
 
