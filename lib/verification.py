@@ -1474,6 +1474,7 @@ def verify_oob_callback(
             ref=f"callback-record-{_short_id(callback_record)}",
             kind="callback_record",
             sha256=_sha256_text(record_str),
+            inline=True,
         ))
 
     return VerificationResult(

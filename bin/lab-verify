@@ -224,7 +224,12 @@ def main() -> int:
     # before any oracle call -- a malformed target must never be resolved
     # silently (mirrors the non-string engagement guard in build_result).
     payload_target = payload.get("target")
-    if "target" in payload and payload_target is not None and not isinstance(payload_target, str):
+    if (
+        not target
+        and "target" in payload
+        and payload_target is not None
+        and not isinstance(payload_target, str)
+    ):
         print(
             f"error: payload target must be a string, got {type(payload_target).__name__}",
             file=sys.stderr,
