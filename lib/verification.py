@@ -1426,7 +1426,8 @@ def verify_oob_callback(
             interaction_observed = True
             interaction_detail = f"record has {len(interactions)} interactions"
         elif isinstance(interactions, list) and not interactions:
-            interaction_detail = "record has an empty interactions list"
+            if not interaction_observed:
+                interaction_detail = "record has an empty interactions list"
     controls.append(DisconfirmingControl(
         name="interaction_observed",
         passed=interaction_observed,
@@ -1434,8 +1435,10 @@ def verify_oob_callback(
             f"real interaction observed ({interaction_detail})"
             if interaction_observed
             else (
-                f"no real interaction indicated in the record ({interaction_detail}"
-                f" or 'no type/received/interactions field')"
+                f"no real interaction indicated in the record ({interaction_detail})"
+                if interaction_detail
+                else "no real interaction indicated in the record"
+                " (no type/received/interactions field)"
             )
         ),
     ))
