@@ -23,3 +23,5 @@ pip install pyyaml requests
 | nuclei | Vulnerability scanner | go install .../nuclei@latest |
 | httpx | HTTP probing | go install .../httpx@latest |
 | ffuf | Fuzzing | go install .../ffuf@latest |
+| cai-framework | CAI agentic engine (bin/lab-cai-run) | uv venv + `uv pip install cai-framework` (install hint printed by bin/lab-cai-run) |
+| bubblewrap | Sandbox isolation (bin/lab-cai-run, bin/lab-eval) | apt/dnf install bubblewrap |

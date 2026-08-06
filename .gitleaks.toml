@@ -76,4 +76,20 @@ regexes = [
     # PGP private key block fixtures (synthetic fake base64, not real keys).
     '''lQVYBF2asdfGhjklFakeKeyNotReal''',
     '''fakeBase64Here''',
+    # Synthetic route-key fixtures in tests/test_lab_cai.py (lab-cai-run
+    # adapter). The redaction and fail-closed env-routing tests need values
+    # that LOOK like plausible API keys to be meaningful (e.g. asserting a
+    # key-like string is redacted / never reaches the sandbox env). These
+    # are committed synthetic fixtures, never live secrets. Exact-match
+    # only: a real key with a different value is still caught.
+    '''ollama-abc123def456''',
+    '''ollama-route-key-987654321''',
+    '''sk-route-key-123456789''',
+    # Synthetic OAST/Interactsh callback token fixture in
+    # tests/test_verification.py (OOB-callback oracle). Real OAST
+    # subdomains are random per-session and never this exact value.
+    '''abc123\.oast\.fun''',
+    # Synthetic API-key header fixture in tests/test_accounts.py and
+    # tests/test_httpdiff.py (header normalization/redaction tests).
+    '''APIKEY1234567890''',
 ]

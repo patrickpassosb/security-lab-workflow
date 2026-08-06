@@ -48,6 +48,7 @@ select = ["E", "W", "F", "I", "B", "UP", "SIM", "S"]
 # entry points — the lab's purpose is to run tools in subprocesses.
 "tests/*" = [
   "S101",  # assert in tests — correct, see global ignore rationale
+  "S103",  # chmod 0o755 on a synthetic test-fixture shim binary, not a real file
   "S105",  # hardcoded "secret"/"secret_label" are test fixtures, not creds
   "S108",  # /tmp used as a cwd fixture in test harness tests — not a real tmp vuln
   "S603",  # subprocess calls invoke the lab's own CLIs under test
@@ -98,6 +99,17 @@ select = ["E", "W", "F", "I", "B", "UP", "SIM", "S"]
 "lib/labimprove.py" = [
   "S101",  # assert for internal invariants in improvement loop
   "S603",  # candidate-skill subprocess under bwrap isolation (ADR-0003)
+]
+
+# lib/labcai.py: S603 — the adapter deliberately shells out to lab-scope
+# (the scope gate), the CAI binary (version probe), and bwrap (the sandbox).
+# All three are lab/tool executables resolved from fixed paths, never from
+# target-influenced input; the CAI/bwrap subprocess runs with a scrubbed
+# env and its output is treated as untrusted data. S110 — the version probe
+# and route probe are best-effort and must never raise; pass is the intent.
+"lib/labcai.py" = [
+  "S603",  # intentional subprocess calls: lab-scope gate, CAI, bwrap sandbox
+  "S110",  # best-effort probes that must never raise (exceptions swallowed)
 ]
 
 # scripts/seed_hunt_playbooks.py: E501 — the seed tuples carry long lesson

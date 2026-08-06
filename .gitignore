@@ -81,6 +81,17 @@ coverage.xml
 .ruff_cache/
 .mypy_cache/
 
+# ─── lab-cai-run runtime artifacts ────────────────────────────────────────
+# Run dirs, evidence, findings.jsonl ledgers, and CAI session logs produced
+# by bin/lab-cai-run (lib/labcai.py). Untrusted transcripts + redacted
+# fragments; workspace data — never committed. egress-block.hosts is the
+# sandbox /etc/hosts source, written into the output dir (ro-bound into
+# the sandbox) — with a custom --output it lands in the user's workspace,
+# so it is ignored too.
+.cai-runs/
+logs/cai_*.jsonl
+egress-block.hosts
+
 # ─── Secrets (the .env pattern) ───
 .env
 .env.*

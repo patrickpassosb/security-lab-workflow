@@ -158,6 +158,20 @@ to hunting: **rejected submission → dead-end lesson → next hunt avoids it.**
 - The `bounty-attack` skill has a mandatory "Read the program playbook" step 0 before hunting and an "After your hunt" step that writes lessons back.
 - `lab-h1-report record-outcome` with `--state not_applicable|informative` **automatically** appends a `dead_end` lesson to the program playbook (keyed by the engagement's program slug) — the auto-feedback loop. Best-effort; never blocks record-outcome.
 
+## CAI agentic hunting (lab-cai-run)
+
+- `lab-cai-run <target> --engagement <name> [--agent bug_bounter_agent|one_tool_agent]`
+  runs the open-source CAI agentic engine on the lab's Ollama Cloud route
+  (env-only keys), sandboxed via bwrap with CAI's known egress hosts
+  blackholed. Scope-gated (default-deny), output is untrusted data, and
+  findings land as hypotheses in `findings.jsonl`
+  (schema `security-lab/finding-candidate/v1`) — never verdicts.
+- Findings are parsed from CAI's session-recorder JSONL (headless mode
+  never renders panels to stdout). rc=1 (EOFError) and rc=124 (wall-clock
+  budget) are NORMAL budget ends (exit 0); only hard crashes exit 6.
+  Known upstream CAI defect: `fix_message_list` can spin on multi-tool
+  turns — the adapter contains it via `--timeout`.
+
 Schema: `schemas/hunt-lesson-v1.schema.json`. Library: `lib/huntlesson.py` (sole owner of the markdown renderer).
 
 ## Never
