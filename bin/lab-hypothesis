@@ -129,6 +129,10 @@ def _parse_flags(
         if a.startswith("--") and "=" in a:
             name, _, value = a.partition("=")
             if name in all_value:
+                if name in _BOOL_FLAGS and value.lower() not in _BOOL_VALUES:
+                    print(f"flag {name} requires a boolean value "
+                          f"(true/false/1/0/yes/no), got {value!r}", file=sys.stderr)
+                    return {}, {}, USAGE_ERR
                 if name in multi_flags:
                     multi.setdefault(name, []).append(value)
                 else:
@@ -405,14 +409,20 @@ def cmd_rank(args: list[str]) -> int:
     ws_dir = _resolve_workspace(single)
     dead_end_claims: list[str] = []
     dead_path = single.get("--dead-ends-file")
-    if dead_path and Path(dead_path).is_file():
-        try:
-            dead_end_claims = [
-                line.strip() for line in Path(dead_path).read_text(encoding="utf-8").splitlines()
-                if line.strip()
-            ]
-        except OSError as e:
-            print(f"WARNING: could not read --dead-ends-file {dead_path!r}: {e}", file=sys.stderr)
+    if dead_path:
+        if not Path(dead_path).is_file():
+            print(f"WARNING: --dead-ends-file {dead_path!r} not found - "
+                  f"dead-end penalty not applied", file=sys.stderr)
+        else:
+            try:
+                dead_end_claims = [
+                    line.strip()
+                    for line in Path(dead_path).read_text(encoding="utf-8").splitlines()
+                    if line.strip()
+                ]
+            except OSError as e:
+                print(f"WARNING: could not read --dead-ends-file {dead_path!r}: {e}",
+                      file=sys.stderr)
     md = H.render_worklist(
         ws_dir,
         dead_end_claims=dead_end_claims or None,

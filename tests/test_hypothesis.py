@@ -1103,6 +1103,34 @@ class TestMalformedJsonlRecovery:
         report = H.validate_ledger(ws)
         assert report.experiments_count >= 1
 
+    def test_validate_surfaces_scanner_verdict_violation(self, ws: Path) -> None:
+        """A hand-edited/legacy line with actor='tool' and a verdict result
+        must be surfaced by validate (module invariant #3), not silently
+        drive the derived status to a terminal state."""
+        hyp = add_hyp(ws)
+        exp = add_exp(ws, hyp["hypothesis_id"], result="inconclusive")
+        path = ws / ".lab" / "experiments.jsonl"
+        bad = dict(exp)
+        bad["result"] = "disconfirming"
+        bad["provenance"] = {"actor": "tool", "agent": "nuclei", "tool": "nuclei"}
+        path.write_text(json.dumps(bad) + "\n", encoding="utf-8")
+        report = H.validate_ledger(ws)
+        assert any("scanner-verdict" in str(s.get("error", ""))
+                   for s in report.shape_invalid_records)
+
+    def test_validate_rejects_date_only_ts(self, ws: Path) -> None:
+        """A date-only ts (schema-invalid) must be flagged as shape-invalid,
+        not pass the runtime gate (library/schema drift on immutable
+        provenance)."""
+        rec = add_hyp(ws)
+        path = ws / ".lab" / "hypotheses.jsonl"
+        bad = dict(rec)
+        bad["ts"] = "2026-08-03"
+        path.write_text(json.dumps(bad) + "\n", encoding="utf-8")
+        report = H.validate_ledger(ws)
+        assert any("ts" in str(s.get("error", ""))
+                   for s in report.shape_invalid_records)
+
 
 # ─── Rendering / query surface (agent worklist) ───────────────────────────────
 
@@ -1202,6 +1230,28 @@ class TestCli:
         ], cwd=ws)
         assert rc == 1  # USAGE_ERR: the flag was not swallowed
         assert "requires a value" in err
+        assert len(H.experiments_for(ws, hyp_id)) == 0
+
+    def test_cli_bool_eq_form_rejects_non_boolean(self, ws: Path) -> None:
+        """--expected-safe-observed=banana (or a typo like =flase) must be a
+        usage error, never silently recorded as False."""
+        rc, out, err = _run_cli([
+            "add", "--workspace", str(ws), "--engagement", "demo",
+            "--invariant", "inv", "--surface", "/api/x",
+            "--mutation", "m", "--expected-safe", "401",
+            "--violation-signal", "200", "--minimum-confirmation", "2",
+            "--primitive-leverage", "read_only", "--precondition-actor", "anon",
+        ], cwd=ws)
+        assert rc == 0, err
+        hyp_id = out.split("ADDED: ")[1].strip().splitlines()[0]
+        rc, _, err = _run_cli([
+            "experiment", "--workspace", str(ws), "--engagement", "demo",
+            "--hypothesis-id", hyp_id, "--action", "a", "--observation", "o",
+            "--expected-safe-observed=banana", "--violation-signal-observed", "false",
+            "--result", "corroborating", "--actor", "agent",
+        ], cwd=ws)
+        assert rc == 1
+        assert "requires a boolean value" in err
         assert len(H.experiments_for(ws, hyp_id)) == 0
 
     def test_cli_rank_is_agent_worklist(self, ws: Path) -> None:

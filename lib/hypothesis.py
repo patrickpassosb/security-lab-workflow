@@ -280,8 +280,19 @@ def _is_uuid_or_none(v: Any) -> bool:
     return True
 
 
+_ISO_TS_RE = re.compile(
+    r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:Z|[+-]\d{2}:\d{2})$"
+)
+
+
 def _is_iso_ts(v: Any) -> bool:
     if not isinstance(v, str) or not v:
+        return False
+    # The schemas pin ts to \d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(Z|[+-]\d{2}:\d{2}).
+    # fromisoformat alone accepts date-only and time-without-seconds forms
+    # that would pass the runtime gate but fail schema validation - keep the
+    # runtime gate aligned with the schema (immutable provenance field).
+    if not _ISO_TS_RE.match(v):
         return False
     try:
         datetime.fromisoformat(v.replace("Z", "+00:00"))
@@ -1426,6 +1437,19 @@ def validate_ledger(workspace_dir: Path | str) -> LedgerIntegrityReport:
         except HypothesisNotFoundError:
             # Orphaned experiments are reported separately above.
             pass
+        # Scanner-verdict audit (module invariant #3): a hand-edited/legacy
+        # line with actor='tool' and a verdict result must be surfaced, not
+        # silently drive the derived status to a terminal state.
+        prov = e.get("provenance")
+        actor = str(prov.get("actor") or "").strip().lower() if isinstance(prov, dict) else ""
+        if actor == "tool" and e.get("result") in (RESULT_CORROBORATING, RESULT_DISCONFIRMING):
+            shape_invalid.append({
+                "kind": "experiment",
+                "id": e.get("experiment_id"),
+                "error": "scanner-verdict rule: actor='tool' cannot record "
+                         f"result={e.get('result')!r} (verdicts are "
+                         "agent/replay-harness only)",
+            })
     return LedgerIntegrityReport(
         hypotheses_count=len(hyp_read.records),
         experiments_count=len(exp_read.records),
