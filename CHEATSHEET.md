@@ -58,6 +58,34 @@ LOAD_SESSION=1 TARGET_URL=<url> TARGET_ENDPOINT=/api/admin HTTP_METHOD=GET timeo
 
 Start Caido before the CTF. Keep this runbook open.
 
+## MoA — Multi-Model Verdicts (moa-run)
+
+Fans a task prompt to multiple advisor models in parallel, then sends their
+analyses + the original task to an aggregator model for the final verdict.
+Same pattern as Hermes `captain-test`, runnable locally via Aperture
+(Ollama Cloud route, captain's quota). See `bin/moa-run --help` and
+`moa.yaml` for full options.
+
+```bash
+# One-shot verdict from a prompt:
+~/security-lab/bin/moa-run "Is this exploit chain plausible? ..."
+
+# From a file, with context + audit traces:
+~/security-lab/bin/moa-run --file task.md --context "$(cat context.md)" \
+    --out verdict.json --traces traces/
+
+# Override roles (defaults: glm-5.2 + minimax-m3 → deepseek-v4-flash:0731 max):
+~/security-lab/bin/moa-run "analyze this" \
+    --advisors ollama-cloud/glm-5.2,ollama-cloud/minimax-m3 \
+    --aggregator ollama-cloud/deepseek-v4-flash:0731
+```
+
+Route: `MOA_BASE_URL` (default http://ai.tail492ce8.ts.net/v1, fallback
+`OLLAMA_API_BASE`) + `MOA_API_KEY` (fallback `OLLAMA_API_KEY`; default
+`not-required` — Aperture needs no client auth). Never hardcoded.
+Traces (save_traces equivalent) land in `traces/` by default (gitignored):
+one JSON per advisor + aggregator + run manifest.
+
 ## Scope First
 
 Check scope before touching a target. The CTF uses the engagement system:

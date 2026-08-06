@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- `bin/moa-run` + `lib/moa.py` + `moa.yaml`: local Mixture-of-Agents (MOA)
+  wrapper matching the Hermes `captain-test` preset — fans a task prompt to
+  advisor models in parallel (`ollama-cloud/glm-5.2`,
+  `ollama-cloud/minimax-m3`), then sends their analyses + the original task
+  to an aggregator (`ollama-cloud/deepseek-v4-flash:0731`, reasoning_effort
+  max) for the final verdict. Route via Aperture (`MOA_BASE_URL` /
+  `MOA_API_KEY`, fallbacks `OLLAMA_API_BASE` / `OLLAMA_API_KEY`); advisor
+  analyses + aggregator transcripts are traced to `traces/` (gitignored) for
+  audit. Stdlib-only HTTP (urllib), thread-pool fan-out, per-advisor failure
+  isolation. `tests/test_moa.py` + `tests/test_moa_run_cli.py` mock the model
+  calls — no live quota in tests.
+
 ### Fixed
 - `Makefile`: `BIN_BASH_SCRIPTS` `$(shell ...)` assignment contained an
   unbalanced `)` (case pattern) and a `#` (regex), which make parses as

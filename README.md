@@ -37,6 +37,23 @@ cd ~/security-lab
 - [Security Policy](SECURITY.md)
 - [Changelog](CHANGELOG.md)
 
+## MoA (Mixture of Agents) — multi-model verdicts
+
+`bin/moa-run` fans a task prompt to multiple advisor models in parallel
+(defaults: `ollama-cloud/glm-5.2` + `ollama-cloud/minimax-m3`), then sends
+their analyses plus the original task to an aggregator model
+(`ollama-cloud/deepseek-v4-flash:0731`, reasoning_effort=max) for the final
+verdict — the Hermes `captain-test` MOA preset, runnable locally via Aperture
+(Ollama Cloud route). No API keys in code: `MOA_BASE_URL` / `MOA_API_KEY`
+(fallbacks `OLLAMA_API_BASE` / `OLLAMA_API_KEY`). Advisor analyses and
+aggregator transcripts are written to `traces/` for audit.
+
+```bash
+~/security-lab/bin/moa-run "Is this exploit chain plausible? ..." \
+    --file task.md --out verdict.json
+# see CHEATSHEET.md → MoA — Multi-Model Verdicts, and bin/moa-run --help
+```
+
 ## Configuration
 
 Copy `.env.example` to `.env` and fill in your values:
