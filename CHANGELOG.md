@@ -19,6 +19,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   audit. Stdlib-only HTTP (urllib), thread-pool fan-out, per-advisor failure
   isolation. `tests/test_moa.py` + `tests/test_moa_run_cli.py` mock the model
   calls — no live quota in tests.
+- `bin/lab-hypothesis` + `lib/hypothesis.py` +
+  `schemas/hypothesis-v1.schema.json`, `schemas/experiment-v1.schema.json`:
+  typed hypothesis-and-experiment ledger — ranked, falsifiable tests instead
+  of unstructured scanner output. Append-only JSONL per workspace
+  (`.lab/hypotheses.jsonl` + `.lab/experiments.jsonl`); default-deny scope
+  gate; `rank` scores by primitive leverage × scope safety × impact ×
+  novelty × (1 − dead-end penalty). Status derived from experiments, never
+  mutated.
 - `bin/lab-verify-findings` + `lib/findingeval.py` +
   `schemas/finding-eval-v1.schema.json`: automatic finding-evaluation loop.
   Every completed hunt's findings (the `findings.jsonl` ledger of
@@ -37,6 +45,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `bin/lab-static-review` + `lib/staticreview.py`: source-review scaffold —
   inventory -> sink grep -> reachability -> report. Sink hits are
   hypotheses, never verdicts.
+- `tests/test_hypothesis.py`: hypothesis ledger test suite (referential
+  integrity, dedup, ranking, contradictory evidence, unsafe scope,
+  malformed-JSONL recovery).
 - `tests/test_findingeval.py`, `tests/test_lab_verify_findings_cli.py`,
   `tests/test_static_review.py`: gate, CLI, and scaffold test suites,
   including the notion-sdk F2 validation case (path-normalization endpoint
