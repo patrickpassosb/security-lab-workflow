@@ -42,7 +42,7 @@ def fake_route(monkeypatch):
     calls: list[dict] = []
 
     def fake_chat(base_url, api_key, model, messages, **kwargs):
-        calls.append(model)
+        calls.append({"model": model, "messages": messages})
         if model == "mock/aggregator":
             return _reply("VERDICT TEXT")
         return _reply(f"analysis from {model}")
@@ -97,7 +97,7 @@ class TestMoaRunCli:
         out = capsys.readouterr().out
         assert rc == 0
         assert out.strip() == "VERDICT TEXT"
-        assert fake_route == ["mock/advisor-a", "mock/advisor-b", "mock/aggregator"]
+        assert [c["model"] for c in fake_route] == ["mock/advisor-a", "mock/advisor-b", "mock/aggregator"]
 
     def test_out_file_written_with_verdict_shape(self, tmp_path, monkeypatch, fake_route, cli_env):
         out_path = tmp_path / "verdict.json"
@@ -113,8 +113,9 @@ class TestMoaRunCli:
         task.write_text("prompt from file", encoding="utf-8")
         rc = _run(monkeypatch, "--file", str(task), "--context", "ctx data", *MOCK_ROLES)
         assert rc == 0
-        last = moa.chat_completions  # ensure patched
-        assert last is not None
+        all_messages = [m for c in fake_route for m in c["messages"]]
+        assert any("prompt from file" in m["content"] for m in all_messages)
+        assert any("ctx data" in m["content"] for m in all_messages)
 
     def test_traces_dir_written(self, tmp_path, monkeypatch, fake_route, cli_env):
         rc = _run(monkeypatch, "trace me", *MOCK_ROLES)

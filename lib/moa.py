@@ -343,7 +343,7 @@ def run_moa(
     if not ok:
         raise MoaAllAdvisorsFailed(
             "every advisor failed: "
-            + "; ".join(f"{label}: {error}" for label, _model, _analysis, error in failed)
+            + "; ".join(f"{label}: {meta.get('error', 'unknown')}" for label, _model, _analysis, meta in failed)
         )
 
     for label, _model, _analysis, meta in advisor_results:
