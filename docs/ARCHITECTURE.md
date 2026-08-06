@@ -201,7 +201,8 @@ Global, shared scripts that implement the workflow. All read env vars (`$HACKING
 | `lab-hunt` | One-command CTF hunt (scope + workspace + gbrain + firstpass + wordlist) |
 | `lab-firstpass` | AppSec first-pass on a web target |
 | `lab-dashboard` | CTF challenge tracking dashboard |
-| `lab-oob` | OOB confirmation via interactsh |
+| `lab-oob` | OOB confirmation via interactsh (emits canonical collector records: collector_id/token/timestamp) |
+| `lab-verify` | Deterministic, non-AI verification gate (authorization / business_logic / sha256_canary / oob_callback oracles; see `lib/verification.py`) |
 | `lab-wordlist` | Custom wordlist generator |
 | `ctf-new` | Backward-compatible wrapper around `lab-new ctf` |
 | `ctf-evidence` | Capture command output + metadata under `evidence/` |

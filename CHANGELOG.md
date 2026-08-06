@@ -22,9 +22,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   directives).
 
 ### Added
+- `bin/lab-verify` + `lib/verification.py` + `schemas/verification-result-v1.schema.json`:
+  deterministic, non-AI verification gate. Four oracles — `authorization`
+  (cross-actor differential + controlled victim marker + verified ownership),
+  `business_logic` (separate post-action state read, never the mutation
+  response), `sha256_canary` (agent got only location + expected hash),
+  `oob_callback` (accepted only from a captured callback record). Model
+  prose can never produce `outcome=verified`; results conform to the
+  verification-result-v1 schema; refuses out-of-scope targets via the shared
+  labutil scope primitives; never contacts live targets.
+- `tests/test_lab_verify_cli.py`, `tests/test_verification.py`,
+  `tests/test_lab_oob.py`: oracle, CLI, and OOB-collector test suites.
 - `tests/test_lab_new.py::TestProgramRootDetection`: regression tests
   pinning that the lab root is never a program root and that real program
   folders under `$HACKING_LAB` still get program mode.
+
+### Changed
+- `bin/lab-oob`: callback classification now anchors protocol tokens to
+  interactsh's bracketed form (`[DNS]`, `[HTTP]`, ...) and requires the full
+  "Received interaction" phrase — a bare substring is never mistaken for a
+  callback. Listener state carries a deterministic `collector_id` (hash of
+  hostname+pid) and callbacks are recorded in the canonical
+  collector_id/token/timestamp shape consumed by the `oob_callback` oracle.
+  Empty-URL state is guarded in `poll`/`check`.
 
 ## [0.1.0] - 2026-07-06
 

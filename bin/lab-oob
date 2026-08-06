@@ -34,7 +34,7 @@ import socket
 import subprocess
 import sys
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -271,7 +271,7 @@ def poll_listener(timeout: int = 60) -> int:
 
                     # Update state (canonical collector record:
                     # collector_id/timestamp/token plus existing fields).
-                    record_ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+                    record_ts = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
                     callbacks = state.get("callbacks", [])
                     callbacks.append({
                         "collector_id": cid,
@@ -279,7 +279,7 @@ def poll_listener(timeout: int = 60) -> int:
                         "timestamp": record_ts,
                         "type": cb_type,
                         "received": True,
-                        "time": datetime.now(timezone.utc).isoformat(),
+                        "time": datetime.now(UTC).isoformat(),
                         "raw": line[:500],
                     })
                     state["callbacks"] = callbacks
@@ -325,10 +325,10 @@ def check_once() -> int:
                 callbacks.append({
                     "collector_id": cid,
                     "token": url,
-                    "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                    "timestamp": datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
                     "type": cb_type,
                     "received": True,
-                    "time": datetime.now(timezone.utc).isoformat(),
+                    "time": datetime.now(UTC).isoformat(),
                     "raw": line[:500],
                 })
                 state["callbacks"] = callbacks
