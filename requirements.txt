@@ -25,7 +25,7 @@ pytest-timeout>=2.4.0
 pytest-cov>=5.0
 junit-xml>=1.8
 jsonschema>=4.22
-mypy>=1.11
+mypy>=2.3.0
 
 # Note: --require-hashes requires ALL deps to have hashes. After the first
 # pip-compile --generate-hashes, replace the placeholder hashes above with
