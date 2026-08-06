@@ -57,7 +57,7 @@ SAFETY INVARIANTS:
     records, canary location + expected hash + retrieved value). All inputs
     are data.
   - The verifier refuses out-of-scope targets via labutil.check_target_scope
-    (the shared scope primitive). ref_<unsafe > out-of-scope inputs are
+    (the shared scope primitive). Reference out-of-scope inputs are
     rejected with outcome=insufficient_evidence and a reason explaining the
     refusal -- the oracle never proceeds against an unauthorized target.
   - Evidence tamper-resistance: when an evidence entry carries a `sha256`,
@@ -546,6 +546,23 @@ def verify_authorization(
     controls: list[DisconfirmingControl] = []
     reason_parts: list[str] = []
 
+    # Evidence integrity (tamper-resistance) is checked FIRST: tampered or
+    # unreadable evidence forces insufficient_evidence, never disproved --
+    # a disproved verdict would still be a deterministic finding the caller
+    # might record, so tampered evidence must not steer the outcome at all
+    # (consistent with the other oracles, where integrity failure blocks
+    # every outcome except insufficient_evidence).
+    integrity_failures = _check_all_evidence_integrity(evidence)
+    if integrity_failures:
+        controls.append(DisconfirmingControl(
+            name="evidence_integrity",
+            passed=False,
+            detail="; ".join(integrity_failures[:2]),
+        ))
+        reason_parts.append(
+            "insufficient: evidence integrity check failed (tampered or unreadable)"
+        )
+
     # Control 1: the endpoint is actually access-gated (no-credential /
     # self-actor request does NOT leak the victim marker). passed=True means
     # the control held -- the marker did NOT appear in the control response.
@@ -560,7 +577,7 @@ def verify_authorization(
                  "access-gated (not a bypass)"
         ),
     ))
-    if marker_in_control:
+    if marker_in_control and not integrity_failures:
         reason_parts.append(
             "disproved: control response leaked the victim marker -- the endpoint "
             "is not access-gated"
@@ -577,7 +594,7 @@ def verify_authorization(
             else "cross-actor response did NOT contain the victim marker (empty-data differential)"
         ),
     ))
-    if not marker_in_cross:
+    if not marker_in_cross and not integrity_failures:
         reason_parts.append(
             "insufficient: cross-actor response did not contain the victim marker "
             "(the empty-data authorization differential failure mode -- not a real data leak)"
@@ -594,34 +611,28 @@ def verify_authorization(
             else "ownership/workspace identity NOT verified -- caller attestation incomplete"
         ),
     ))
-    if not ownership_ok:
+    if not ownership_ok and not integrity_failures:
         reason_parts.append(
             "insufficient: ownership/workspace identity not verified"
             + (f" -- {ownership_detail}" if ownership_detail else "")
         )
 
-    # Evidence integrity (tamper-resistance).
-    integrity_failures = _check_all_evidence_integrity(evidence)
-    if integrity_failures:
-        controls.append(DisconfirmingControl(
-            name="evidence_integrity",
-            passed=False,
-            detail="; ".join(integrity_failures[:2]),
-        ))
-        reason_parts.append(
-            "insufficient: evidence integrity check failed (tampered or unreadable)"
-        )
-
-    # Determine the deterministic outcome.
+    # Determine the deterministic outcome. Integrity failure ALWAYS wins
+    # (insufficient_evidence) so tampered evidence can never be steered
+    # toward disproved by a coincidental marker leak.
+    # - insufficient_evidence: evidence integrity failed (tampered or
+    #   unreadable) -- checked before any other signal.
     # - disproved: the endpoint is not access-gated (control fired) -- the
     #   candidate finding was wrong (true negative).
     # - insufficient_evidence: marker absent from cross-actor response, or
-    #   ownership not verified, or evidence integrity failed.
+    #   ownership not verified.
     # - verified: marker present in cross-actor response AND absent from
     #   control response AND ownership verified AND no integrity failures.
-    if marker_in_control:
+    if integrity_failures:
+        outcome = OUTCOME_INSUFFICIENT
+    elif marker_in_control:
         outcome = OUTCOME_DISPROVED
-    elif not marker_in_cross or not ownership_ok or integrity_failures:
+    elif not marker_in_cross or not ownership_ok:
         outcome = OUTCOME_INSUFFICIENT
     else:
         outcome = OUTCOME_VERIFIED
@@ -722,7 +733,9 @@ def verify_business_logic(
          state-verification step" as a failure mode.
       2. The post-action state read contains the expected_state_field with
          the expected_state_value (e.g. state=confirmed AND confirmed_at is
-         set). A mutation response that Sats "confirmed" but a separate GET
+         set). When the read is a JSON object, the field is compared EXACTLY
+         (substring matching is only the fallback for non-JSON bodies). A
+         mutation response that says "confirmed" but a separate GET
          that shows state=pending disproves the finding (the transition did
          not actually happen).
       3. The precondition was genuinely violated (precondition_violated=True).
@@ -747,9 +760,11 @@ def verify_business_logic(
         expected_state_field: the field name to look for in the post-action
             state read (e.g. "state", "confirmed_at").
         expected_state_value: the value the field must hold for the finding
-            to be verified (e.g. "confirmed"). The oracle checks the
-            post_action_state_read contains "<field>=<value>" or
-            "<field>": "<value>" (JSON-ish) -- a substring check.
+            to be verified (e.g. "confirmed"). When the state read parses as
+            a JSON object, the field is compared EXACTLY (a substring hit
+            elsewhere in the JSON body cannot pass); substring matching
+            ("field=value" / '"field": "value"') is only the fallback for
+            non-JSON captured bodies.
         precondition_violated: caller attests the precondition was genuinely
             violated (e.g. payment was NOT made, the previous workflow step
             was NOT completed). False disproves the finding.
@@ -817,23 +832,22 @@ def verify_business_logic(
             "response alone is not trusted)"
         )
 
-    # Control 2: the post-action state read contains the expected field=value.
-    # Support both "field=value" and JSON-ish "field": "value" so the caller
-    # can pass raw captured bodies.
-    state_confirmed = False
-    if has_state_read:
-        needle_kv = f"{expected_state_field}={expected_state_value}"
-        needle_json = f'"{expected_state_field}": "{expected_state_value}"'
-        needle_json_bare = f'"{expected_state_field}":"{expected_state_value}"'
-        state_confirmed = any(
-            n in post_action_state_read
-            for n in (needle_kv, needle_json, needle_json_bare)
-        )
+    # Control 2: the post-action state read confirms the expected field=value.
+    # When the read parses as a JSON object, compare the field EXACTLY (a
+    # JSON body must never pass via a substring hit elsewhere in the
+    # document); substring matching is only the fallback for non-JSON
+    # captured bodies (e.g. plaintext "state=confirmed").
+    state_confirmed, match_kind = _state_read_confirms(
+        post_action_state_read,
+        expected_state_field,
+        expected_state_value,
+    ) if has_state_read else (False, "")
     controls.append(DisconfirmingControl(
         name="state_read_confirms",
         passed=state_confirmed,
         detail=(
             f"post-action state read confirms {expected_state_field}={expected_state_value}"
+            f" ({match_kind})"
             if state_confirmed
             else f"post-action state read does NOT confirm "
                  f"{expected_state_field}={expected_state_value}"
@@ -937,6 +951,44 @@ def _ensure_business_logic_evidence(
             kind="mutation_response",
             sha256=_sha256_text(mutation_response),
         ))
+
+
+def _state_read_confirms(
+    post_action_state_read: str,
+    expected_state_field: str,
+    expected_state_value: str,
+) -> tuple[bool, str]:
+    """Check the post-action state read confirms the expected field=value.
+
+    When the read parses as a JSON object, the check is EXACT: the field
+    must exist with the expected value (by type-equality or string
+    equality), so a substring hit elsewhere in the document cannot pass a
+    JSON body. When the read is not JSON (e.g. plaintext "state=confirmed"
+    or key=value dumps), fall back to the substring checks
+    ("field=value", '"field": "value"', '"field":"value"').
+
+    Returns (confirmed, match_kind) where match_kind is "exact JSON match"
+    or "substring match" so callers can surface how the check passed.
+    """
+    try:
+        parsed = json.loads(post_action_state_read)
+    except (ValueError, TypeError):
+        parsed = None
+    if isinstance(parsed, dict):
+        if expected_state_field in parsed:
+            actual = parsed[expected_state_field]
+            if actual == expected_state_value:
+                return True, "exact JSON match"
+    elif parsed is not None:
+        # The body parsed as JSON but is not an object (list, scalar) --
+        # no field to compare; fall through to substring fallback.
+        pass
+    needle_kv = f"{expected_state_field}={expected_state_value}"
+    needle_json = f'"{expected_state_field}": "{expected_state_value}"'
+    needle_json_bare = f'"{expected_state_field}":"{expected_state_value}"'
+    if any(n in post_action_state_read for n in (needle_kv, needle_json, needle_json_bare)):
+        return True, "substring match"
+    return False, ""
 
 
 # ─── SHA-256 canary oracle ────────────────────────────────────────────────────

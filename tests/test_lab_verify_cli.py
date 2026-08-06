@@ -359,3 +359,79 @@ class TestLabVerify:
         assert any(
             "engagement must be a string" in e.get("detail", "") for e in matches
         )
+
+    def test_non_string_payload_target_fails_cleanly(
+        self, capsys, tmp_path, cli_env, monkeypatch
+    ):
+        secret = "flag{GUID}"
+        payload = {
+            "finding_id": "cli-target-crash",
+            "canary_location": "x",
+            "expected_sha256": _sha(secret),
+            "retrieved_value": secret,
+            "target": 123,
+        }
+        p = _write_payload(tmp_path, payload)
+        rc = _run(monkeypatch, "sha256_canary", "--payload", str(p))
+        assert rc == 1
+        log_path = cli_env / "findings" / ".agent-audit.jsonl"
+        raw_lines = [
+            line
+            for line in log_path.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+        entries = [json.loads(line) for line in raw_lines]
+        matches = [
+            e
+            for e in entries
+            if e.get("action") == "lab-verify" and e.get("exit") == 1
+        ]
+        assert matches, "no lab-verify audit entry for the failed run"
+        assert any(
+            "payload target must be a string" in e.get("detail", "") for e in matches
+        )
+
+    def test_result_schema_validation_failure_refused(
+        self, capsys, tmp_path, cli_env, monkeypatch
+    ):
+        """A produced result that fails schema validation must be refused
+        (exit 1) with an audit entry — the defense-in-depth gate between
+        the oracle and the write."""
+        secret = "flag{GUID}"
+        payload = {
+            "finding_id": "cli-schema-fail",
+            "canary_location": "x",
+            "expected_sha256": _sha(secret),
+            "retrieved_value": secret,
+        }
+        p = _write_payload(tmp_path, payload)
+        out = tmp_path / "result.json"
+        # Force the defense-in-depth path: the oracle produces a conforming
+        # result by construction, so simulate a schema failure to exercise
+        # the CLI's refusal (this is the gate the docstring promises).
+        monkeypatch.setattr(
+            lab_verify.V,
+            "validate_result",
+            lambda _result: ["forced validation failure"],
+        )
+        rc = _run(monkeypatch, "sha256_canary", "--payload", str(p), "--out", str(out))
+        assert rc == 1
+        assert not out.exists(), "no result must be written on schema failure"
+        err = capsys.readouterr().err
+        assert "produced result failed schema validation" in err
+        log_path = cli_env / "findings" / ".agent-audit.jsonl"
+        raw_lines = [
+            line
+            for line in log_path.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+        entries = [json.loads(line) for line in raw_lines]
+        matches = [
+            e
+            for e in entries
+            if e.get("action") == "lab-verify" and e.get("exit") == 1
+        ]
+        assert matches, "no lab-verify audit entry for the schema-failure run"
+        assert any(
+            "result schema validation failed" in e.get("detail", "") for e in matches
+        )

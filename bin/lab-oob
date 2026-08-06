@@ -25,6 +25,7 @@ terminal sessions can access it.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -46,8 +47,16 @@ EVIDENCE_DIR = Path.cwd() / "evidence"
 
 
 def collector_id() -> str:
-    """Stable per-listener collector id (hostname + pid)."""
-    return f"{socket.gethostname()}-{os.getpid()}"
+    """Stable per-listener collector id: deterministic hash of hostname+pid.
+
+    The id hashes the hostname so evidence shared across machines (or with
+    a validator) never embeds the collector hostname, and includes the pid
+    so parallel listeners on the same host stay distinct. The hash is
+    truncated to 16 hex chars and prefixed with "collector-" so the field
+    is clearly a collector id, not a hostname.
+    """
+    raw = f"{socket.gethostname()}-{os.getpid()}"
+    return "collector-" + hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
 
 
 _CALLBACK_PROTOCOL_TOKENS = ("DNS", "HTTP", "SMTP", "LDAP")
@@ -64,11 +73,18 @@ def classify_callback(line: str) -> tuple[str, bool]:
     token is absent. Mirrors the oracle contract in
     lib/verification.py:verify_oob_callback (accepted types HTTP/DNS/SMTP/
     LDAP, or an explicit received signal).
+
+    Protocol tokens are only recognized in interactsh's bracketed form
+    ("[DNS]", "[HTTP]", ...) so a bare substring (e.g. "dns" inside a
+    URL or "HTTP" in an unrelated log line) is never mistaken for a
+    callback. The generic received signal requires the full
+    "Received interaction" phrase -- "Received" or "Interaction" alone
+    is not a captured callback.
     """
     for proto in _CALLBACK_PROTOCOL_TOKENS:
-        if proto in line:
+        if f"[{proto}]" in line:
             return proto, True
-    if any(kw in line for kw in _CALLBACK_KEYWORDS):
+    if "Received interaction" in line:
         return "UNKNOWN", True
     return "UNKNOWN", False
 
@@ -197,6 +213,9 @@ def poll_listener(timeout: int = 60) -> int:
 
     log_file = Path(state.get("log_file", "/tmp/lab-oob-output.log"))
     url = state.get("url", "")
+    if not url:
+        log("No callback URL in state. Run 'lab-oob start' first.")
+        return 1
     cid = state.get("collector_id") or collector_id()
     log(f"Polling for callbacks (timeout: {timeout}s)...")
     log(f"Listening for: {url}")
@@ -287,6 +306,9 @@ def check_once() -> int:
         return 1
     log_file = Path(state.get("log_file", str(OUTPUT_LOG)))
     url = state.get("url", "")
+    if not url:
+        print("No callback URL in state")
+        return 1
     cid = state.get("collector_id") or collector_id()
     if log_file.exists():
         content = log_file.read_text()

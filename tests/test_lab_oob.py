@@ -35,9 +35,29 @@ def test_classify_callback_protocol_tokens(lab_oob):
 
 def test_classify_callback_case_sensitive_tokens(lab_oob):
     """Protocol tokens are matched exactly as interactsh prints them
-    (uppercase); a lowercase line is not a recognized signal."""
+    (uppercase bracketed form); a lowercase or unbracketed line is not a
+    recognized signal."""
     line = "[ldap] received interaction for abc123.oast.fun"
     assert lab_oob.classify_callback(line) == ("UNKNOWN", False)
+
+
+def test_classify_callback_bare_protocol_substring_not_signal(lab_oob):
+    """A bare protocol token without interactsh's bracketed form must not
+    classify as a callback (e.g. a URL containing the letters 'dns' or a
+    log line mentioning HTTP)."""
+    line = "dns query for abc123.oast.fun failed"
+    assert lab_oob.classify_callback(line) == ("UNKNOWN", False)
+    line2 = "proxied via HTTP/2 to abc123.oast.fun"
+    assert lab_oob.classify_callback(line2) == ("UNKNOWN", False)
+
+
+def test_classify_callback_partial_keyword_not_signal(lab_oob):
+    """'Received' or 'Interaction' alone is NOT the full interactsh phrase —
+    only the complete 'Received interaction' marks a captured callback."""
+    line = "Received something at abc123.oast.fun"
+    assert lab_oob.classify_callback(line) == ("UNKNOWN", False)
+    line2 = "An interaction happened at abc123.oast.fun"
+    assert lab_oob.classify_callback(line2) == ("UNKNOWN", False)
 
 
 def test_classify_callback_generic_keyword_received(lab_oob):
@@ -50,19 +70,19 @@ def test_classify_callback_no_signal(lab_oob):
     assert lab_oob.classify_callback(line) == ("UNKNOWN", False)
 
 
-def _run_poll(lab_oob, monkeypatch, log_lines, url="abc123.oast.fun"):
+def _run_poll(lab_oob, monkeypatch, log_lines, url="abc123.oast.fun", tmp_path=None):
     """Drive poll_listener against a fake log file and return the saved state."""
-    state_path = Path("/tmp/lab-oob-test-state.json")
-    log_path = Path("/tmp/lab-oob-test-output.log")
+    state_path = tmp_path / "oob-test-state.json"
+    log_path = tmp_path / "oob-test-output.log"
     if state_path.exists():
         state_path.unlink()
     monkeypatch.setattr(lab_oob, "STATE_FILE", state_path)
-    monkeypatch.setattr(lab_oob, "EVIDENCE_DIR", Path("/tmp/lab-oob-test-evidence"))
+    monkeypatch.setattr(lab_oob, "EVIDENCE_DIR", tmp_path / "oob-test-evidence")
     log_path.write_text("\n".join(log_lines) + "\n", encoding="utf-8")
     state = {
         "pid": os.getpid(),
         "url": url,
-        "collector_id": "test-host-424242",
+        "collector_id": "collector-0123456789abcdef",
         "log_file": str(log_path),
         "callbacks": [],
     }
@@ -70,7 +90,7 @@ def _run_poll(lab_oob, monkeypatch, log_lines, url="abc123.oast.fun"):
     return state
 
 
-def test_poll_emits_received_true_for_generic_line(lab_oob, monkeypatch):
+def test_poll_emits_received_true_for_generic_line(lab_oob, monkeypatch, tmp_path):
     """A generic interaction keyword line must produce a callback record
     carrying received: true so the oob_callback oracle can verify it
     (type=UNKNOWN alone would stay insufficient_evidence forever)."""
@@ -78,6 +98,7 @@ def test_poll_emits_received_true_for_generic_line(lab_oob, monkeypatch):
         lab_oob,
         monkeypatch,
         ["[15:00:01] Received interaction for abc123.oast.fun"],
+        tmp_path=tmp_path,
     )
     exit_code = lab_oob.poll_listener(5)
     assert exit_code == 0
@@ -88,13 +109,14 @@ def test_poll_emits_received_true_for_generic_line(lab_oob, monkeypatch):
     assert record["token"] == "abc123.oast.fun"
 
 
-def test_poll_emits_received_true_for_ldap_line(lab_oob, monkeypatch):
+def test_poll_emits_received_true_for_ldap_line(lab_oob, monkeypatch, tmp_path):
     """Protocol-token lines also carry received: true (the oracle accepts
     either the type or the received signal)."""
     state = _run_poll(
         lab_oob,
         monkeypatch,
         ["[15:00:01] [LDAP] Received interaction for abc123.oast.fun"],
+        tmp_path=tmp_path,
     )
     exit_code = lab_oob.poll_listener(5)
     assert exit_code == 0
@@ -103,14 +125,35 @@ def test_poll_emits_received_true_for_ldap_line(lab_oob, monkeypatch):
     assert record["received"] is True
 
 
-def test_check_once_emits_received_true(lab_oob, monkeypatch):
+def test_check_once_emits_received_true(lab_oob, monkeypatch, tmp_path):
     """check_once must record the same canonical shape as poll_listener."""
     state = _run_poll(
         lab_oob,
         monkeypatch,
         ["[15:00:01] Received interaction for abc123.oast.fun"],
+        tmp_path=tmp_path,
     )
     exit_code = lab_oob.check_once()
     assert exit_code == 0
     assert len(state["callbacks"]) == 1
     assert state["callbacks"][0]["received"] is True
+
+
+def test_poll_refuses_empty_url(lab_oob, monkeypatch, tmp_path):
+    """A state file without a callback URL must be refused early — an empty
+    url would make the poll loop compare against '' and never match."""
+    state = _run_poll(lab_oob, monkeypatch, ["anything"], url="", tmp_path=tmp_path)
+    exit_code = lab_oob.poll_listener(2)
+    assert exit_code == 1
+    assert state["callbacks"] == []
+
+
+def test_collector_id_is_deterministic_hex_without_hostname(lab_oob, monkeypatch):
+    """collector_id hashes hostname+pid to a deterministic 16-hex id so
+    shared evidence never embeds the collector hostname."""
+    cid = lab_oob.collector_id()
+    assert cid.startswith("collector-")
+    rest = cid[len("collector-"):]
+    assert len(rest) == 16
+    int(rest, 16)  # raises ValueError if not hex
+    assert lab_oob.collector_id() == cid

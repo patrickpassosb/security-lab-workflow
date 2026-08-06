@@ -220,6 +220,27 @@ def main() -> int:
     if not engagement and isinstance(payload.get("engagement"), str):
         engagement = payload["engagement"]
 
+    # Reject a non-string payload target explicitly, with an audit entry,
+    # before any oracle call -- a malformed target must never be resolved
+    # silently (mirrors the non-string engagement guard in build_result).
+    payload_target = payload.get("target")
+    if "target" in payload and payload_target is not None and not isinstance(payload_target, str):
+        print(
+            f"error: payload target must be a string, got {type(payload_target).__name__}",
+            file=sys.stderr,
+        )
+        labutil.audit(
+            "lab-verify",
+            target=target,
+            engagement=engagement,
+            exit_code=1,
+            detail=(
+                f"payload target must be a string, got {type(payload_target).__name__}"
+            ),
+            oracle=oracle,
+        )
+        return 1
+
     # Symmetric resolution for the target: when --target is absent, resolve
     # it from the payload before the oracle call so the audit entry records
     # the SAME target the scope gate actually enforced (an asymmetry here

@@ -268,6 +268,59 @@ class TestBusinessLogicOracle:
         )
         assert r.outcome == V.OUTCOME_VERIFIED
 
+    def test_json_state_read_requires_exact_field_value(self):
+        """When the state read is a JSON object, the field must hold the
+        expected value EXACTLY — a substring hit elsewhere in the JSON body
+        must not pass."""
+        r = V.verify_business_logic(
+            "bl-json-exact",
+            mutation_response="x",
+            post_action_state_read='{"state":"confirmed_before_reset"}',
+            expected_state_field="state",
+            expected_state_value="confirmed",
+            precondition_violated=True,
+        )
+        assert r.outcome == V.OUTCOME_DISPROVED
+
+    def test_json_state_read_field_type_mismatch_is_not_confirmed(self):
+        """A JSON field holding a different type (e.g. int) than the expected
+        string must not be treated as a match."""
+        r = V.verify_business_logic(
+            "bl-json-type",
+            mutation_response="x",
+            post_action_state_read='{"state":1}',
+            expected_state_field="state",
+            expected_state_value="confirmed",
+            precondition_violated=True,
+        )
+        assert r.outcome == V.OUTCOME_DISPROVED
+
+    def test_json_state_read_exact_match_with_int_value(self):
+        """JSON exact match compares the field value exactly: a JSON int is
+        not equal to an expected string (no coercion)."""
+        r = V.verify_business_logic(
+            "bl-json-int",
+            mutation_response="x",
+            post_action_state_read='{"retries":3}',
+            expected_state_field="retries",
+            expected_state_value="3",
+            precondition_violated=True,
+        )
+        assert r.outcome == V.OUTCOME_DISPROVED
+
+    def test_non_json_state_read_uses_substring_fallback(self):
+        """Plaintext state dumps (e.g. key=value) still pass via the
+        substring fallback."""
+        r = V.verify_business_logic(
+            "bl-kv",
+            mutation_response="x",
+            post_action_state_read="state=confirmed\nconfirmed_at=2026-08-03T00:00:00Z",
+            expected_state_field="state",
+            expected_state_value="confirmed",
+            precondition_violated=True,
+        )
+        assert r.outcome == V.OUTCOME_VERIFIED
+
 
 # ─── SHA-256 canary oracle ───────────────────────────────────────────────────
 
@@ -527,6 +580,35 @@ class TestTamperedEvidence:
             "tamper-authz",
             cross_actor_response=tampered,
             control_response='{"error":"forbidden"}',
+            victim_marker="ctrl_7f3a",
+            ownership_verified=True,
+            ownership_identity="user_42",
+            evidence=ev,
+        )
+        assert r.outcome == V.OUTCOME_INSUFFICIENT
+        assert V.validate_result(r) == []
+
+    def test_authorization_tampered_evidence_beats_marker_leak(self):
+        """Evidence integrity is checked before the marker controls: even a
+        control response that leaked the victim marker (which alone would
+        disprove) must stay insufficient_evidence when the evidence is
+        tampered -- a disproved verdict is still a deterministic finding the
+        caller might record, so tampered evidence must not steer the
+        outcome at all."""
+        original = '{"owner_user_id":"user_42","marker":"ctrl_7f3a"}'
+        tampered = original + "  "
+        ev = [
+            V.Evidence(
+                ref="<cross_actor_response>",
+                kind="cross_actor_response",
+                sha256=_sha(original),
+                content=tampered.encode(),
+            )
+        ]
+        r = V.verify_authorization(
+            "tamper-authz-marker-leak",
+            cross_actor_response=tampered,
+            control_response='{"marker":"ctrl_7f3a"}',  # marker leaked -> would disprove
             victim_marker="ctrl_7f3a",
             ownership_verified=True,
             ownership_identity="user_42",
