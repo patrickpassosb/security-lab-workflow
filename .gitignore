@@ -92,6 +92,12 @@ coverage.xml
 logs/cai_*.jsonl
 egress-block.hosts
 
+# ─── moa-run trace dirs ────────────────────────────────────────────────────
+# Advisor analyses + aggregator transcripts written by bin/moa-run
+# (lib/moa.py save_traces equivalent). Untrusted model output — never
+# committed.
+traces/
+
 # ─── Secrets (the .env pattern) ───
 .env
 .env.*

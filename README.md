@@ -15,7 +15,7 @@ cd ~/security-lab
 
 - **Multi-engagement system:** parallel CTF, bounty, and CVE workspaces, each self-contained.
 - **Scope enforcement:** global denied list (gov/mil/edu) + per-engagement scope files.
-- **28 CLI scripts:** lab-new, lab-scope, lab-preflight, lab-hunt, lab-firstpass, lab-cai-run, lab-verify, lab-hypothesis, and more.
+- **29 CLI scripts:** lab-new, lab-scope, lab-preflight, lab-hunt, lab-firstpass, lab-cai-run, lab-verify, lab-hypothesis, moa-run, and more.
 - **15 skills:** ctf-workflow, scope, recon, web-attack, binary-attack, crack, stego-forensics, report-ctf, bounty-attack, gbrain, obsidian.
 - **Templates:** CTF, bounty, and CVE workspace scaffolding.
 - **Optional plugins:** gbrain (persistent memory), Obsidian (knowledge vault).
@@ -36,6 +36,23 @@ cd ~/security-lab
 - [Contributing](CONTRIBUTING.md)
 - [Security Policy](SECURITY.md)
 - [Changelog](CHANGELOG.md)
+
+## MoA (Mixture of Agents) — multi-model verdicts
+
+`bin/moa-run` fans a task prompt to multiple advisor models in parallel
+(defaults: `ollama-cloud/glm-5.2` + `ollama-cloud/minimax-m3`), then sends
+their analyses plus the original task to an aggregator model
+(`ollama-cloud/deepseek-v4-flash:0731`, reasoning_effort=max) for the final
+verdict — the Hermes `captain-test` MOA preset, runnable locally via Aperture
+(Ollama Cloud route). No API keys in code: `MOA_BASE_URL` / `MOA_API_KEY`
+(fallbacks `OLLAMA_API_BASE` / `OLLAMA_API_KEY`). Advisor analyses and
+aggregator transcripts are written to `traces/` for audit.
+
+```bash
+~/security-lab/bin/moa-run "Is this exploit chain plausible? ..." --out verdict.json
+# or from a file: ~/security-lab/bin/moa-run --file task.md --out verdict.json
+# see CHEATSHEET.md → MoA — Multi-Model Verdicts, and bin/moa-run --help
+```
 
 ## Configuration
 

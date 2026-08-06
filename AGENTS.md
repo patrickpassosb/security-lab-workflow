@@ -195,6 +195,21 @@ falsifiable tests instead of unstructured scanner output. Library:
 - Tests: `tests/test_hypothesis.py` (referential integrity, dedup, ranking,
   contradictory evidence, unsafe scope, malformed-JSONL recovery).
 
+## MOA multi-model verdicts (moa-run)
+
+- `bin/moa-run "<task>" [--file <path>] [--context <text>] [--out <verdict.json>]`
+  is a local Mixture-of-Agents wrapper (Hermes `captain-test` preset): advisor
+  models analyze the task in parallel, then an aggregator model synthesizes
+  the final verdict. Defaults: advisors `ollama-cloud/glm-5.2` +
+  `ollama-cloud/minimax-m3`; aggregator `ollama-cloud/deepseek-v4-flash:0731`
+  (reasoning_effort=max). Route: Aperture (`MOA_BASE_URL`, default
+  `http://ai.tail492ce8.ts.net/v1`; `MOA_API_KEY`; fallbacks
+  `OLLAMA_API_BASE`/`OLLAMA_API_KEY`; default key `not-required`). Never
+  hardcode keys. Config: `moa.yaml` or `MOA_CONFIG`; advisor analyses +
+  aggregator transcripts are traced to `traces/` (save_traces equivalent,
+  gitignored). Library `lib/moa.py`; `chat_completions` is the single network
+  seam (mocked in tests).
+
 ## Never
 
 1. **Never exfiltrate outside the lab.** No outbound to public hosts except: Voyage API (embeddings), Supabase (if you opt in later), Caido (proxy only). For bounty engagements, you operate under the program's safe harbor — but still no data exfiltration beyond what proves the bug.
