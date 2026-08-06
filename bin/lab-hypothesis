@@ -539,9 +539,11 @@ def cmd_show(args: list[str]) -> int:
     if exps:
         print(f"\nEXPERIMENTS ({len(exps)}):")
         for e in exps:
+            prov = e.get("provenance")
+            actor = prov.get("actor") if isinstance(prov, dict) else "<invalid>"
             print(
                 f"  {e.get('experiment_id')}: result={e.get('result')} "
-                f"actor={e.get('provenance', {}).get('actor')} ts={e.get('ts')}"
+                f"actor={actor} ts={e.get('ts')}"
             )
     else:
         print("\nEXPERIMENTS: (none)")
