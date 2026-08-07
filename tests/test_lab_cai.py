@@ -568,6 +568,173 @@ class TestDryRun:
         assert any(e["action"] == "lab-cai-run" for e in entries)
 
 
+# ─── Interpreter-tree mounts (uv layouts) ─────────────────────────────────────
+
+
+class TestInterpreterTreeMounts:
+    """build_bwrap_argv must mount whatever interpreter tree the venv's
+    python resolves through, in both uv install shapes:
+
+      - uv/python/ (realpath lands in .../uv/python/<fullver>/bin/...)
+      - uv/python/cpython-<ver>-...-gnu -> uv/python/cpython-<fullver>-...
+        with the uv/python dir one level UP from py_install_root
+
+    plus the ~/.local/bin hop when the venv's python symlinks through it,
+    so the shebang chain resolves inside the sandbox (regression for the
+    `env: ... No such file or directory` exit-127 sandbox break).
+    """
+
+    @staticmethod
+    def _argv_for_venv(tmp_path: Path, venv_bin: Path) -> list[str]:
+        run_dir = tmp_path / "run"
+        run_dir.mkdir(parents=True)
+        return labcai.build_bwrap_argv(
+            "/usr/bin/bwrap",
+            venv_bin,
+            run_dir,
+            run_dir,
+            "ollama_cloud/deepseek-v4-flash:0731",
+            "http://route.test",
+            "not-required",
+            "bug_bounter",
+            "prompt",
+            5,
+            "1",
+            {},
+        )
+
+    @staticmethod
+    def _uv_tree(tmp_path: Path) -> Path:
+        """uv/python/cpython-3.11-linux-x86_64-gnu (symlink) ->
+        cpython-3.11.15-linux-x86_64-gnu (real dir)."""
+        uv_python = tmp_path / "uv" / "python"
+        uv_python.mkdir(parents=True)
+        (uv_python / "cpython-3.11.15-linux-x86_64-gnu").mkdir()
+        os.symlink(
+            str(uv_python / "cpython-3.11.15-linux-x86_64-gnu"),
+            uv_python / "cpython-3.11-linux-x86_64-gnu",
+        )
+        return uv_python
+
+    @staticmethod
+    def _mounts(argv: list[str]) -> dict[str, str]:
+        mounts: dict[str, str] = {}
+        for i, tok in enumerate(argv):
+            if tok in ("--ro-bind", "--ro-bind-try", "--bind"):
+                mounts[argv[i + 1]] = tok
+        return mounts
+
+    def test_uv_python_tree_layout_mounts_whole_tree(self, tmp_path):
+        """realpath lands in uv/python/<fullver>/bin/python3.11: the whole
+        uv/python tree must be ro-bound."""
+        uv_python = self._uv_tree(tmp_path)
+        full = uv_python / "cpython-3.11.15-linux-x86_64-gnu"
+        (full / "bin").mkdir()
+        (full / "lib").mkdir()
+        (full / "bin" / "python3.11").write_text("#!/bin/sh\n", encoding="utf-8")
+        venv = tmp_path / "cai-venv"
+        bin_dir = venv / "bin"
+        bin_dir.mkdir(parents=True)
+        (bin_dir / "cai").write_text("#!/bin/sh\n", encoding="utf-8")
+        # venv python resolves straight into the uv/python tree.
+        os.symlink(str(full / "bin" / "python3.11"), bin_dir / "python3.11")
+        os.symlink("python3.11", bin_dir / "python")
+        argv = self._argv_for_venv(tmp_path, bin_dir)
+        mounts = self._mounts(argv)
+        assert mounts.get(str(uv_python)) == "--ro-bind"
+        assert str(full / "bin" / "python3.11") in mounts
+        assert str(venv) in mounts
+
+    def test_cpython_tree_layout_mounts_uv_python_dir(self, tmp_path):
+        """py_install_root = .../uv/python/cpython-<ver>-linux-...-gnu
+        (name starts with cpython-): the whole uv/python dir must be
+        ro-bound so the versioned symlink + fullver target both resolve."""
+        uv_python = tmp_path / "uv" / "python"
+        uv_python.mkdir(parents=True)
+        full = uv_python / "cpython-3.11.15-linux-x86_64-gnu"
+        (full / "install" / "bin").mkdir(parents=True)
+        (full / "install" / "bin" / "python3.11").write_text("#!/bin/sh\n", encoding="utf-8")
+        venv = tmp_path / "cai-venv"
+        bin_dir = venv / "bin"
+        bin_dir.mkdir(parents=True)
+        (bin_dir / "cai").write_text("#!/bin/sh\n", encoding="utf-8")
+        os.symlink(str(full / "install" / "bin" / "python3.11"), bin_dir / "python3.11")
+        os.symlink("python3.11", bin_dir / "python")
+        argv = self._argv_for_venv(tmp_path, bin_dir)
+        mounts = self._mounts(argv)
+        # Whole uv/python dir mounted (parent of the cpython-* install root).
+        assert mounts.get(str(uv_python)) == "--ro-bind"
+        assert str(uv_python / "cpython-3.11.15-linux-x86_64-gnu") not in mounts
+
+    def test_local_bin_hop_is_bound_for_realpath_chain(self, tmp_path, monkeypatch):
+        """When the venv python resolves through ~/.local/bin/python3.11
+        (uv layout), the ~/.local/bin hop must be ro-bound so the
+        intermediate symlink resolves inside the sandbox — regression for
+        `env: '.../bin/cai': No such file or directory` (exit 127)."""
+        uv_python = self._uv_tree(tmp_path)
+        full = uv_python / "cpython-3.11.15-linux-x86_64-gnu"
+        (full / "bin").mkdir()
+        (full / "lib").mkdir()
+        (full / "bin" / "python3.11").write_text("#!/bin/sh\n", encoding="utf-8")
+        local_bin = tmp_path / ".local" / "bin"
+        local_bin.mkdir(parents=True)
+        monkeypatch.setenv("HOME", str(tmp_path))
+        os.symlink(str(full / "bin" / "python3.11"), local_bin / "python3.11")
+        venv = tmp_path / "cai-venv"
+        bin_dir = venv / "bin"
+        bin_dir.mkdir(parents=True)
+        (bin_dir / "cai").write_text("#!/bin/sh\n", encoding="utf-8")
+        os.symlink(str(local_bin / "python3.11"), bin_dir / "python3.11")
+        os.symlink("python3.11", bin_dir / "python")
+        argv = self._argv_for_venv(tmp_path, bin_dir)
+        mounts = self._mounts(argv)
+        assert mounts.get(str(local_bin)) == "--ro-bind-try"
+        # The interpreter itself + the uv/python tree also present.
+        assert str(full / "bin" / "python3.11") in mounts
+        assert mounts.get(str(uv_python)) == "--ro-bind"
+
+    def test_sandbox_contract_preserved(self, tmp_path):
+        """The output dir stays read-only, the run dir writable, and the
+        egress blocklist still mounted — the interpreter-tree mounts must
+        not disturb the sandbox contract."""
+        uv_python = self._uv_tree(tmp_path)
+        full = uv_python / "cpython-3.11.15-linux-x86_64-gnu"
+        (full / "bin").mkdir()
+        (full / "lib").mkdir()
+        (full / "bin" / "python3.11").write_text("#!/bin/sh\n", encoding="utf-8")
+        venv = tmp_path / "cai-venv"
+        bin_dir = venv / "bin"
+        bin_dir.mkdir(parents=True)
+        (bin_dir / "cai").write_text("#!/bin/sh\n", encoding="utf-8")
+        os.symlink(str(full / "bin" / "python3.11"), bin_dir / "python3.11")
+        os.symlink("python3.11", bin_dir / "python")
+        run_dir = tmp_path / "run"
+        run_dir.mkdir(parents=True)
+        argv = labcai.build_bwrap_argv(
+            "/usr/bin/bwrap",
+            bin_dir,
+            run_dir,
+            run_dir,
+            "ollama_cloud/deepseek-v4-flash:0731",
+            "http://route.test",
+            "not-required",
+            "bug_bounter",
+            "prompt",
+            5,
+            "1",
+            {},
+        )
+        mounts = self._mounts(argv)
+        assert mounts.get(str(run_dir)) == "--bind"
+        assert mounts.get(str(run_dir.parent)) == "--ro-bind"
+        hosts_mount = argv[argv.index("--ro-bind", argv.index("/etc")) + 1]
+        assert hosts_mount.endswith("egress-block.hosts")
+        # Egress hosts still blackholed.
+        content = Path(hosts_mount).read_text(encoding="utf-8")
+        for host in labcai.EGRESS_BLOCK_HOSTS:
+            assert f"127.0.0.1 {host}" in content
+
+
 # ─── Unit helpers ─────────────────────────────────────────────────────────────
 
 

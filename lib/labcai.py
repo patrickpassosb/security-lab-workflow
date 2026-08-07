@@ -359,12 +359,32 @@ def build_bwrap_argv(
     # Mount the whole uv/python tree so every link in the chain resolves
     # inside the sandbox (same approach as labeval's hostedtoolcache mount).
     py_install_root = py_exe.parent.parent.parent
+    # `py_exe` is fully realpath'd, so it already points INTO the uv
+    # python tree; but the venv's own symlinks (bin/python3.11 ->
+    # ~/.local/bin/python3.11 -> uv tree) can hop through ~/.local/bin,
+    # which is not mounted by the /usr|/etc binds above — the interpreter
+    # then fails to exec inside the sandbox (env: No such file or
+    # directory). Bind the ~/.local/bin hop so those links resolve too.
+    py_local_bin = Path.home() / ".local" / "bin"
+    if py_local_bin.is_dir() and str(py_local_bin) not in argv:
+        argv.extend(["--ro-bind-try", str(py_local_bin), str(py_local_bin)])
     if (
         py_install_root.name == "python"
         and py_install_root.parent.name == "uv"
         and py_install_root.is_dir()
     ):
         argv.extend(["--ro-bind", str(py_install_root), str(py_install_root)])
+    elif (
+        py_install_root.name.startswith("cpython-")
+        and py_install_root.parent.name == "python"
+        and py_install_root.parent.parent.name == "uv"
+        and py_install_root.parent.parent.is_dir()
+    ):
+        # uv python tree under a different root (e.g. the interpreter was
+        # resolved from ~/.local/bin/python3.11 without the uv/python
+        # parent): mount the whole uv/python dir so every symlink in the
+        # chain resolves (same contract as the branch above).
+        argv.extend(["--ro-bind", str(py_install_root.parent), str(py_install_root.parent)])
     argv.extend(["--ro-bind", str(venv_bin.parent), str(venv_bin.parent)])
 
     cai_env = _cai_env(
