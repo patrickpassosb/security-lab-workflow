@@ -653,9 +653,7 @@ class TestInterpreterTreeMounts:
         uv_python.mkdir(parents=True)
         full = uv_python / "cpython-3.11.15-linux-x86_64-gnu"
         (full / "install" / "bin").mkdir(parents=True)
-        (full / "install" / "bin" / "python3.11").write_text(
-            "#!/bin/sh\n", encoding="utf-8"
-        )
+        (full / "install" / "bin" / "python3.11").write_text("#!/bin/sh\n", encoding="utf-8")
         venv = tmp_path / "cai-venv"
         bin_dir = venv / "bin"
         bin_dir.mkdir(parents=True)
