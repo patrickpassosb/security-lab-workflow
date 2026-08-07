@@ -645,30 +645,28 @@ class TestInterpreterTreeMounts:
         assert str(full / "bin" / "python3.11") in mounts
         assert str(venv) in mounts
 
-    def test_cpython_tree_layout_mounts_uv_python_dir(self, tmp_path, monkeypatch):
+    def test_cpython_tree_layout_mounts_uv_python_dir(self, tmp_path):
         """py_install_root = .../uv/python/cpython-<ver>-linux-...-gnu
         (name starts with cpython-): the whole uv/python dir must be
         ro-bound so the versioned symlink + fullver target both resolve."""
-        uv_python = self._uv_tree(tmp_path)
-        # ~/.local/bin hop that points at the versioned symlink.
-        local_bin = tmp_path / ".local" / "bin"
-        local_bin.mkdir(parents=True)
-        monkeypatch.setenv("HOME", str(tmp_path))
-        os.symlink(
-            str(uv_python / "cpython-3.11-linux-x86_64-gnu" / "bin" / "python3.11"),
-            local_bin / "python3.11",
+        uv_python = tmp_path / "uv" / "python"
+        uv_python.mkdir(parents=True)
+        full = uv_python / "cpython-3.11.15-linux-x86_64-gnu"
+        (full / "install" / "bin").mkdir(parents=True)
+        (full / "install" / "bin" / "python3.11").write_text(
+            "#!/bin/sh\n", encoding="utf-8"
         )
         venv = tmp_path / "cai-venv"
         bin_dir = venv / "bin"
         bin_dir.mkdir(parents=True)
         (bin_dir / "cai").write_text("#!/bin/sh\n", encoding="utf-8")
-        os.symlink(str(local_bin / "python3.11"), bin_dir / "python3.11")
+        os.symlink(str(full / "install" / "bin" / "python3.11"), bin_dir / "python3.11")
         os.symlink("python3.11", bin_dir / "python")
         argv = self._argv_for_venv(tmp_path, bin_dir)
         mounts = self._mounts(argv)
         # Whole uv/python dir mounted (parent of the cpython-* install root).
         assert mounts.get(str(uv_python)) == "--ro-bind"
-        assert str(uv_python / "cpython-3.11-linux-x86_64-gnu") not in mounts
+        assert str(uv_python / "cpython-3.11.15-linux-x86_64-gnu") not in mounts
 
     def test_local_bin_hop_is_bound_for_realpath_chain(self, tmp_path, monkeypatch):
         """When the venv python resolves through ~/.local/bin/python3.11

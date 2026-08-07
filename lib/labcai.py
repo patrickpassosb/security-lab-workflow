@@ -384,9 +384,7 @@ def build_bwrap_argv(
         # resolved from ~/.local/bin/python3.11 without the uv/python
         # parent): mount the whole uv/python dir so every symlink in the
         # chain resolves (same contract as the branch above).
-        argv.extend(
-            ["--ro-bind", str(py_install_root.parent.parent), str(py_install_root.parent.parent)]
-        )
+        argv.extend(["--ro-bind", str(py_install_root.parent), str(py_install_root.parent)])
     argv.extend(["--ro-bind", str(venv_bin.parent), str(venv_bin.parent)])
 
     cai_env = _cai_env(
