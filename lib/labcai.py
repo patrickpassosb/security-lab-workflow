@@ -72,6 +72,16 @@ Headless transcript contract (verified against cai-framework 0.5.10):
     treats 124 as a BUDGET end — evidence + recorder transcript are
     still parsed for findings, and the audit entry records the timeout
     distinctly so the human can re-run (or downgrade the agent).
+  - FIXED (2026-08-07): the spin is an infinite loop in
+    `fix_message_list`'s second pass when an assistant message carries
+    TWO OR MORE tool calls — moving the first tool result after the
+    assistant displaces the second result, which is then moved back,
+    forever. Live-verified on xben-037: the first turn issued 2 parallel
+    `curl` calls and the loop never returned a tool result. The adapter
+    now injects a deterministic single-pass replacement
+    (`lib/cai_fix_message_list.py`) into the sandboxed CAI process via
+    a `sitecustomize.py` shim on PYTHONPATH (see `_cai_shim_dir`), so
+    tool results flow and the hunt advances. The venv is never modified.
 """
 
 from __future__ import annotations
@@ -111,6 +121,13 @@ AGENT_ALIASES = {"bug_bounter": "bug_bounter_agent"}
 # Default LLM model routed through the Ollama Cloud provider. The provider
 # URL and key always come from the environment (see module docstring).
 DEFAULT_MODEL = "ollama_cloud/deepseek-v4-flash:0731"
+
+# Default wall-clock budget for a CAI hunt. 600s was too little for hard
+# autonomous targets (xben-037 blind command injection: the manual solve
+# took ~6 min with hints; an agent discovering from scratch needs more).
+# The quota is abundant — the cap is not a quota constraint. `--timeout`
+# still overrides per run.
+DEFAULT_TIMEOUT = 1800
 
 # Env vars CAI reads for the model route (must not be scrubbed from the
 # CAI subprocess env). `ALIAS_API_KEY` is deliberately NOT passed — it is
@@ -247,6 +264,48 @@ def _python_under(venv_bin: Path) -> Path:
         return py
 
 
+# ─── CAI fix_message_list shim (upstream spin defect) ────────────────────────
+
+# Name of the sitecustomize module injected into the sandboxed CAI
+# process. Python imports `sitecustomize` at interpreter startup (before
+# any CAI module), so replacing `cai.util.fix_message_list` there beats
+# every call site — including the import-time `from cai.util import
+# fix_message_list` in cai/cli.py and openai_chatcompletions.py.
+_SITECUSTOMIZE_NAME = "sitecustomize"
+
+_SITECUSTOMIZE_SRC = (
+    "import cai_fix_message_list as _cai_fix\n"
+    "import cai.util as _cai_util\n"
+    "_cai_util.fix_message_list = _cai_fix.fix_message_list\n"
+)
+
+
+def _cai_shim_dir(base_dir: Path) -> Path:
+    """Create (once) the PYTHONPATH dir holding the fix_message_list shim.
+
+    The dir lives under `base_dir` (the ro-bound output dir, like the
+    egress-block hosts file) so the untrusted agent cannot rewrite the
+    shim. The replacement module itself is copied from the repo's
+    `lib/cai_fix_message_list.py`; the `sitecustomize.py` hook swaps
+    `cai.util.fix_message_list` for the deterministic reimplementation at
+    interpreter startup. Idempotent; never raises.
+    """
+    shim_dir = base_dir / ".cai-shim"
+    try:
+        shim_dir.mkdir(parents=True, exist_ok=True)
+        (shim_dir / f"{_SITECUSTOMIZE_NAME}.py").write_text(
+            _SITECUSTOMIZE_SRC, encoding="utf-8"
+        )
+        src = Path(__file__).resolve().parent / "cai_fix_message_list.py"
+        if src.exists():
+            (shim_dir / "cai_fix_message_list.py").write_text(
+                src.read_text(encoding="utf-8"), encoding="utf-8"
+            )
+    except OSError:
+        return shim_dir
+    return shim_dir
+
+
 def build_bwrap_argv(
     bwrap: str,
     venv_bin: Path,
@@ -281,6 +340,7 @@ def build_bwrap_argv(
     for the full egress analysis.
     """
     hosts_file = _egress_block_hosts_file(workdir.parent)
+    shim_dir = _cai_shim_dir(workdir.parent)
     argv: list[str] = [
         bwrap,
         "--unshare-user",
@@ -304,6 +364,12 @@ def build_bwrap_argv(
         "--ro-bind",
         str(hosts_file),
         "/etc/hosts",
+        # The fix_message_list shim dir is ro-bound (it lives under the
+        # ro-bound output dir) so the untrusted agent cannot rewrite the
+        # sitecustomize hook or the replacement module.
+        "--ro-bind",
+        str(shim_dir),
+        str(shim_dir),
         # /run is NOT mounted read-only: it would expose the host's
         # docker/tailscale sockets to the untrusted agent (live-verified
         # SOCKET_EXPOSED with a plain --ro-bind /run). Use an empty tmpfs
@@ -447,6 +513,14 @@ def _cai_env(
         "CAI_ENV_CONTEXT": "false",
         "CAI_SUPPORT_INTERVAL": "999999",
     }
+    # Inject the fix_message_list shim (see _cai_shim_dir): the
+    # sitecustomize hook replaces CAI's spinning message-repair function
+    # at interpreter startup. The shim dir is ro-bound into the sandbox
+    # by build_bwrap_argv; PYTHONPATH is the only env channel needed.
+    # `home_dir` is the run dir, so its parent is the ro-bound output dir
+    # where the shim lives.
+    shim_dir = _cai_shim_dir(home_dir.parent)
+    env["PYTHONPATH"] = str(shim_dir)
     if api_base:
         env["OLLAMA_API_BASE"] = api_base
     if api_key:
@@ -774,7 +848,7 @@ def run(
     prompt: str | None = None,
     max_turns: int = 10,
     price_limit: str = "1",
-    timeout: int = 600,
+    timeout: int = DEFAULT_TIMEOUT,
     sandboxed: bool = True,
     dry_run: bool = False,
     fixture: Path | None = None,
@@ -968,6 +1042,11 @@ def run(
             "CAI_ENV_CONTEXT": "false",
             "CAI_SUPPORT_INTERVAL": "999999",
         }
+        # Same fix_message_list shim as the sandboxed path (the run dir
+        # is under the output dir, so the shim dir is the output dir's
+        # .cai-shim — writable here, but the no-sandbox path is an
+        # explicit opt-out of the sandbox contract anyway).
+        cai_env["PYTHONPATH"] = str(_cai_shim_dir(home_dir.parent))
         if resolved_api_base:
             cai_env["OLLAMA_API_BASE"] = resolved_api_base
         if resolved_api_key:
