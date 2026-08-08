@@ -64,6 +64,8 @@ def merge_scopes(global_scope: dict, engagement_scope: dict) -> dict:
 
     Tracks global-denied and engagement-denied separately so check_target()
     can apply the correct order (global denied → in_scope → engagement denied).
+    Structured HackerOne `assets` are carried through so check_target() can
+    authorize non-host targets (repos, apps) matched via assets[].patterns.
     """
     merged = {"in_scope": [], "denied": [], "rate_limits": {}, "techniques_allowed": []}
 
@@ -92,6 +94,9 @@ def merge_scopes(global_scope: dict, engagement_scope: dict) -> dict:
     merged["techniques_require_approval"] = engagement_scope.get("techniques_require_approval", [])
     merged["techniques_denied"] = engagement_scope.get("techniques_denied", [])
 
+    eng_assets = engagement_scope.get("assets", [])
+    merged["assets"] = eng_assets if isinstance(eng_assets, list) else []
+
     return merged
 
 
@@ -102,7 +107,11 @@ def check_target(target: str, merged: dict) -> tuple[int, str]:
       1. Global denied → REJECT (exit 2)
       2. Engagement in_scope → ALLOW (exit 0)  [overrides engagement denied]
       3. Engagement denied → REJECT (exit 2)
-      4. Default-deny → UNKNOWN (exit 3 = ask human)
+      4. Structured assets (assets[].patterns) → ALLOW (exit 0) — covers
+         non-host targets (GitHub repos, mobile apps) that host-based
+         in_scope patterns cannot express. Only bounty-eligible assets
+         authorize a target.
+      5. Default-deny → UNKNOWN (exit 3 = ask human)
 
     Delegates to the shared `labutil.check_target_scope` so the matching core
     has a single source of truth (also used by lib/h1report.py). The merged
@@ -116,7 +125,16 @@ def check_target(target: str, merged: dict) -> tuple[int, str]:
         # Fallback: no pre-computed split — treat all denied as global-first
         # (preserves global-denied-always-wins behavior).
         global_denied = merged.get("denied", [])
-    return labutil.check_target_scope(target, in_scope, global_denied, eng_denied)
+    code, msg = labutil.check_target_scope(target, in_scope, global_denied, eng_denied)
+    if code == 3:
+        # Host patterns did not match. Fall back to structured HackerOne
+        # assets: their patterns can match repo paths (github.com/org/*)
+        # and app identifiers that extract_host() cannot express.
+        matched, asset_id, pattern = labutil.check_asset_scope(target, merged.get("assets", []))
+        if matched:
+            host = labutil.extract_host(target)
+            return 0, f"OK: {host} matches asset '{asset_id}' pattern '{pattern}' (bounty-eligible)"
+    return code, msg
 
 
 def list_engagements() -> int:
