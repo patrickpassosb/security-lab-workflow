@@ -142,3 +142,98 @@ class TestCheckTarget:
         merged = self._merged()
         code, msg = lab_scope.check_target("://", merged)
         assert code == 3
+
+
+# ─── Structured assets (assets[].patterns) ────────────────────────────────────
+
+class TestCheckTargetAssets:
+    """lab-scope must authorize non-host targets via engagement assets[].patterns.
+
+    Regression: github.com/makenotion/* was listed as a bounty-eligible asset
+    but lab-scope returned UNKNOWN for github.com/makenotion/notion-sdk-js
+    because host extraction (github.com) can never fnmatch a repo-path
+    pattern.
+    """
+
+    NOTION_ASSETS = [
+        {
+            "id": "notion-github-repos",
+            "display_name": "GitHub Repositories or other public artifacts owned by makenotion",
+            "asset_type": "OTHER",
+            "patterns": ["github.com/makenotion/*"],
+            "finding_types": ["source_code"],
+            "eligible_for_submission": True,
+            "eligible_for_bounty": True,
+        },
+        {
+            "id": "notion-app",
+            "display_name": "Notion Mobile App",
+            "asset_type": "MOBILE",
+            "patterns": ["com.notion.id"],
+            "finding_types": ["mobile"],
+            "eligible_for_submission": True,
+            "eligible_for_bounty": False,
+        },
+    ]
+
+    def _merged(self, assets=None):
+        return {
+            "in_scope": [],
+            "denied": [],
+            "rate_limits": {},
+            "techniques_allowed": [],
+            "assets": assets or self.NOTION_ASSETS,
+        }
+
+    def test_github_repo_bare_target_matches_asset(self):
+        merged = self._merged()
+        code, msg = lab_scope.check_target("github.com/makenotion/notion-sdk-js", merged)
+        assert code == 0
+        assert "notion-github-repos" in msg
+        assert "github.com/makenotion/*" in msg
+
+    def test_github_repo_url_target_matches_asset(self):
+        merged = self._merged()
+        code, msg = lab_scope.check_target("https://github.com/makenotion/notion-sdk-js", merged)
+        assert code == 0
+        assert "notion-github-repos" in msg
+
+    def test_repo_outside_pattern_unknown(self):
+        merged = self._merged()
+        code, msg = lab_scope.check_target("github.com/otherorg/repo", merged)
+        assert code == 3
+        assert "UNKNOWN" in msg
+
+    def test_host_pattern_still_wins(self):
+        # in_scope host patterns continue to match host targets.
+        merged = self._merged()
+        merged["in_scope"] = [{"pattern": "api.notion.com", "note": "Public API"}]
+        code, msg = lab_scope.check_target("api.notion.com", merged)
+        assert code == 0
+        assert "asset" not in msg
+
+    def test_non_bounty_asset_does_not_authorize(self):
+        # eligible_for_bounty=false must NOT authorize live testing.
+        merged = self._merged()
+        code, msg = lab_scope.check_target("com.notion.id", merged)
+        assert code == 3
+        assert "UNKNOWN" in msg
+
+    def test_denied_still_wins_over_assets(self):
+        merged = self._merged()
+        merged["_global_denied"] = [{"pattern": "github.com", "reason": "global block"}]
+        merged["_eng_denied"] = []
+        code, msg = lab_scope.check_target("github.com/makenotion/notion-sdk-js", merged)
+        assert code == 2
+        assert "DENIED" in msg
+
+    def test_assets_key_missing_does_not_crash(self):
+        merged = self._merged()
+        del merged["assets"]
+        code, msg = lab_scope.check_target("github.com/makenotion/notion-sdk-js", merged)
+        assert code == 3
+
+    def test_malformed_assets_ignored(self):
+        merged = self._merged(assets=["not-a-dict", {"id": "no-patterns"}])
+        code, msg = lab_scope.check_target("github.com/makenotion/notion-sdk-js", merged)
+        assert code == 3

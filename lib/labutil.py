@@ -409,6 +409,73 @@ def check_target_scope(
     return 3, f"UNKNOWN: {host} is not in scope"
 
 
+def asset_patterns(assets: list) -> list[dict[str, Any]]:
+    """Normalize engagement `assets[]` into matchable (asset_id, pattern) entries.
+
+    Each returned entry: {"asset_id", "pattern", "eligible_for_bounty"}.
+    Structured HackerOne assets are always dicts with an `id` and a
+    `patterns` list; anything else is skipped. `eligible_for_bounty` is
+    preserved so callers can decide whether the asset authorizes live
+    testing (bounty-eligible) or only documents a submission target.
+    """
+    out: list[dict[str, Any]] = []
+    for a in assets:
+        if not isinstance(a, dict):
+            continue
+        asset_id = a.get("id")
+        patterns = a.get("patterns")
+        if not isinstance(asset_id, str) or not asset_id:
+            continue
+        if not isinstance(patterns, list):
+            continue
+        eligible = a.get("eligible_for_bounty") is True
+        for p in patterns:
+            if isinstance(p, str) and p:
+                out.append({
+                    "asset_id": asset_id,
+                    "pattern": p,
+                    "eligible_for_bounty": eligible,
+                })
+    return out
+
+
+def match_asset_pattern(target: str, pattern: str) -> bool:
+    """True when `target` matches an asset pattern (repo-style paths included).
+
+    Asset patterns such as `github.com/makenotion/*` cannot match on host
+    alone — extract_host("github.com/makenotion/x") is "github.com", which
+    fnmatch rejects against the full path pattern. So the raw target and the
+    scheme-stripped target are matched as well (case-insensitive), covering
+    both bare ("github.com/makenotion/x") and URL ("https://github.com/...")
+    forms.
+    """
+    if match_pattern(extract_host(target), target, pattern):
+        return True
+    lowered = target.lower()
+    for prefix in ("https://", "http://"):
+        stripped = lowered[len(prefix):] if lowered.startswith(prefix) else ""
+        if stripped and match_pattern(extract_host(target), stripped, pattern):
+            return True
+    return False
+
+
+def check_asset_scope(target: str, assets: list) -> tuple[bool, str, str]:
+    """Match `target` against engagement `assets[].patterns`.
+
+    Returns (matched, asset_id, pattern). Only assets with
+    eligible_for_bounty=true authorize a target — eligibility is platform
+    metadata distinguishing bounty-eligible assets from submission-only
+    listings, and authorizing the latter would expand live-testing scope
+    beyond what the program pays for.
+    """
+    for entry in asset_patterns(assets):
+        if not entry["eligible_for_bounty"]:
+            continue
+        if match_asset_pattern(target, entry["pattern"]):
+            return True, entry["asset_id"], entry["pattern"]
+    return False, "", ""
+
+
 def load_yaml_file(path: Path) -> dict[str, Any] | None:
     """Load a YAML file with `yaml.safe_load`. Return None if missing or not a mapping.
 
@@ -441,4 +508,5 @@ __all__ = [
     "minimal_env",
     "is_safe_url", "is_valid_https_url",
     "extract_host", "match_pattern", "check_target_scope", "load_yaml_file",
+    "asset_patterns", "match_asset_pattern", "check_asset_scope",
 ]
