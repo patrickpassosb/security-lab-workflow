@@ -114,20 +114,13 @@ def fix_message_list(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
         kept.append(msg)
 
     # Pass 2: single forward pass pairing tool results with their
-    # assistant messages. `pending` maps tool_call_id -> the assistant
-    # message object that issued it (results are placed right after it).
+    # assistant messages. Results are grouped per assistant (keyed by
+    # object identity) and materialized once in Pass 3 — O(n), no
+    # index-based insertion.
     out: list[dict[str, Any]] = []
     pending: dict[str, dict[str, Any]] = {}
+    results_by_owner: dict[int, list[dict[str, Any]]] = {}
     placed: set[str] = set()
-
-    def _insert_after(assistant_msg: dict[str, Any], tool_msg: dict[str, Any]) -> None:
-        """Insert tool_msg immediately after assistant_msg in `out`."""
-        idx = out.index(assistant_msg)
-        # Keep results for the same assistant contiguous: insert after
-        # any results already placed for it.
-        while idx + 1 < len(out) and out[idx + 1].get("role") == "tool":
-            idx += 1
-        out.insert(idx + 1, tool_msg)
 
     for msg in kept:
         role = msg.get("role")
@@ -141,19 +134,21 @@ def fix_message_list(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 # Duplicate result for an already-paired call: drop it
                 # (the API rejects repeated tool_call_ids).
                 continue
+            placed.add(tid)
             owner = pending.get(tid, _MISSING)
             if owner is _MISSING:
                 # Orphan result: synthesize a matching assistant first.
-                synth = _synthetic_assistant(tid)
-                out.append(synth)
+                out.append(_synthetic_assistant(tid))
                 out.append(msg)
             else:
-                _insert_after(owner, msg)
-            placed.add(tid)
+                results_by_owner.setdefault(id(owner), []).append(msg)
         else:
             out.append(msg)
 
-    # Pass 3: every assistant tool_call must have a result.
+    # Pass 3: every assistant tool_call must have a result; materialize
+    # each assistant followed by its results (real + synthesized) in one
+    # linear pass.
+    missing_by_owner: dict[int, list[dict[str, Any]]] = {}
     for msg in out:
         if msg.get("role") != "assistant" or not msg.get("tool_calls"):
             continue
@@ -164,15 +159,26 @@ def fix_message_list(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
                     if tc.get("id") == tid and tc.get("function"):
                         tool_name = tc["function"].get("name", "unknown_function")
                         break
-                _insert_after(
-                    msg,
+                missing_by_owner.setdefault(
+                    id(msg),
+                    [],
+                ).append(
                     {
                         "role": "tool",
                         "tool_call_id": tid,
                         "content": f"Auto-generated response for {tool_name}",
-                    },
+                    }
                 )
                 placed.add(tid)
+
+    final: list[dict[str, Any]] = []
+    for msg in out:
+        final.append(msg)
+        if msg.get("role") == "assistant" and msg.get("tool_calls"):
+            owner_id = id(msg)
+            final.extend(results_by_owner.get(owner_id, []))
+            final.extend(missing_by_owner.get(owner_id, []))
+    out = final
 
     # Pass 4: content normalization (non-tool messages never None; tool
     # results never empty).

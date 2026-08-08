@@ -86,6 +86,7 @@ Headless transcript contract (verified against cai-framework 0.5.10):
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import os
@@ -288,22 +289,33 @@ def _cai_shim_dir(base_dir: Path) -> Path:
     shim. The replacement module itself is copied from the repo's
     `lib/cai_fix_message_list.py`; the `sitecustomize.py` hook swaps
     `cai.util.fix_message_list` for the deterministic reimplementation at
-    interpreter startup. Idempotent; never raises.
+    interpreter startup. Both files are written atomically (temp file +
+    os.replace) and in dependency order — `cai_fix_message_list.py` first,
+    `sitecustomize.py` last — so a partially-written shim dir can never
+    leave a `sitecustomize` that imports a missing module. Idempotent;
+    never raises.
     """
     shim_dir = base_dir / ".cai-shim"
     try:
         shim_dir.mkdir(parents=True, exist_ok=True)
-        (shim_dir / f"{_SITECUSTOMIZE_NAME}.py").write_text(
-            _SITECUSTOMIZE_SRC, encoding="utf-8"
-        )
         src = Path(__file__).resolve().parent / "cai_fix_message_list.py"
         if src.exists():
-            (shim_dir / "cai_fix_message_list.py").write_text(
-                src.read_text(encoding="utf-8"), encoding="utf-8"
-            )
+            _atomic_write(shim_dir / "cai_fix_message_list.py", src.read_text(encoding="utf-8"))
+        _atomic_write(shim_dir / f"{_SITECUSTOMIZE_NAME}.py", _SITECUSTOMIZE_SRC)
     except OSError:
         return shim_dir
     return shim_dir
+
+
+def _atomic_write(path: Path, content: str) -> None:
+    """Write `content` to `path` atomically (temp file + os.replace)."""
+    tmp = path.with_name(f".{path.name}.tmp-{os.getpid()}")
+    try:
+        tmp.write_text(content, encoding="utf-8")
+        os.replace(tmp, path)
+    finally:
+        with contextlib.suppress(FileNotFoundError):
+            tmp.unlink()
 
 
 def build_bwrap_argv(
@@ -546,7 +558,7 @@ def run_cai(
     *,
     max_turns: int = 10,
     price_limit: str = "1",
-    timeout: int = 600,
+    timeout: int = DEFAULT_TIMEOUT,
     env_extra: dict[str, str] | None = None,
 ) -> tuple[int, str, str, str]:
     """Run CAI headless against a target; return (exit, stdout, stderr, logs_dir).

@@ -1318,6 +1318,22 @@ class TestShimWiring:
         assert "fix_message_list" in src
         assert "cai.util" in src
 
+    def test_shim_files_written_atomically(self, tmp_path):
+        """Both shim files must be written via temp + os.replace (no
+        partial reads possible), and the module must be written before
+        the sitecustomize hook that imports it."""
+        shim_dir = labcai._cai_shim_dir(tmp_path)
+        for name in ("cai_fix_message_list.py", "sitecustomize.py"):
+            path = shim_dir / name
+            assert path.exists()
+            # No leftover temp files.
+            assert not list(shim_dir.glob(f".{name}.tmp-*"))
+        # The module is written first (dependency order): the
+        # sitecustomize hook imports it at interpreter startup.
+        mod_mtime = (shim_dir / "cai_fix_message_list.py").stat().st_mtime
+        hook_mtime = (shim_dir / "sitecustomize.py").stat().st_mtime
+        assert mod_mtime <= hook_mtime
+
     def test_shim_dir_lives_under_ro_bound_output_dir(self, tmp_path):
         """The shim dir must be created under the output dir (ro-bound
         into the sandbox), never under the writable run dir."""
@@ -1373,28 +1389,22 @@ class TestShimWiring:
     def test_sitecustomize_replaces_upstream_function(self, tmp_path):
         """End-to-end: a python process started with the shim on
         PYTHONPATH must have `cai.util.fix_message_list` replaced by the
-        deterministic implementation. Uses the venv's own python (as the
-        cai shebang does) when a CAI venv is available; skips otherwise
-        (CI has no CAI install)."""
-        import shutil
+        deterministic implementation. A fake `cai.util` package on
+        PYTHONPATH stands in for the real CAI install, so the wiring is
+        tested without CAI installed (CI has no CAI venv)."""
         import subprocess
 
-        venv_py = shutil.which("python3")
-        for cand in (
-            Path(os.environ.get("CAI_VENV", "")) / "bin" / "python",
-            Path.home() / ".local" / "share" / "uv" / "cai-venv" / "bin" / "python",
-        ):
-            if cand.exists():
-                venv_py = str(cand)
-                break
-        probe = subprocess.run(
-            [venv_py, "-c", "import cai.util"],
-            capture_output=True,
-            text=True,
-            timeout=30,
+        # Fake `cai.util` package: a real `fix_message_list` that spins
+        # on multi-tool turns (the upstream defect) would hang the test,
+        # so the fake uses a marker function the shim must replace.
+        fake_cai = tmp_path / "fakecai"
+        (fake_cai / "cai").mkdir(parents=True)
+        (fake_cai / "cai" / "__init__.py").write_text("", encoding="utf-8")
+        (fake_cai / "cai" / "util.py").write_text(
+            "def fix_message_list(messages):\n"
+            "    return [{'role': 'marker', 'content': 'upstream'}] + list(messages)\n",
+            encoding="utf-8",
         )
-        if probe.returncode != 0:
-            pytest.skip("no CAI install available for the wiring test")
 
         run_dir = tmp_path / "run"
         run_dir.mkdir(parents=True)
@@ -1415,11 +1425,11 @@ class TestShimWiring:
             "print([m.get('role') for m in r])\n"
         )
         proc = subprocess.run(
-            [venv_py, "-c", code],
+            [sys.executable, "-c", code],
             capture_output=True,
             text=True,
             timeout=30,
-            env={**os.environ, "PYTHONPATH": str(shim_dir)},
+            env={**os.environ, "PYTHONPATH": str(shim_dir) + os.pathsep + str(fake_cai)},
         )
         assert proc.returncode == 0, proc.stderr
         assert "cai_fix_message_list" in proc.stdout
