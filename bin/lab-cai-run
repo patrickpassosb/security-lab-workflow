@@ -46,7 +46,7 @@ Options:
     --prompt <text>       initial prompt (default: built-in hunting brief)
     --max-turns <n>       CAI turn limit (default 10)
     --price-limit <usd>   CAI price limit (default 1)
-    --timeout <s>         wall-clock budget (default 600)
+    --timeout <s>         wall-clock budget (default 1800)
     --no-sandbox          run without bwrap (explicit opt-out only)
     --dry-run             prove install + route + pipeline on a local
                           fixture; never touches the target
@@ -86,7 +86,7 @@ def main() -> int:
     prompt: str | None = None
     max_turns = 10
     price_limit = "1"
-    timeout = 600
+    timeout = labcai.DEFAULT_TIMEOUT
     sandboxed = True
     dry_run = False
 

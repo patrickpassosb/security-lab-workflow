@@ -56,6 +56,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   hypothesis/experiment ledgers).
 
 ### Fixed
+- `lib/labcai.py` + `lib/cai_fix_message_list.py`: CAI's
+  `cai.util.fix_message_list` has an infinite-loop defect on multi-tool
+  turns (an assistant message with 2+ tool calls ping-pongs its tool
+  results forever in the repair pass). Live-verified on xben-037: the
+  first turn issued 2 parallel `curl` calls and no tool_result ever
+  returned — the LLM loop spun to the 600s wall-clock budget with 0
+  findings. The adapter now injects a deterministic single-pass
+  replacement into the sandboxed CAI process via a `sitecustomize.py`
+  shim on PYTHONPATH (`_cai_shim_dir`; ro-bound under the output dir so
+  the untrusted agent cannot rewrite it; the venv is never modified).
+  Tool results now flow: control run on xben-005 shows 2 tool_calls → 2
+  tool_results → next LLM request (previously 2 calls → 0 results).
+- `bin/lab-cai-run` + `lib/labcai.py`: default wall-clock budget raised
+  600s → 1800s (`DEFAULT_TIMEOUT`; `--timeout` still overrides). 600s
+  was too little for hard autonomous targets (xben-037 blind command
+  injection — the manual solve took ~6 min with hints).
 - `Makefile`: `BIN_BASH_SCRIPTS` `$(shell ...)` assignment contained an
   unbalanced `)` (case pattern) and a `#` (regex), which make parses as
   grouping/comment — `make lint` crashed with a shell syntax error and
@@ -84,6 +100,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `tests/test_lab_new.py::TestProgramRootDetection`: regression tests
   pinning that the lab root is never a program root and that real program
   folders under `$HACKING_LAB` still get program mode.
+- `tests/test_lab_cai.py`: 15 new tests for the `fix_message_list` shim —
+  spin regression on the exact live failure shape (2 tool calls + 2
+  results), upstream-contract equivalence (pairing, synthesis,
+  truncation, content normalization, duplicate-result drop, no input
+  mutation), shim wiring into bwrap argv + env (ro-bound, PYTHONPATH),
+  sitecustomize replacement end-to-end, and the 1800s default budget.
 
 ### Changed
 - `bin/lab-oob`: callback classification now anchors protocol tokens to

@@ -1108,3 +1108,338 @@ class TestRecorderBackedRun:
             json.loads(ln) for ln in ledger.read_text(encoding="utf-8").splitlines() if ln.strip()
         ]
         assert any(c["vuln_class"] == "xss" for c in lines)
+
+
+# ─── fix_message_list shim (upstream spin defect) ─────────────────────────────
+
+
+class TestFixMessageListShim:
+    """The deterministic replacement for CAI's `fix_message_list` must
+    (a) terminate on the multi-tool sequences that spin the upstream
+    function, and (b) preserve the upstream's observable contract on the
+    sequences it handles (pairing, synthesis, truncation, content
+    normalization)."""
+
+    def _multi_tool_messages(self):
+        return [
+            {"role": "user", "content": "hunt"},
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    {
+                        "id": "call_A",
+                        "type": "function",
+                        "function": {
+                            "name": "generic_linux_command",
+                            "arguments": '{"command":"curl -i /"}',
+                        },
+                    },
+                    {
+                        "id": "call_B",
+                        "type": "function",
+                        "function": {
+                            "name": "generic_linux_command",
+                            "arguments": '{"command":"curl -i /robots.txt"}',
+                        },
+                    },
+                ],
+            },
+            {"role": "tool", "tool_call_id": "call_A", "content": "HTTP/1.1 200 OK"},
+            {"role": "tool", "tool_call_id": "call_B", "content": "HTTP/1.1 404 Not Found"},
+        ]
+
+    def test_multi_tool_turn_terminates_and_pairs(self):
+        """The exact shape from the live xben-037 failure (2 parallel
+        tool calls + 2 results) must return instantly with both results
+        paired after their assistant message — the upstream function
+        spins forever on this input."""
+        import cai_fix_message_list
+
+        out = cai_fix_message_list.fix_message_list(self._multi_tool_messages())
+        roles = [m.get("role") for m in out]
+        assert roles == ["user", "assistant", "tool", "tool"]
+        assert [m.get("tool_call_id") for m in out[2:]] == ["call_A", "call_B"]
+        # The assistant message keeps BOTH tool calls.
+        assert [tc["id"] for tc in out[1]["tool_calls"]] == ["call_A", "call_B"]
+
+    def test_multi_tool_with_trailing_message_terminates(self):
+        """Multi-tool turn followed by another user message (the next
+        loop iteration's shape) must also terminate — upstream spins on
+        this too."""
+        import cai_fix_message_list
+
+        msgs = self._multi_tool_messages() + [{"role": "user", "content": "continue"}]
+        out = cai_fix_message_list.fix_message_list(msgs)
+        roles = [m.get("role") for m in out]
+        assert roles == ["user", "assistant", "tool", "tool", "user"]
+        assert out[-1]["content"] == "continue"
+
+    def test_single_tool_contract_matches_upstream(self):
+        """Single tool call + result: identical to the upstream output."""
+        import cai_fix_message_list
+
+        msgs = [
+            {"role": "user", "content": "hi"},
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    {"id": "A", "type": "function", "function": {"name": "x", "arguments": "{}"}}
+                ],
+            },
+            {"role": "tool", "tool_call_id": "A", "content": "out"},
+        ]
+        out = cai_fix_message_list.fix_message_list(msgs)
+        assert [(m.get("role"), m.get("tool_call_id")) for m in out] == [
+            ("user", None),
+            ("assistant", None),
+            ("tool", "A"),
+        ]
+
+    def test_orphan_tool_result_gets_synthetic_assistant(self):
+        """A tool result with no matching assistant call gets a synthetic
+        `unknown_function` assistant message before it (upstream
+        behavior)."""
+        import cai_fix_message_list
+
+        msgs = [
+            {"role": "user", "content": "hi"},
+            {"role": "tool", "tool_call_id": "orphan", "content": "out"},
+        ]
+        out = cai_fix_message_list.fix_message_list(msgs)
+        assert out[1]["role"] == "assistant"
+        assert out[1]["tool_calls"][0]["id"] == "orphan"
+        assert out[1]["tool_calls"][0]["function"]["name"] == "unknown_function"
+        assert out[2] == {"role": "tool", "tool_call_id": "orphan", "content": "out"}
+
+    def test_missing_tool_result_gets_synthetic_response(self):
+        """An assistant tool call without a result gets an
+        'Auto-generated response for <name>' tool message (upstream
+        behavior)."""
+        import cai_fix_message_list
+
+        msgs = [
+            {"role": "user", "content": "hi"},
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    {"id": "A", "type": "function", "function": {"name": "x", "arguments": "{}"}}
+                ],
+            },
+        ]
+        out = cai_fix_message_list.fix_message_list(msgs)
+        assert out[-1]["role"] == "tool"
+        assert out[-1]["tool_call_id"] == "A"
+        assert out[-1]["content"] == "Auto-generated response for x"
+
+    def test_empty_user_dropped_system_emptied(self):
+        """Empty user messages are dropped; empty system messages become
+        '' (upstream behavior)."""
+        import cai_fix_message_list
+
+        out = cai_fix_message_list.fix_message_list(
+            [{"role": "system", "content": None}, {"role": "user", "content": None},
+             {"role": "user", "content": "real"}]
+        )
+        assert [(m.get("role"), m.get("content")) for m in out] == [
+            ("system", ""),
+            ("user", "real"),
+        ]
+
+    def test_tool_ids_truncated_to_40(self):
+        """Tool-call ids longer than 40 chars are truncated on both sides
+        of the pair (provider compatibility, upstream behavior)."""
+        import cai_fix_message_list
+
+        long_id = "x" * 50
+        msgs = [
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    {
+                        "id": long_id,
+                        "type": "function",
+                        "function": {"name": "x", "arguments": "{}"},
+                    }
+                ],
+            },
+            {"role": "tool", "tool_call_id": long_id, "content": "out"},
+        ]
+        out = cai_fix_message_list.fix_message_list(msgs)
+        assert out[0]["tool_calls"][0]["id"] == "x" * 40
+        assert out[1]["tool_call_id"] == "x" * 40
+
+    def test_duplicate_tool_result_dropped(self):
+        """A repeated tool_call_id result is dropped (the API rejects
+        duplicates); the first result wins."""
+        import cai_fix_message_list
+
+        msgs = [
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    {"id": "A", "type": "function", "function": {"name": "x", "arguments": "{}"}}
+                ],
+            },
+            {"role": "tool", "tool_call_id": "A", "content": "out1"},
+            {"role": "tool", "tool_call_id": "A", "content": "out2"},
+        ]
+        out = cai_fix_message_list.fix_message_list(msgs)
+        assert [(m.get("role"), m.get("tool_call_id")) for m in out] == [
+            ("assistant", None),
+            ("tool", "A"),
+        ]
+        assert out[1]["content"] == "out1"
+
+    def test_input_never_mutated(self):
+        """The shim must not mutate the caller's message list."""
+        import cai_fix_message_list
+
+        msgs = self._multi_tool_messages()
+        snapshot = json.dumps(msgs)
+        cai_fix_message_list.fix_message_list(msgs)
+        assert json.dumps(msgs) == snapshot
+
+
+class TestShimWiring:
+    """The adapter must inject the shim into the sandboxed CAI process:
+    sitecustomize hook + replacement module on PYTHONPATH, ro-bound so
+    the untrusted agent cannot rewrite it."""
+
+    def test_shim_dir_contains_sitecustomize_and_module(self, tmp_path):
+        shim_dir = labcai._cai_shim_dir(tmp_path)
+        assert (shim_dir / "sitecustomize.py").exists()
+        assert (shim_dir / "cai_fix_message_list.py").exists()
+        src = (shim_dir / "sitecustomize.py").read_text(encoding="utf-8")
+        assert "fix_message_list" in src
+        assert "cai.util" in src
+
+    def test_shim_files_written_atomically(self, tmp_path):
+        """Both shim files must be written via temp + os.replace (no
+        partial reads possible), and the module must be written before
+        the sitecustomize hook that imports it."""
+        shim_dir = labcai._cai_shim_dir(tmp_path)
+        for name in ("cai_fix_message_list.py", "sitecustomize.py"):
+            path = shim_dir / name
+            assert path.exists()
+            # No leftover temp files.
+            assert not list(shim_dir.glob(f".{name}.tmp-*"))
+        # The module is written first (dependency order): the
+        # sitecustomize hook imports it at interpreter startup.
+        mod_mtime = (shim_dir / "cai_fix_message_list.py").stat().st_mtime
+        hook_mtime = (shim_dir / "sitecustomize.py").stat().st_mtime
+        assert mod_mtime <= hook_mtime
+
+    def test_shim_dir_lives_under_ro_bound_output_dir(self, tmp_path):
+        """The shim dir must be created under the output dir (ro-bound
+        into the sandbox), never under the writable run dir."""
+        run_dir = tmp_path / "run"
+        run_dir.mkdir(parents=True)
+        shim_dir = labcai._cai_shim_dir(run_dir.parent)
+        assert run_dir.parent in shim_dir.parents
+        assert run_dir not in shim_dir.parents
+
+    def test_bwrap_argv_mounts_shim_dir_readonly(self, tmp_path):
+        venv = _make_shim_venv(tmp_path)
+        run_dir = tmp_path / "run"
+        run_dir.mkdir(parents=True)
+        argv = labcai.build_bwrap_argv(
+            "/usr/bin/bwrap",
+            venv,
+            run_dir,
+            run_dir,
+            "ollama_cloud/deepseek-v4-flash:0731",
+            "http://route.test",
+            "not-required",
+            "bug_bounter",
+            "prompt",
+            5,
+            "1",
+            {},
+        )
+        shim_dir = labcai._cai_shim_dir(run_dir.parent)
+        mounts = {}
+        for i, tok in enumerate(argv):
+            if tok in ("--ro-bind", "--ro-bind-try", "--bind"):
+                mounts[argv[i + 1]] = tok
+        assert mounts.get(str(shim_dir)) == "--ro-bind"
+
+    def test_cai_env_sets_pythonpath_to_shim(self, tmp_path):
+        venv = _make_shim_venv(tmp_path)
+        run_dir = tmp_path / "run"
+        run_dir.mkdir(parents=True)
+        env = labcai._cai_env(
+            venv,
+            run_dir,
+            "ollama_cloud/deepseek-v4-flash:0731",
+            "http://route.test",
+            "not-required",
+            "bug_bounter",
+            "prompt",
+            5,
+            "1",
+            {},
+        )
+        assert env["PYTHONPATH"] == str(labcai._cai_shim_dir(run_dir.parent))
+
+    def test_sitecustomize_replaces_upstream_function(self, tmp_path):
+        """End-to-end: a python process started with the shim on
+        PYTHONPATH must have `cai.util.fix_message_list` replaced by the
+        deterministic implementation. A fake `cai.util` package on
+        PYTHONPATH stands in for the real CAI install, so the wiring is
+        tested without CAI installed (CI has no CAI venv)."""
+        import subprocess
+
+        # Fake `cai.util` package: a real `fix_message_list` that spins
+        # on multi-tool turns (the upstream defect) would hang the test,
+        # so the fake uses a marker function the shim must replace.
+        fake_cai = tmp_path / "fakecai"
+        (fake_cai / "cai").mkdir(parents=True)
+        (fake_cai / "cai" / "__init__.py").write_text("", encoding="utf-8")
+        (fake_cai / "cai" / "util.py").write_text(
+            "def fix_message_list(messages):\n"
+            "    return [{'role': 'marker', 'content': 'upstream'}] + list(messages)\n",
+            encoding="utf-8",
+        )
+
+        run_dir = tmp_path / "run"
+        run_dir.mkdir(parents=True)
+        shim_dir = labcai._cai_shim_dir(run_dir.parent)
+        code = (
+            "import cai.util as u\n"
+            "import cai_fix_message_list as f\n"
+            "print(u.fix_message_list.__module__)\n"
+            "msgs = [{'role': 'user', 'content': 'hi'},\n"
+            "        {'role': 'assistant', 'content': None, 'tool_calls': [\n"
+            "            {'id': 'A', 'type': 'function',\n"
+            "             'function': {'name': 'x', 'arguments': '{}'}},\n"
+            "            {'id': 'B', 'type': 'function',\n"
+            "             'function': {'name': 'y', 'arguments': '{}'}}]},\n"
+            "        {'role': 'tool', 'tool_call_id': 'A', 'content': 'o1'},\n"
+            "        {'role': 'tool', 'tool_call_id': 'B', 'content': 'o2'}]\n"
+            "r = u.fix_message_list(msgs)\n"
+            "print([m.get('role') for m in r])\n"
+        )
+        proc = subprocess.run(
+            [sys.executable, "-c", code],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            env={**os.environ, "PYTHONPATH": str(shim_dir) + os.pathsep + str(fake_cai)},
+        )
+        assert proc.returncode == 0, proc.stderr
+        assert "cai_fix_message_list" in proc.stdout
+        assert "['user', 'assistant', 'tool', 'tool']" in proc.stdout
+
+    def test_default_timeout_is_1800(self):
+        """The wall-clock budget default must be 1800s (600s was too
+        little for hard autonomous targets); --timeout still overrides."""
+        import inspect
+
+        assert labcai.DEFAULT_TIMEOUT == 1800
+        sig = inspect.signature(labcai.run)
+        assert sig.parameters["timeout"].default == 1800

@@ -169,8 +169,17 @@ to hunting: **rejected submission → dead-end lesson → next hunt avoids it.**
 - Findings are parsed from CAI's session-recorder JSONL (headless mode
   never renders panels to stdout). rc=1 (EOFError) and rc=124 (wall-clock
   budget) are NORMAL budget ends (exit 0); only hard crashes exit 6.
-  Known upstream CAI defect: `fix_message_list` can spin on multi-tool
-  turns — the adapter contains it via `--timeout`.
+- The upstream `fix_message_list` spin defect (multi-tool turns) is
+  neutralized by an injected deterministic replacement
+  (`lib/cai_fix_message_list.py`, wired via a `sitecustomize.py` shim on
+  PYTHONPATH — see `lib/labcai.py` `_cai_shim_dir`); the venv is never
+  modified. Default wall-clock budget is 1800s (`--timeout` overrides).
+- Known limitation (2026-08-07, live-verified): the model occasionally
+  fills the `generic_linux_command` `session_id` arg with junk (e.g.
+  "recon"), which CAI routes to a session lookup that fails with
+  "Session <id> not found" — the agent then sees useless tool output and
+  may stop early. Model nondeterminism, not a plumbing bug; re-run to
+  get a fresh draw.
 
 Schema: `schemas/hunt-lesson-v1.schema.json`. Library: `lib/huntlesson.py` (sole owner of the markdown renderer).
 
