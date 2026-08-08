@@ -41,7 +41,11 @@ import yaml
 # ─── Lab root ─────────────────────────────────────────────────────────────────
 
 LAB = Path(os.environ.get("HACKING_LAB", os.path.expanduser("~/security-lab")))
-AUDIT_LOG_PATH = LAB / "findings" / ".agent-audit.jsonl"
+# Canonical audit-log location (AGENTS.md + scope.yaml). The runtime
+# AUDIT_LOG_PATH below can be redirected (tests, alternate lab roots); this
+# constant is the documented default and the target of audit-log syncing.
+AUDIT_LOG_DEFAULT = LAB / "findings" / ".agent-audit.jsonl"
+AUDIT_LOG_PATH = AUDIT_LOG_DEFAULT
 
 # ─── ANSI colors ──────────────────────────────────────────────────────────────
 
@@ -188,6 +192,124 @@ def atomic_append_jsonl(path: Path, entry: dict[str, Any]) -> None:
 
 
 # ─── Audit log (canonical schema) ────────────────────────────────────────────
+
+
+def audit_log_copy(path: Path | None = None) -> Path:
+    """Return the effective audit-log path, resolving `~` and env vars.
+
+    Mirrors the `~/...` style used by engagement scope files. Defaults to
+    AUDIT_LOG_PATH (which tests and callers may redirect).
+    """
+    p = Path(path) if path is not None else AUDIT_LOG_PATH
+    return p.expanduser()
+
+
+def audit_read(path: Path | None = None) -> tuple[list[dict[str, Any]], list[str]]:
+    """Read an audit log; return (valid_entries, corrupt_lines).
+
+    Corrupt lines are quarantined to `<log>.corrupt.jsonl` (append) rather
+    than dropped — evidence is preserved even when a writer produced a
+    malformed line. A log that was truncated mid-line (e.g. a writer killed
+    while overwriting) surfaces as a trailing corrupt line, so reads can
+    detect clobbering.
+    """
+    log_path = audit_log_copy(path)
+    if not log_path.is_file():
+        return [], []
+    entries: list[dict[str, Any]] = []
+    corrupt: list[str] = []
+    try:
+        text = log_path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return [], []
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            entries.append(json.loads(line))
+        except json.JSONDecodeError:
+            corrupt.append(line)
+    if corrupt:
+        quarantine = log_path.with_name(log_path.name + ".corrupt.jsonl")
+        with open(quarantine, "a", encoding="utf-8") as q:
+            for line in corrupt:
+                q.write(line + "\n")
+    return entries, corrupt
+
+
+def audit_sync(
+    from_path: Path | None = None,
+    *,
+    to_path: Path | None = None,
+    report: bool = False,
+) -> int:
+    """Append-only sync: copy entries missing from `to_path` (default:
+    AUDIT_LOG_DEFAULT, the canonical log) into it.
+
+    The lab keeps a canonical audit log at `~/security-lab/findings/`
+    (AGENTS.md + scope.yaml). Engagement files may point at another copy
+    (e.g. bounty-notion.yaml's `~/hacking/findings/`); a worker writing to
+    a non-canonical copy must not fork the record. `audit_sync` merges
+    missing entries from a non-canonical log into the canonical one.
+
+    Merge rule: an entry is missing iff no line in the canonical log has
+    the same (ts, agent, action, target, engagement) tuple. Entries are
+    copied verbatim (byte-for-byte JSONL lines), preserving their original
+    ts — re-timestamping would reorder history. Appends use the same
+    flock'd append path as audit(); the sync never rewrites or deletes
+    existing lines, so it cannot clobber prior entries.
+
+    Returns the number of entries appended. When report=True, prints a
+    per-entry summary line for each merged entry (mirrors lab-audit-sync).
+    """
+    src = audit_log_copy(from_path)
+    dst = audit_log_copy(to_path) if to_path is not None else audit_log_copy(AUDIT_LOG_DEFAULT)
+    if not src.is_file():
+        return 0
+    dst.parent.mkdir(parents=True, exist_ok=True)
+
+    existing: set[tuple[str, str, str, str, str]] = set()
+    entries, _ = audit_read(dst)
+    for e in entries:
+        existing.add((
+            e.get("ts", ""),
+            e.get("agent", ""),
+            e.get("action", ""),
+            e.get("target", ""),
+            e.get("engagement", ""),
+        ))
+
+    lines = src.read_text(encoding="utf-8", errors="replace").splitlines()
+    appended = 0
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            e = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        key = (
+            e.get("ts", ""),
+            e.get("agent", ""),
+            e.get("action", ""),
+            e.get("target", ""),
+            e.get("engagement", ""),
+        )
+        if key in existing:
+            continue
+        atomic_append_jsonl(dst, e)
+        existing.add(key)
+        appended += 1
+        if report:
+            print(
+                f"  synced {e.get('ts', '?')} {e.get('agent', '?')} "
+                f"{e.get('action', '?')} target={e.get('target', '')!r} "
+                f"engagement={e.get('engagement', '')!r}"
+            )
+    return appended
+
 
 def audit(
     action: str,
@@ -504,7 +626,7 @@ __all__ = [
     "extract_section",
     "validate_name", "require_valid_name",
     "atomic_write", "atomic_append_jsonl",
-    "audit",
+    "audit", "audit_log_copy", "audit_read", "audit_sync",
     "minimal_env",
     "is_safe_url", "is_valid_https_url",
     "extract_host", "match_pattern", "check_target_scope", "load_yaml_file",

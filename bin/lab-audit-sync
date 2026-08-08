@@ -1,0 +1,160 @@
+#!/usr/bin/env python3
+"""lab-audit-sync — merge non-canonical audit-log copies into the canonical one.
+
+The lab's canonical audit log is `~/security-lab/findings/.agent-audit.jsonl`
+(AGENTS.md + scope.yaml). Engagement scope files may declare a different
+`evidence.audit_log` (e.g. bounty-notion.yaml points at `~/hacking/findings/`),
+and a worker writing only to that copy forks the record. This tool merges the
+missing entries into the canonical log.
+
+The sync is append-only: existing lines in the canonical log are never
+rewritten or deleted, so it cannot clobber prior entries (the failure mode
+that erased 17 entries in the live lab).
+
+Usage:
+    lab-audit-sync --from <path>              # merge <path> -> canonical log
+    lab-audit-sync --from <path> --to <path>  # merge into a specific log
+    lab-audit-sync --check <path>             # report divergence, write nothing
+
+Exit codes:
+    0 = sync complete (or --check: no divergence)
+    1 = bad input (missing --from, unreadable log)
+    2 = --check found divergence
+
+Audit: every sync invocation writes one audit entry (action=lab-audit-sync)
+to the destination log.
+"""
+
+from __future__ import annotations
+
+import json
+import sys
+from pathlib import Path
+
+# Import shared labutil helpers (sys.path hack -- E402-ignored per ruff.toml).
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib"))
+import labutil  # noqa: E402
+
+
+def _usage() -> str:
+    return (
+        "usage: lab-audit-sync --from <path> [--to <path>] [--check]\n"
+        "       lab-audit-sync --check <path>\n"
+    )
+
+
+def main() -> int:
+    args = sys.argv[1:]
+    if not args or args[0] in ("-h", "--help"):
+        print(__doc__)
+        return 0
+
+    from_path: str | None = None
+    to_path: str | None = None
+    check_only = False
+
+    i = 0
+    while i < len(args):
+        a = args[i]
+        if a == "--from" and i + 1 < len(args):
+            from_path = args[i + 1]
+            i += 2
+        elif a.startswith("--from="):
+            from_path = a.split("=", 1)[1]
+            i += 1
+        elif a == "--to" and i + 1 < len(args):
+            to_path = args[i + 1]
+            i += 2
+        elif a.startswith("--to="):
+            to_path = a.split("=", 1)[1]
+            i += 1
+        elif a == "--check":
+            check_only = True
+            i += 1
+        elif not a.startswith("-"):
+            # Positional form: --check <path> (or bare <path> as --from).
+            if (check_only and from_path is None) or from_path is None:
+                from_path = a
+            else:
+                print(f"unexpected argument: {a}", file=sys.stderr)
+                print(_usage(), file=sys.stderr)
+                return 1
+            i += 1
+        else:
+            print(f"unknown option: {a}", file=sys.stderr)
+            print(_usage(), file=sys.stderr)
+            return 1
+
+    if not from_path:
+        print("error: --from <path> is required", file=sys.stderr)
+        print(_usage(), file=sys.stderr)
+        return 1
+
+    src = Path(from_path).expanduser()
+    if not src.is_file():
+        print(f"error: audit log not found: {src}", file=sys.stderr)
+        return 1
+
+    dst = (
+        Path(to_path).expanduser()
+        if to_path
+        else labutil.audit_log_copy(labutil.AUDIT_LOG_DEFAULT)
+    )
+
+    if check_only:
+        # Dry-run: how many entries are missing from the destination?
+        # Do not write the destination; quarantine is limited to reads.
+        if not dst.is_file():
+            existing: set[tuple[str, str, str, str, str]] = set()
+        else:
+            entries, _ = labutil.audit_read(dst)
+            existing = {
+                (
+                    e.get("ts", ""),
+                    e.get("agent", ""),
+                    e.get("action", ""),
+                    e.get("target", ""),
+                    e.get("engagement", ""),
+                )
+                for e in entries
+            }
+        missing = 0
+        for line in src.read_text(encoding="utf-8", errors="replace").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                e = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            key = (
+                e.get("ts", ""),
+                e.get("agent", ""),
+                e.get("action", ""),
+                e.get("target", ""),
+                e.get("engagement", ""),
+            )
+            if key not in existing:
+                missing += 1
+                print(
+                    f"  missing {e.get('ts', '?')} {e.get('agent', '?')} "
+                    f"{e.get('action', '?')} target={e.get('target', '')!r} "
+                    f"engagement={e.get('engagement', '')!r}"
+                )
+        print(f"{missing} entr{'y' if missing == 1 else 'ies'} missing from {dst}")
+        return 2 if missing else 0
+
+    n = labutil.audit_sync(from_path, to_path=Path(to_path) if to_path else None, report=True)
+    print(f"synced {n} entr{'y' if n == 1 else 'ies'} into {dst}")
+    labutil.audit(
+        "lab-audit-sync",
+        target=str(src),
+        engagement="",
+        exit_code=0,
+        detail=f"synced {n} entries into {dst}",
+    )
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

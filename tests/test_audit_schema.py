@@ -52,6 +52,9 @@ def _import_extensionless(name: str, path: Path):
     return mod
 
 
+lab_audit_sync = _import_extensionless("lab_audit_sync", BIN_DIR / "lab-audit-sync")
+
+
 def _import_lab_scope():
     """Import bin/lab-scope (extensionless) for migration tests."""
     return _import_extensionless("lab_scope", BIN_DIR / "lab-scope")
@@ -791,3 +794,188 @@ class TestQuarantinePolicy:
         assert quarantine.exists(), "quarantine file not created"
         q_content = quarantine.read_text(encoding="utf-8")
         assert corrupt_line in q_content
+
+
+# ─── 6. Append-only sync (audit_read / audit_sync / lab-audit-sync) ───────────
+# Regression: a worker clobbered 17 prior audit entries. audit_sync must
+# never rewrite or delete existing lines — only append missing ones.
+
+def _mk_entry(ts, action, agent="sync-agent", target="", engagement=""):
+    e = {"ts": ts, "agent": agent, "action": action}
+    if target:
+        e["target"] = target
+    if engagement:
+        e["engagement"] = engagement
+    return e
+
+
+def _write_log(path, entries):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        "".join(json.dumps(e, sort_keys=True) + "\n" for e in entries),
+        encoding="utf-8",
+    )
+
+
+class TestAuditRead:
+    def test_reads_valid_entries(self, tmp_path):
+        log = tmp_path / "a.jsonl"
+        _write_log(log, [_mk_entry("2026-08-01T00:00:00Z", "one")])
+        entries, corrupt = labutil.audit_read(log)
+        assert len(entries) == 1
+        assert entries[0]["action"] == "one"
+        assert corrupt == []
+
+    def test_missing_file_returns_empty(self, tmp_path):
+        entries, corrupt = labutil.audit_read(tmp_path / "nope.jsonl")
+        assert entries == []
+        assert corrupt == []
+
+    def test_corrupt_lines_quarantined(self, tmp_path):
+        log = tmp_path / "a.jsonl"
+        log.parent.mkdir(parents=True, exist_ok=True)
+        log.write_text(
+            json.dumps(_mk_entry("2026-08-01T00:00:00Z", "ok")) + "\n"
+            + '{"ts": "truncated\n',
+            encoding="utf-8",
+        )
+        entries, corrupt = labutil.audit_read(log)
+        assert len(entries) == 1
+        assert len(corrupt) == 1
+        quarantine = log.with_name(log.name + ".corrupt.jsonl")
+        assert quarantine.exists()
+        assert '{"ts": "truncated' in quarantine.read_text(encoding="utf-8")
+
+
+class TestAuditSync:
+    def test_merges_missing_entries(self, tmp_path, monkeypatch):
+        canonical = tmp_path / "canonical.jsonl"
+        monkeypatch.setattr(labutil, "AUDIT_LOG_DEFAULT", canonical)
+        other = tmp_path / "other.jsonl"
+        _write_log(canonical, [_mk_entry("2026-08-01T00:00:00Z", "old")])
+        _write_log(other, [
+            _mk_entry("2026-08-01T00:00:00Z", "old"),      # dup — skipped
+            _mk_entry("2026-08-02T00:00:00Z", "new-a"),
+            _mk_entry("2026-08-03T00:00:00Z", "new-b"),
+        ])
+        n = labutil.audit_sync(other)
+        assert n == 2
+        lines = canonical.read_text(encoding="utf-8").splitlines()
+        assert len(lines) == 3  # 1 original + 2 merged
+
+    def test_never_truncates_existing_lines(self, tmp_path, monkeypatch):
+        canonical = tmp_path / "canonical.jsonl"
+        monkeypatch.setattr(labutil, "AUDIT_LOG_DEFAULT", canonical)
+        other = tmp_path / "other.jsonl"
+        _write_log(canonical, [_mk_entry("2026-08-01T00:00:00Z", "keep-me")])
+        _write_log(other, [_mk_entry("2026-08-02T00:00:00Z", "merge-me")])
+        labutil.audit_sync(other)
+        labutil.audit_sync(other)  # idempotent — second run adds nothing
+        lines = canonical.read_text(encoding="utf-8").splitlines()
+        assert len(lines) == 2
+        assert all("keep-me" in line or "merge-me" in line for line in lines)
+
+    def test_preserves_original_timestamps(self, tmp_path, monkeypatch):
+        canonical = tmp_path / "canonical.jsonl"
+        monkeypatch.setattr(labutil, "AUDIT_LOG_DEFAULT", canonical)
+        other = tmp_path / "other.jsonl"
+        _write_log(other, [_mk_entry("2026-07-01T00:00:00Z", "historical")])
+        labutil.audit_sync(other)
+        entries, _ = labutil.audit_read(canonical)
+        assert entries[0]["ts"] == "2026-07-01T00:00:00Z"
+
+    def test_missing_source_noop(self, tmp_path, monkeypatch):
+        canonical = tmp_path / "canonical.jsonl"
+        monkeypatch.setattr(labutil, "AUDIT_LOG_DEFAULT", canonical)
+        n = labutil.audit_sync(tmp_path / "missing.jsonl")
+        assert n == 0
+        assert not canonical.exists()
+
+    def test_skips_unparseable_source_lines(self, tmp_path, monkeypatch):
+        canonical = tmp_path / "canonical.jsonl"
+        monkeypatch.setattr(labutil, "AUDIT_LOG_DEFAULT", canonical)
+        other = tmp_path / "other.jsonl"
+        other.parent.mkdir(parents=True, exist_ok=True)
+        other.write_text(
+            json.dumps(_mk_entry("2026-08-02T00:00:00Z", "good")) + "\n"
+            + "{garbage\n",
+            encoding="utf-8",
+        )
+        n = labutil.audit_sync(other)
+        assert n == 1
+
+
+class TestLabAuditSyncCli:
+    """CLI tests for bin/lab-audit-sync (sync + check modes)."""
+
+    def _run(self, monkeypatch, *args):
+        monkeypatch.setattr(sys, "argv", ["lab-audit-sync", *args])
+        return lab_audit_sync.main()
+
+    def test_help(self, capsys, monkeypatch):
+        rc = self._run(monkeypatch, "--help")
+        assert rc == 0
+        assert "lab-audit-sync" in capsys.readouterr().out
+
+    def test_requires_from(self, capsys, monkeypatch):
+        # No args -> help text, exit 0 (CLI help convention).
+        rc = self._run(monkeypatch)
+        assert rc == 0
+        assert "lab-audit-sync" in capsys.readouterr().out
+
+    def test_missing_source_errors(self, capsys, tmp_path, monkeypatch):
+        rc = self._run(monkeypatch, "--from", str(tmp_path / "nope.jsonl"))
+        assert rc == 1
+
+    def test_sync_writes_canonical(self, capsys, tmp_path, monkeypatch):
+        canonical = tmp_path / "canonical.jsonl"
+        monkeypatch.setattr(labutil, "AUDIT_LOG_DEFAULT", canonical)
+        other = tmp_path / "other.jsonl"
+        _write_log(other, [_mk_entry("2026-08-02T00:00:00Z", "cli-merge")])
+        rc = self._run(monkeypatch, "--from", str(other))
+        assert rc == 0
+        entries, _ = labutil.audit_read(canonical)
+        assert len(entries) == 1
+        assert entries[0]["action"] == "cli-merge"
+
+    def test_sync_audits_itself(self, capsys, tmp_path, monkeypatch):
+        canonical = tmp_path / "canonical.jsonl"
+        monkeypatch.setattr(labutil, "AUDIT_LOG_DEFAULT", canonical)
+        monkeypatch.setattr(labutil, "AUDIT_LOG_PATH", canonical)
+        other = tmp_path / "other.jsonl"
+        _write_log(other, [_mk_entry("2026-08-02T00:00:00Z", "cli-merge")])
+        self._run(monkeypatch, "--from", str(other))
+        entries, _ = labutil.audit_read(canonical)
+        actions = [e["action"] for e in entries]
+        assert actions.count("lab-audit-sync") == 1
+
+    def test_check_reports_divergence(self, capsys, tmp_path, monkeypatch):
+        canonical = tmp_path / "canonical.jsonl"
+        monkeypatch.setattr(labutil, "AUDIT_LOG_DEFAULT", canonical)
+        other = tmp_path / "other.jsonl"
+        _write_log(canonical, [_mk_entry("2026-08-01T00:00:00Z", "old")])
+        _write_log(other, [_mk_entry("2026-08-02T00:00:00Z", "new-a")])
+        rc = self._run(monkeypatch, "--check", str(other))
+        out = capsys.readouterr().out
+        assert rc == 2
+        assert "1 entry missing" in out
+
+    def test_check_clean_returns_zero(self, capsys, tmp_path, monkeypatch):
+        canonical = tmp_path / "canonical.jsonl"
+        monkeypatch.setattr(labutil, "AUDIT_LOG_DEFAULT", canonical)
+        other = tmp_path / "other.jsonl"
+        _write_log(canonical, [_mk_entry("2026-08-01T00:00:00Z", "same")])
+        _write_log(other, [_mk_entry("2026-08-01T00:00:00Z", "same")])
+        rc = self._run(monkeypatch, "--check", str(other))
+        assert rc == 0
+
+    def test_check_does_not_write(self, capsys, tmp_path, monkeypatch):
+        canonical = tmp_path / "canonical.jsonl"
+        monkeypatch.setattr(labutil, "AUDIT_LOG_DEFAULT", canonical)
+        other = tmp_path / "other.jsonl"
+        _write_log(canonical, [_mk_entry("2026-08-01T00:00:00Z", "old")])
+        _write_log(other, [_mk_entry("2026-08-02T00:00:00Z", "new-a")])
+        before = canonical.read_text(encoding="utf-8")
+        rc = self._run(monkeypatch, "--check", str(other))
+        assert rc == 2
+        assert canonical.read_text(encoding="utf-8") == before
