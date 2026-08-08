@@ -20,6 +20,13 @@ deliberately small and conservative. Sink hits are hypotheses, never
 verdicts — the lab's verification gates (lab-verify / lab-verify-findings)
 decide. The CLI performs no network I/O and no subprocess execution.
 
+TypeScript coverage: TS gets its own sink set (child_process in CJS+ESM
+forms, fs sync/promises, process.env reads, Deno APIs, file writes),
+entry-point heuristics (node shebang, require.main, import.meta.main,
+Deno.serve, process.argv, framework imports), ESM/CJS import resolution
+(bare package specifiers never resolve to tree files), and build-output
+dirs (out/, .turbo/, .vite/, ...) are skipped.
+
 Usage:
     lab-static-review <dir> [--out <report.md>]
     lab-static-review --help
