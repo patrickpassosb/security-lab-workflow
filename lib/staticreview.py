@@ -15,11 +15,13 @@ agentic review. Four stages:
                    loop consumes.
 
 This is a SCAFFOLD: the sink patterns and entry-point heuristics are
-deliberately small and conservative. It performs no network I/O and no
-subprocess execution. All inputs are data; output is a ranked worklist, never
-a verdict (the lab's verification gates decide verdicts).
-
-The module is pure except for reading the source tree the caller points it at.
+deliberately small and conservative. Sink hits are hypotheses, never
+verdicts — the lab's verification gates (lab-verify / lab-verify-findings)
+decide. The module is pure except for reading the source tree the caller
+points it at. TypeScript gets dedicated sinks (child_process CJS+ESM,
+fs sync/promises, process.env, Deno), entry points, and import
+resolution (bare package specifiers never resolve to tree files);
+build-output dirs (out/, .turbo/, .vite/) are skipped.
 """
 
 from __future__ import annotations
@@ -76,11 +78,34 @@ _SINKS: dict[str, list[tuple[str, str]]] = {
         ("path-traversal", r"\b(fs\.(readFile|writeFile|createReadStream)|path\.join)\s*\("),
     ],
     "typescript": [
-        ("command-exec", r"\b(child_process\.(exec|execSync|spawn|spawnSync)|exec\(|eval\()"),
+        # TS-first sinks, beyond the JS-common set: child_process in both
+        # CommonJS (require) and ESM (import) forms, fs/promises and sync
+        # fs (imported or namespaced), process.env reads (secrets/side-input),
+        # Deno APIs, and template-literal command execution (`exec(`...`)`).
+        (
+            "command-exec",
+            r"\b(child_process\.(exec|execSync|spawn|spawnSync)|exec\(|eval\(|\bspawn(?:Sync)?\s*\()",
+        ),
+        (
+            "command-exec",
+            r"\bimport\s*\{[^}]*\b(exec|execSync|spawn|spawnSync)\b[^}]*\}\s*from\s*['\"]child_process['\"]",
+        ),
         ("eval", r"\beval\s*\("),
         ("sql", r"\b(query|execute|raw)\s*\("),
         ("deserialize", r"\b(JSON\.parse|eval)\s*\("),
-        ("path-traversal", r"\b(fs\.(readFile|writeFile|createReadStream)|path\.join)\s*\("),
+        (
+            "path-traversal",
+            r"\b(fs\.(readFile|writeFile|createReadStream|readFileSync|writeFileSync|readdir|readdirSync|rm|rmSync|cp|cpSync)|path\.join|path\.resolve|\b(readFileSync|readFile)\s*\()",
+        ),
+        (
+            "file-write",
+            r"\b(fs\.(writeFile|writeFileSync|appendFile|createWriteStream)|Deno\.writeFile|\b(writeFileSync|writeFile|appendFile)\s*\()",
+        ),
+        ("env-read", r"\bprocess\.env\b"),
+        (
+            "deno",
+            r"\b(Deno\.(run|Command|spawn|spawnChild|readFile|writeFile|mkdir|remove|chmod|link|symlink|copyFile))",
+        ),
     ],
     "go": [
         ("command-exec", r"\b(os/exec\.(Command|CommandContext)|exec\.Command)\s*\("),
@@ -140,8 +165,26 @@ _ENTRY_POINTS: dict[str, list[tuple[str, str]]] = {
         ("framework", r"\brequire\(['\"](express|fastify|koa|http)['\"]\)"),
     ],
     "typescript": [
-        ("main", r"\b(export\s+(default|function|const)|app\.(get|post|put|delete|listen)\s*\()"),
-        ("framework", r"\b(from\s+['\"](express|fastify|koa|http)['\"])"),
+        # Entry points beyond the shared export/app pattern: node shebang
+        # CLIs, require.main (CJS entry), import.meta.main (Deno entry),
+        # Deno.serve bootstrap, process.argv consumers, and serverless
+        # handlers (named `handler` — generic `export function/const`
+        # marks a module, not an entry).
+        ("main", r"^#!.*\bnode\b"),
+        ("main", r"\brequire\.main\s*===?\s*module\b"),
+        ("main", r"\bimport\.meta\.main\b"),
+        ("main", r"\bDeno\.(serve|mainModule)\b"),
+        ("main", r"\bprocess\.argv\b"),
+        ("main", r"\bexport\s+(?:default\s+)?(?:async\s+)?function\s+handler\b"),
+        ("main", r"\bexport\s+const\s+handler\b"),
+        (
+            "main",
+            r"\bapp\.(get|post|put|delete|listen)\s*\(",
+        ),
+        (
+            "framework",
+            r"\b(from\s+['\"](express|fastify|koa|http)['\"])",
+        ),
     ],
     "go": [
         ("main", r"^\s*func\s+main\s*\("),
@@ -178,6 +221,8 @@ _SKIP_DIRS: frozenset[str] = frozenset({
     ".git", ".venv", "venv", "node_modules", "vendor", "dist", "build",
     "__pycache__", ".tox", ".mypy_cache", ".pytest_cache", "target",
     "coverage", ".next", ".nuxt",
+    # TS/JS build-artifact and bundler dirs: generated output, not source.
+    "out", "dist-ts", ".turbo", ".vite", "esbuild", ".esbuild", "rollup",
 })
 
 # ─── Errors ──────────────────────────────────────────────────────────────────
@@ -327,7 +372,18 @@ def _imports_of(fpath: Path, lang: str) -> list[str]:
             r"^\s*(?:from\s+([\w.]+)\s+import|import\s+([\w.]+))", text, re.M
         ):
             out.append(m.group(1) or m.group(2))
-    elif lang in ("javascript", "typescript"):
+    elif lang == "typescript":
+        # ESM: `import { x } from 'child_process'` / `import x from 'y'`;
+        # `import('y')` dynamic imports; `import type` re-exports; node:
+        # specifiers. Also CJS `require('...')`.
+        for m in re.finditer(
+            r"""import\s*(?:type\s+)?(?:[^'"]*\s+from\s+)?['"]([^'"]+)['"]""",
+            text,
+        ):
+            out.append(m.group(1))
+        for m in re.finditer(r"""require\s*\(\s*['"]([^'"]+)['"]\s*\)""", text):
+            out.append(m.group(1))
+    elif lang in ("javascript",):
         for m in re.finditer(r"(?:require\(['\"]|from\s+['\"])([^'\"]+)['\"]", text):
             out.append(m.group(1))
     elif lang == "go":
@@ -349,18 +405,36 @@ def _imports_of(fpath: Path, lang: str) -> list[str]:
     return out
 
 
-def _file_matches_import(rel_path: str, import_target: str) -> bool:
+def _file_matches_import(rel_path: str, import_target: str, lang: str = "") -> bool:
     """Heuristic: does `rel_path` correspond to `import_target`?
 
     Matches when the import target's last component appears in the path
     (e.g. import "auth" matches "src/auth.py" / "auth/index.js"), or the
     path stem equals the target's last component. Conservative on purpose —
     a miss only downgrades reachability, never upgrades it.
+
+    TS/JS specifics (lang in typescript/javascript): a bare specifier like
+    "child_process" is third-party (resolved from node_modules, never a
+    tree file), so it never matches; an extensionless or ./-relative
+    specifier ("../auth", "./helpers/util") matches on its trailing path
+    components; trailing "/index" and explicit extensions are stripped
+    before comparison. Other languages keep the plain last-component rule
+    (their bare imports are local modules).
     """
     stem = Path(rel_path).stem
     last = import_target.rstrip("/").split("/")[-1]
-    if last in ("", "."):
+    if last in ("", ".", ".."):
         return False
+    if lang in ("typescript", "javascript"):
+        if not import_target.startswith((".", "/")):
+            # Bare specifier: package name (possibly node: or @scope/pkg) —
+            # resolves outside the tree, never a local file.
+            return False
+        # Strip ./ or ../ prefix and any explicit extension for comparison.
+        cleaned = import_target.lstrip("./").split(".")[0].rstrip("/")
+        last = cleaned.split("/")[-1]
+        if last in ("", "index"):
+            return False
     if stem == last:
         return True
     return last in rel_path.replace("\\", "/").split("/")
@@ -391,7 +465,9 @@ def reachability(
         resolved: set[str] = set()
         for t in targets:
             for other in inv["files"]:
-                if other["path"] != f["path"] and _file_matches_import(other["path"], t):
+                if other["path"] != f["path"] and _file_matches_import(
+                    other["path"], t, f["lang"]
+                ):
                     resolved.add(other["path"])
         imports[f["path"]] = resolved
 
@@ -477,11 +553,31 @@ def render_report(
         lines.append(f"- `{h['path']}:{h['line']}` — {h['sink']} ({h['lang']})")
     lines.append("")
 
+    lines.append("## Sink hits by class (all files)")
+    lines.append("")
+    if not hits:
+        lines.append("(none)")
+    else:
+        by_class: dict[str, int] = {}
+        for h in hits:
+            by_class[h["sink"]] = by_class.get(h["sink"], 0) + 1
+        for sink in sorted(by_class):
+            lines.append(f"- {sink}: {by_class[sink]}")
+    lines.append("")
+
     lines.append("## Notes")
     lines.append("")
     lines.append(
         "- This is a scaffold: sink patterns and entry-point heuristics are "
         "conservative and language-specific."
+    )
+    lines.append(
+        "- TS/JS caveats: reachability treats bare package specifiers "
+        "(`child_process`, `@scope/pkg`, `node:fs`) as third-party and never "
+        "resolves them to tree files; `node_modules`, `out/`, `.turbo/` and "
+        "other build-output dirs are skipped. `process.env` reads, "
+        "`fs.*Sync` calls, and Deno APIs are flagged as `env-read` / "
+        "`file-write` / `deno` sinks."
     )
     lines.append(
         "- Reachability is a heuristic (import-name matching), not a call "
