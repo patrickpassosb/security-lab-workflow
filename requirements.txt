@@ -6,7 +6,7 @@
 # Then verify hashes against the PyPI release before committing.
 
 # Linting (CI)
-ruff==0.16.0
+ruff==0.16.2
 #    hash: sha256:xxx  # add after first pip-compile
 
 # Runtime deps for bin/ scripts
