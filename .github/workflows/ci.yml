@@ -277,6 +277,6 @@ jobs:
           if-no-files-found: ignore
       - name: Upload SARIF to GitHub code scanning  # T2-23
         if: always()
-        uses: github/codeql-action/upload-sarif@f09c1c0a94de965c15400f5634aa42fac8fb8f88  # v3.27.5
+        uses: github/codeql-action/upload-sarif@ff2f1c621b7f889edc0d3c761ac2e6a3f8cdb0dd  # v4.37.7
         with:
           sarif_file: results.sarif
