@@ -165,7 +165,7 @@ jobs:
           print(f'coverage baseline: line={t.attrib.get(\"line-rate\",\"?\")} branch={t.attrib.get(\"branch-rate\",\"?\")} (advisory, not enforced)')"
       - name: Upload test results
         # Always upload JUnit XML + coverage, not just on failure (item 8).
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         if: always()
         with:
           name: pytest-results-py${{ matrix.python-version }}
@@ -175,7 +175,7 @@ jobs:
           if-no-files-found: ignore
       - name: Upload test artifacts on failure
         if: failure()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
           name: pytest-output-py${{ matrix.python-version }}
           path: |
@@ -270,7 +270,7 @@ jobs:
             --log-level=info
       - name: Upload SARIF report
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
           name: gitleaks-results.sarif
           path: results.sarif
